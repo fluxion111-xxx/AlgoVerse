@@ -1,5 +1,4 @@
 .site-shell.home-restored {
-  --scene-scale: 1;
   --orange: #b7592d;
   --orange-dark: #8e3517;
   --ink: #221a14;
@@ -8,6 +7,8 @@
   --paper-size: 560px auto;
   background: radial-gradient(ellipse at 58% 42%, #3c3833, #252321 78%);
 }
+
+.home-layout { position: relative; }
 
 .home-restored::before {
   content: '';
@@ -106,13 +107,11 @@
 .home-restored .flow-four { animation-delay: .30s; }
 
 @media (min-width: 1081px) {
-  .site-shell.home-restored { --scene-top: 0px; --scene-height: calc(940 * var(--v)); --paper-size: calc(930 * var(--u)) auto; }
-  .home-restored .site-header { left: calc(74 * var(--u)); width: calc(760 * var(--u)); height: calc(62 * var(--v)); gap: calc(36 * var(--u)); }
+  .site-shell.home-restored { --scene-height: calc(940 * var(--v)); --paper-size: calc(930 * var(--u)) auto; }
+  .home-restored .site-header { inset-inline: var(--collage-nav-inset); width: auto; height: var(--collage-nav-height); justify-content: flex-start; gap: calc(36 * var(--u)); }
   .home-restored .site-header::before { inset: 0 auto auto calc(-74 * var(--u)); width: calc(944 * var(--u)); height: calc(100 * var(--v)); }
-  .home-restored .brand { font-size: calc(30 * var(--u)); gap: calc(8 * var(--u)); }
-  .home-restored .brand-name-cn { font-size: calc(20 * var(--u)); }
-  .home-restored .brand-mark { width: calc(41 * var(--u)); height: calc(31 * var(--u)); }
-  .home-restored .desktop-nav { flex: 1; justify-content: space-between; }
+  .home-restored .brand { gap: calc(8 * var(--u)); }
+  .home-restored .desktop-nav { flex: 0 0 calc(424 * var(--u)); justify-content: space-between; }
   .home-restored .nav-link { font-size: calc(20 * var(--u)); padding-inline: calc(11 * var(--u)); }
 
   .home-paper {
@@ -188,7 +187,7 @@
 }
 
 @media (max-width: 1080px) {
-  .home-restored .site-header { width: calc(100% - 34px); }
+  .home-restored .site-header { width: calc(100% - 2 * var(--collage-nav-inset)); height: var(--collage-nav-height); }
   .home-restored .hero-copy { width: min(96%, 580px); padding: 24px 17px 22px; isolation: isolate; }
   .home-restored .hero-copy::before { content: ''; position: absolute; z-index: -1; inset: -8px -4px; mask: url('/paper-idea.svg') center / 100% 100%; background: var(--paper-noise), var(--paper-photo) 74% 45% / 610px auto, #f3d9be; background-blend-mode: multiply, soft-light; }
   .home-restored .hero-actions { flex-wrap: wrap; }

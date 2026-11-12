@@ -12,6 +12,7 @@
 * { box-sizing: border-box; }
 html { scroll-behavior: smooth; }
 body { margin: 0; color: var(--ink); background: var(--paper); font-family: "MiSans", "HarmonyOS Sans SC", "Microsoft YaHei", sans-serif; }
+
 button { font: inherit; cursor: pointer; }
 button:focus-visible { outline: 3px solid #e86b32; outline-offset: 4px; }
 ::selection { background: #f6bb87; color: var(--ink); }

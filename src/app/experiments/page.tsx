@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
-import Link from "next/link";
-import { CatalogIcon, CourseTile } from "@/components/experiments/CatalogEffects";
-import { CatalogMasthead } from "@/components/experiments/CatalogMasthead";
+import { CourseTile } from "@/components/experiments/CatalogEffects";
+import { LabMasthead } from "@/components/experiments/LabMasthead";
+import { LabIcon } from "@/components/experiments/LabIcon";
+import { LabPaper, LabPaperMasks, LabSheet } from "@/components/experiments/LabPaper";
 import { ExperimentCreator } from "@/components/experiments/ExperimentCreator";
-import { courses, pathfindingRoute } from "@/lib/courses";
-import "./catalog.css";
+import { courses } from "@/lib/courses";
 import "./catalog-collage.css";
 
 export const metadata: Metadata = {
@@ -14,39 +14,47 @@ export const metadata: Metadata = {
 
 export default function ExperimentsPage() {
   return (
-    <main className="catalog-page catalog-edition">
-      <CatalogMasthead isCatalog />
-      <div className="catalog-width">
-        <div className="catalog-hero">
-          <header className="catalog-title">
-            <h1>实验中心</h1>
-            <svg className="catalog-underline" viewBox="0 0 490 44" fill="none" aria-hidden="true">
-              <path d="M5 34C116 23 267 1 475 10M106 39C216 28 321 13 424 16" pathLength="1" />
-            </svg>
-            <p>选一门课，动手跑一遍。</p>
-            <div className="catalog-title-actions">
-              <a className="catalog-jump" href="#courses">浏览六门课 <CatalogIcon icon="lucide:arrow-down" width={17} /></a>
-              <Link className="catalog-direct" href={pathfindingRoute}>打开寻路实验 <CatalogIcon icon="lucide:arrow-up-right" width={17} /></Link>
-            </div>
-          </header>
-          <svg className="catalog-ink-note" viewBox="0 0 340 120" fill="none" aria-hidden="true">
-            <path d="M6 72C66 23 154 12 216 30C257 42 253 78 208 78C169 78 187 35 237 32C280 30 306 56 318 99M296 88L319 105L329 79" pathLength="1" />
-          </svg>
-          <div className="creator-stack">
-            <ExperimentCreator />
-          </div>
+    <main className="lab-catalog collage-page">
+      <div className="lab-stage collage-canvas">
+        <LabPaperMasks />
+        <div className="lab-collage" aria-hidden="true">
+          <LabPaper shape="black" className="lab-graph-paper" />
+          <LabPaper shape="rust" className="lab-rust-top" />
+          <LabPaper shape="rust" className="lab-rust-right" />
+          <LabPaper shape="backing" className="lab-backing" />
+          <LabPaper shape="rust" className="lab-rust-bottom" />
+          <LabPaper shape="networkRibbon" className="lab-network-paper" />
+          <span className="lab-middle-scrap" />
+          <LabPaper shape="corner" className="lab-corner" />
+          <LabPaper shape="masthead" className="lab-header-paper" />
+          <span className="lab-mountain lab-mountain-left" />
+          <span className="lab-mountain lab-mountain-center" />
+          <span className="lab-mountain lab-mountain-right" />
+          <span className="lab-gear"><LabIcon name="gear" /></span>
+        </div>
+        <LabMasthead />
+
+        <header className="lab-title">
+          <h1>实验中心</h1>
+          <LabSheet className="lab-title-label" shape="label"><p>把计算机拆开看看。</p></LabSheet>
+        </header>
+
+        <div className="lab-workbench" aria-hidden="true">
+          <span className="lab-work-scrap" />
+          <span className="lab-desk-surface" />
+          <span className="lab-prop lab-prop-books"><img src="/lab/books.jpg" alt="" width="850" height="535" /></span>
+          <span className="lab-prop lab-prop-mug"><img src="/lab/mug.jpg" alt="" width="850" height="567" /></span>
+          <span className="lab-prop lab-prop-laptop"><img src="/lab/laptop.jpg" alt="" width="850" height="566" /></span>
         </div>
 
-        <section className="catalog-courses" id="courses" aria-labelledby="catalog-courses-title">
-          <div className="catalog-directory">
-            <h2 id="catalog-courses-title">课程目录</h2>
-            <svg viewBox="0 0 112 46" fill="none" aria-hidden="true">
-              <path d="M5 9C35 4 74 12 99 32M82 32L103 36L98 17" pathLength="1" />
-            </svg>
-          </div>
-          <div className="catalog-spread">
-            {courses.map((course, index) => <CourseTile key={course.slug} course={course} index={index} />)}
-          </div>
+        <LabSheet className="lab-creator-sheet" shape="creator">
+          <span className="lab-tape lab-tape-creator" aria-hidden="true" />
+          <ExperimentCreator />
+        </LabSheet>
+
+        <section className="lab-courses" id="courses" aria-label="课程目录">
+          {courses.map((course, index) => <CourseTile key={course.slug} course={course} index={index} />)}
+          <span className="lab-tape lab-tape-course" aria-hidden="true" />
         </section>
       </div>
     </main>

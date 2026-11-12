@@ -1,10 +1,15 @@
 "use client";
 
-import { Icon } from "@iconify/react";
 import { useRef, useState, type FormEvent } from "react";
 import { maxQuestionLength, type CreatorRequest, type CreatorResponse } from "@/lib/experimentCreator";
+import { LabIcon } from "./LabIcon";
 
-const example = "为什么 CPU 要进行进程调度？";
+const examples = [
+  { label: "CPU 调度", question: "为什么 CPU 会进行进程调度？" },
+  { label: "排序算法", question: "冒泡排序怎么交换数字？" },
+  { label: "网络传输", question: "数据包怎么找到下一站？" },
+  { label: "聚类分析", question: "散点多了，怎么分成几组？" },
+];
 
 export function ExperimentCreator() {
   const input = useRef<HTMLTextAreaElement>(null);
@@ -14,6 +19,8 @@ export function ExperimentCreator() {
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (checking) return;
+
     const text = question.trim();
     if (!text) {
       setStatus("先写下你的问题。");
@@ -38,27 +45,45 @@ export function ExperimentCreator() {
     }
   }
 
-  function useExample() {
+  function useExample(example: string) {
     setQuestion(example);
     setStatus("");
     input.current?.focus();
   }
 
   return (
-    <section className="creator-paper" aria-labelledby="creator-title">
-      <div className="creator-heading">
-        <h2 id="creator-title"><Icon icon="lucide:sparkles" width={23} aria-hidden="true" />AI 实验创造台</h2>
-        <span className="creator-badge">AI 尚未接入</span>
-      </div>
-      <p>把一个问题，变成一次实验。</p>
+    <section className="lab-creator" aria-labelledby="creator-title">
+      <h2 id="creator-title"><span>AI</span> 实验创造台</h2>
+      <p>用一句话，生成你的实验。</p>
       <form onSubmit={submit} aria-busy={checking}>
-        <label htmlFor="creator-question">你想弄懂什么？</label>
-        <textarea id="creator-question" ref={input} maxLength={maxQuestionLength} rows={2} placeholder="写一个你想试的问题。" value={question} onChange={(event) => { setQuestion(event.target.value); setStatus(""); }} />
-        <div className="creator-actions">
-          <button type="button" className="creator-example" onClick={useExample}>填入 CPU 调度示例</button>
-          <button type="submit" className="creator-submit" disabled={checking}>{checking ? "检查中…" : "检查接入"}<Icon icon="lucide:arrow-right" width={17} aria-hidden="true" /></button>
+        <div className="lab-question">
+          <label className="sr-only" htmlFor="creator-question">你想弄懂什么？</label>
+          <textarea
+            id="creator-question"
+            ref={input}
+            rows={1}
+            maxLength={maxQuestionLength}
+            placeholder="比如：为什么 CPU 会进行进程调度？"
+            value={question}
+            readOnly={checking}
+            onChange={(event) => { setQuestion(event.target.value); setStatus(""); }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                event.currentTarget.form?.requestSubmit();
+              }
+            }}
+          />
+          <button className="lab-creator-submit" type="submit" aria-label="提交实验问题" disabled={checking} data-empty={!question.trim()}>
+            <LabIcon name="arrow" />
+          </button>
         </div>
-        <p className="creator-feedback" role="status">{status || "暂可试填问题。"}</p>
+        <div className="lab-examples">
+          {examples.map(({ label, question: example }) => (
+            <button key={label} type="button" disabled={checking} onClick={() => useExample(example)}>{label}</button>
+          ))}
+        </div>
+        <p className="lab-creator-feedback" role="status">{checking ? "检查中…" : status}</p>
       </form>
     </section>
   );

@@ -1,9 +1,59 @@
+.collage-page {
+  --collage-max-width: 1760px;
+  --collage-gutter: 0px;
+  --collage-unit: calc(100cqw / 1672);
+  min-block-size: 100svh;
+  overflow: clip;
+}
+
+.collage-canvas {
+  --collage-nav-inset: 17px;
+  --collage-nav-height: 76px;
+  --collage-logo-size: 25px;
+  --collage-logo-cn-size: 14px;
+  --collage-mark-width: 32px;
+  --collage-mark-height: 25px;
+  inline-size: min(var(--collage-max-width), 100% - 2 * var(--collage-gutter));
+  margin-inline: auto;
+  container-type: inline-size;
+}
+
+.collage-canvas :is(.brand, .lab-brand) { font-size: var(--collage-logo-size); }
+.collage-canvas :is(.brand-name-cn, .lab-brand small) { font-size: var(--collage-logo-cn-size); }
+.collage-canvas :is(.brand, .lab-brand) .brand-mark {
+  width: var(--collage-mark-width);
+  height: var(--collage-mark-height);
+  margin: 0;
+  transform: none;
+}
+
+@media (min-width: 1081px) {
+  .collage-page { --collage-gutter: clamp(24px, 3.125vw, 64px); }
+  .collage-canvas {
+    --collage-nav-inset: calc(74 * var(--collage-unit));
+    --collage-nav-height: calc(62 * var(--collage-unit));
+    --collage-logo-size: calc(30 * var(--collage-unit));
+    --collage-logo-cn-size: calc(20 * var(--collage-unit));
+    --collage-mark-width: calc(41 * var(--collage-unit));
+    --collage-mark-height: calc(31 * var(--collage-unit));
+  }
+}
+
+@media (max-width: 700px) {
+  .collage-canvas {
+    --collage-nav-height: 66px;
+    --collage-logo-size: 24px;
+    --collage-logo-cn-size: 12px;
+    --collage-mark-width: 30px;
+    --collage-mark-height: 24px;
+  }
+}
+
 .site-shell {
   --orange: #ec711f;
   --orange-dark: #cd5919;
   --ink: #2b2119;
   --paper-noise: url("/paper-grain.svg");
-  --scene-scale: .88;
   color: var(--ink);
   background:
     radial-gradient(ellipse at 28% 46%, #fffaf1 0%, transparent 44%),
@@ -314,24 +364,17 @@
   .site-shell {
     /* The reference uses a 1672 × 941 drawing area. Compress its vertical
        spacing slightly on wide screens so all four cards fit at 1440 × 768. */
-    --u: calc(100vw / 1672);
+    --u: var(--collage-unit);
     --v: calc(var(--u) * .945);
     --sx: calc(var(--u) / 1px);
     --sy: calc(var(--v) / 1px);
     --scene-height: calc(941 * var(--v));
-    --scene-top: 40px;
-    min-height: 100svh;
-    /* Reserve space for the painted scene, including the top offset. */
-    height: calc(var(--scene-top) + var(--scene-height) * var(--scene-scale));
-    padding-block-start: var(--scene-top);
   }
 
   .home-scene {
     display: block;
     position: relative;
     height: var(--scene-height);
-    scale: var(--scene-scale);
-    transform-origin: top center;
   }
 
   .site-header {
@@ -629,10 +672,6 @@
 }
 
 @media (max-width: 1080px) {
-  .content-wrap {
-    scale: var(--scene-scale);
-    transform-origin: top center;
-  }
   .robot-accent { display: none; }
   .flow-card { padding-inline: 38px; }
   .flow-card p { white-space: normal; }
