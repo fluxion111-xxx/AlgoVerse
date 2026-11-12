@@ -3,10 +3,11 @@
 import { useState } from "react";
 import { Icon } from "@iconify/react";
 import { motion, AnimatePresence } from "motion/react";
+import { useRouter } from "next/navigation";
 
 const links = [
   { label: "首页", target: "top" },
-  { label: "实验中心", target: "lab" },
+  { label: "实验中心", target: "/experiments" },
   { label: "AI 共创" },
   { label: "知识图谱" },
   { label: "学习路径", target: "process" },
@@ -14,11 +15,16 @@ const links = [
 ];
 
 export function Header() {
+  const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
   const [notice, setNotice] = useState("");
 
   function navigate(target?: string) {
     setMenuOpen(false);
+    if (target?.startsWith("/")) {
+      router.push(target);
+      return;
+    }
     if (target) {
       document.getElementById(target)?.scrollIntoView({ behavior: "smooth" });
       return;

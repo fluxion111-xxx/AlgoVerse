@@ -2,6 +2,7 @@
 
 import { Icon } from "@iconify/react";
 import { motion } from "motion/react";
+import { useRouter } from "next/navigation";
 import { Header } from "@/components/Header";
 import { AlgorithmLab } from "@/components/AlgorithmLab";
 import { FlowCards } from "@/components/FlowCards";
@@ -12,6 +13,8 @@ function scrollTo(id: string) {
 }
 
 export default function Home() {
+  const router = useRouter();
+
   return (
     <main className="site-shell">
       <div className="page-grain" aria-hidden="true" />
@@ -32,7 +35,7 @@ export default function Home() {
               <div className="subtitle-paper">AI 让算法实验更简单、更有趣。</div>
               <div className="hero-description"><p>想学算法？别只看课本！</p><p>在这里，动手实验、AI 共创。</p><p>实时验证，用结果说话。</p></div>
               <div className="hero-actions">
-                <button className="primary-cta" onClick={() => { scrollTo("lab"); window.setTimeout(() => document.querySelector<HTMLButtonElement>(".run-button")?.click(), 450); }}>开始实验 <Icon icon="lucide:arrow-right" width={23} /></button>
+                <button className="primary-cta" onClick={() => router.push("/experiments")}>开始实验 <Icon icon="lucide:arrow-right" width={23} /></button>
                 <button className="secondary-cta" onClick={() => scrollTo("process")}><Icon icon="lucide:play" width={22} />1分钟上手</button>
               </div>
               <InkArrow className="hand-arrow" />

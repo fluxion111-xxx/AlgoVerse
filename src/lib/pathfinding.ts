@@ -7,8 +7,11 @@ export type Algorithm = "dijkstra" | "astar";
 export type SearchResult = {
   visited: number[];
   path: number[];
+  pathLength: number | null;
   elapsedMs: number;
 };
+
+type Endpoints = { start: number; goal: number };
 
 export const initialWalls = [
   3, 11, 19, 27, 37, 42,
@@ -25,18 +28,27 @@ const neighbours = (node: number) => {
     .map(({ x: nextX, y: nextY, cost }) => ({ node: nextY * COLS + nextX, cost }));
 };
 
-const heuristic = (node: number) => {
-  const dx = Math.abs((node % COLS) - (GOAL % COLS));
-  const dy = Math.abs(Math.floor(node / COLS) - Math.floor(GOAL / COLS));
+const heuristic = (node: number, goal: number) => {
+  const dx = Math.abs((node % COLS) - (goal % COLS));
+  const dy = Math.abs(Math.floor(node / COLS) - Math.floor(goal / COLS));
   return Math.max(dx, dy) + (Math.SQRT2 - 1) * Math.min(dx, dy);
 };
 
-export function search(algorithm: Algorithm, walls: number[]): SearchResult {
+export function search(
+  algorithm: Algorithm,
+  walls: readonly number[],
+  { start, goal }: Endpoints = { start: START, goal: GOAL },
+): SearchResult {
   const started = performance.now();
   const blocked = new Set(walls);
-  const open = new Set([START]);
+  const valid = (node: number) => Number.isInteger(node) && node >= 0 && node < COLS * ROWS && !blocked.has(node);
+  if (!valid(start) || !valid(goal)) {
+    return { visited: [], path: [], pathLength: null, elapsedMs: performance.now() - started };
+  }
+
+  const open = new Set([start]);
   const closed = new Set<number>();
-  const distance = new Map<number, number>([[START, 0]]);
+  const distance = new Map<number, number>([[start, 0]]);
   const previous = new Map<number, number>();
   const visited: number[] = [];
 
@@ -45,7 +57,7 @@ export function search(algorithm: Algorithm, walls: number[]): SearchResult {
     let best = Infinity;
     for (const node of open) {
       const score = (distance.get(node) ?? Infinity) +
-        (algorithm === "astar" ? heuristic(node) : 0);
+        (algorithm === "astar" ? heuristic(node, goal) : 0);
       if (score < best) {
         best = score;
         current = node;
@@ -56,7 +68,7 @@ export function search(algorithm: Algorithm, walls: number[]): SearchResult {
     open.delete(current);
     closed.add(current);
     visited.push(current);
-    if (current === GOAL) break;
+    if (current === goal) break;
 
     for (const { node: next, cost } of neighbours(current)) {
       if (blocked.has(next) || closed.has(next)) continue;
@@ -70,14 +82,15 @@ export function search(algorithm: Algorithm, walls: number[]): SearchResult {
   }
 
   const path: number[] = [];
-  if (previous.has(GOAL)) {
-    let step = GOAL;
-    while (step !== START) {
+  const pathLength = closed.has(goal) ? distance.get(goal)! : null;
+  if (pathLength !== null) {
+    let step = goal;
+    while (step !== start) {
       path.unshift(step);
       step = previous.get(step)!;
     }
-    path.unshift(START);
+    path.unshift(start);
   }
 
-  return { visited, path, elapsedMs: performance.now() - started };
+  return { visited, path, pathLength, elapsedMs: performance.now() - started };
 }
