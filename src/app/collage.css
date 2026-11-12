@@ -1,6 +1,7 @@
 .collage-page {
-  --collage-max-width: 1760px;
-  --collage-gutter: 0px;
+  --collage-max-width: 1920px;
+  --collage-gutter-start: 0px;
+  --collage-gutter-end: 0px;
   --collage-unit: calc(100cqw / 1672);
   min-block-size: 100svh;
   overflow: clip;
@@ -13,8 +14,9 @@
   --collage-logo-cn-size: 14px;
   --collage-mark-width: 32px;
   --collage-mark-height: 25px;
-  inline-size: min(var(--collage-max-width), 100% - 2 * var(--collage-gutter));
-  margin-inline: auto;
+  inline-size: min(var(--collage-max-width), 100% - var(--collage-gutter-start) - var(--collage-gutter-end));
+  margin-inline-start: max(var(--collage-gutter-start), (100% - var(--collage-max-width)) / 2);
+  margin-inline-end: auto;
   container-type: inline-size;
 }
 
@@ -28,7 +30,11 @@
 }
 
 @media (min-width: 1081px) {
-  .collage-page { --collage-gutter: clamp(24px, 3.125vw, 64px); }
+  .collage-page {
+    /* Keep room for the artwork that extends past the start of the canvas. */
+    --collage-gutter-start: clamp(32px, 3.25vw, 66px);
+    --collage-gutter-end: clamp(12px, 1vw, 24px);
+  }
   .collage-canvas {
     --collage-nav-inset: calc(74 * var(--collage-unit));
     --collage-nav-height: calc(62 * var(--collage-unit));

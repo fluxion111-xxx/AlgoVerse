@@ -37,7 +37,8 @@
 }
 
 .lab-catalog {
-  --lab-bleed: max(var(--collage-gutter), (100vw - var(--collage-max-width)) / 2);
+  --lab-bleed-start: max(var(--collage-gutter-start), (100vw - var(--collage-max-width)) / 2);
+  --lab-bleed-end: max(var(--collage-gutter-end), 100vw - var(--collage-max-width) - var(--lab-bleed-start));
   --lab-ink: #211810;
   --lab-paper-photo: url("/paper-fiber-photo.jpg");
   --lab-pulp-photo: url("/lab/paper-pulp.jpg");
@@ -104,8 +105,13 @@
   --lab-pulp-opacity: .26;
   --lab-paper-surface: var(--lab-graph), var(--lab-grain) 0 0 / 165px, var(--lab-charcoal) center / 720px, linear-gradient(130deg, #52483e, #393531 55%, #453b33);
 }
-.lab-graph-paper { inset: 0 calc(-1% - var(--lab-bleed)) 27.5%; }
-.lab-network-paper { inset: 42.4% calc(-1% - var(--lab-bleed)) auto calc(-1 * var(--lab-bleed)); height: 29%; }
+.lab-graph-paper {
+  inset: 0 calc(-1% - var(--lab-bleed-end)) 27.5% calc(-1% - var(--lab-bleed-start));
+}
+.lab-network-paper {
+  inset: 42.4% calc(-1% - var(--lab-bleed-end)) auto calc(-1 * var(--lab-bleed-start));
+  height: 29%;
+}
 .lab-graph-paper .lab-paper-face, .lab-network-paper .lab-paper-face {
   background-blend-mode: normal, soft-light, soft-light, normal;
   filter: grayscale(.85) sepia(.12) brightness(1.32);
@@ -201,7 +207,7 @@
 .lab-popover {
   position: fixed;
   inset: calc(var(--collage-nav-height) + 8px) auto auto;
-  inset-inline-end: calc(var(--lab-bleed) + var(--collage-nav-inset));
+  inset-inline-end: calc(var(--lab-bleed-end) + var(--collage-nav-inset));
   width: min(315px, calc(100vw - 32px));
   max-height: min(440px, 74vh);
   margin: 0;
