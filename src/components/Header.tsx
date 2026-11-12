@@ -8,29 +8,21 @@ import { useRouter } from "next/navigation";
 const links = [
   { label: "首页", target: "top" },
   { label: "实验中心", target: "/experiments" },
-  { label: "AI 共创" },
-  { label: "知识图谱" },
   { label: "学习路径", target: "process" },
-  { label: "资源库" },
+  { label: "AI 助教", target: "/experiments#creator-title" },
 ];
 
 export function Header() {
   const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
-  const [notice, setNotice] = useState("");
 
-  function navigate(target?: string) {
+  function navigate(target: string) {
     setMenuOpen(false);
-    if (target?.startsWith("/")) {
+    if (target.startsWith("/")) {
       router.push(target);
       return;
     }
-    if (target) {
-      document.getElementById(target)?.scrollIntoView({ behavior: "smooth" });
-      return;
-    }
-    setNotice("正在准备，先玩实验吧！");
-    window.setTimeout(() => setNotice(""), 2600);
+    document.getElementById(target)?.scrollIntoView({ behavior: "smooth" });
   }
 
   return (
@@ -39,6 +31,7 @@ export function Header() {
         <button className="brand" onClick={() => navigate("top")} aria-label="回到首页">
           <span className="brand-mark" aria-hidden="true"><i /><i /></span>
           <span>AlgoVerse</span>
+          <span className="brand-name-cn">智算万象</span>
         </button>
         <nav className="desktop-nav flex items-center" aria-label="主导航">
           {links.map((link) => (
@@ -73,13 +66,6 @@ export function Header() {
               <button key={link.label} onClick={() => navigate(link.target)}>{link.label}</button>
             ))}
           </motion.nav>
-        )}
-      </AnimatePresence>
-      <AnimatePresence>
-        {notice && (
-          <motion.div className="notice" role="status" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 12 }}>
-            <Icon icon="lucide:sparkles" width={18} />{notice}
-          </motion.div>
         )}
       </AnimatePresence>
     </>

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 185" preserveAspectRatio="none">
+  <filter id="ink" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">
+    <feTurbulence type="fractalNoise" baseFrequency=".065 .43" numOctaves="3" seed="27"/>
+    <feColorMatrix type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0"/>
+    <feComponentTransfer><feFuncA type="table" tableValues=".3 .52 .81 .96 1 1 1"/></feComponentTransfer>
+  </filter>
+  <rect width="560" height="185" filter="url(#ink)"/>
+</svg>
