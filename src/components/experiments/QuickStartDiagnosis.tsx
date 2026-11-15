@@ -12,6 +12,26 @@ function metricValue(result: SearchResult, metric: DiagnosisMetric) {
   return `${result.elapsedMs.toFixed(2)} ms`;
 }
 
+export function DiagnosisSummary({ diagnosis, evidence, pathfinding }: {
+  diagnosis: Diagnosis;
+  evidence: Record<string, string>;
+  pathfinding?: { dijkstra: SearchResult; astar: SearchResult } | null;
+}) {
+  return <>
+    <h3>实验结论</h3><p>{diagnosis.conclusion}</p>
+    <table>
+      <caption className="sr-only">本轮诊断的数据依据</caption>
+      <thead><tr><th scope="col">数据依据</th>{pathfinding ? <><th scope="col">Dijkstra</th><th scope="col">A*</th></> : <th scope="col">本轮结果</th>}</tr></thead>
+      <tbody>{diagnosis.evidence.filter((metric) => Object.hasOwn(evidence, metric)).map((metric) => (
+        <tr key={metric}><th scope="row">{evidenceLabels[metric]}</th>
+          {pathfinding ? <><td>{metricValue(pathfinding.dijkstra, metric as DiagnosisMetric)}</td><td>{metricValue(pathfinding.astar, metric as DiagnosisMetric)}</td></> : <td>{evidence[metric]}</td>}</tr>
+      ))}</tbody>
+    </table>
+    <h3>为什么不同</h3><p>{diagnosis.explanation}</p>
+    <h3>下一步建议</h3><p>{diagnosis.suggestion}</p>
+  </>;
+}
+
 export function QuickStartDiagnosis({ diagnosis, runId, auto, results, studio = false, settingsHref }: {
   diagnosis: Diagnosis | null;
   runId: string;
@@ -26,19 +46,7 @@ export function QuickStartDiagnosis({ diagnosis, runId, auto, results, studio = 
     <section className="quick-start-diagnosis" aria-labelledby="quick-start-diagnosis-title">
       <div className="experiment-section-head"><h2 id="quick-start-diagnosis-title">本轮 AI 诊断</h2></div>
       {diagnosis ? (
-        <>
-          <h3>实验结论</h3><p>{diagnosis.conclusion}</p>
-          <table>
-            <caption className="sr-only">本轮诊断的数据依据</caption>
-            <thead><tr><th scope="col">数据依据</th>{pathfinding ? <><th scope="col">Dijkstra</th><th scope="col">A*</th></> : <th scope="col">本轮结果</th>}</tr></thead>
-            <tbody>{diagnosis.evidence.filter((metric) => Object.hasOwn(evidence, metric)).map((metric) => (
-              <tr key={metric}><th scope="row">{evidenceLabels[metric]}</th>
-                {pathfinding ? <><td>{metricValue(pathfinding.dijkstra, metric as DiagnosisMetric)}</td><td>{metricValue(pathfinding.astar, metric as DiagnosisMetric)}</td></> : <td>{evidence[metric]}</td>}</tr>
-            ))}</tbody>
-          </table>
-          <h3>为什么不同</h3><p>{diagnosis.explanation}</p>
-          <h3>下一步建议</h3><p>{diagnosis.suggestion}</p>
-        </>
+        <DiagnosisSummary diagnosis={diagnosis} evidence={evidence} pathfinding={pathfinding} />
       ) : (
         <div className="preset-actions">
           <QuickStartRequest operation="diagnose" id={runId} auto={auto} className="experiment-run" settingsHref={settingsHref} />

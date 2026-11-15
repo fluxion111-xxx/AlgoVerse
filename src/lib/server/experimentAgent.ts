@@ -3,7 +3,7 @@ import { agentDialogueActive, agentDialogueLimits, agentFinished, agentLimits, t
 import { evidenceLabels } from "@/lib/experiments/evidence";
 import { AIRequestError, asObject, requestAIJson, type AICredentials } from "./aiProvider";
 import { agentPlanningTools, agentTools, callAgentTool, prepareToolCall } from "./agentTools";
-import { getExperimentRun, saveAgentTask } from "./experimentRecords";
+import { getDiagnosis, getExperimentRun, saveAgentTask } from "./experimentRecords";
 
 const leaseMs = 75_000;
 type FocusUpdate = Omit<AgentFocus, "firstRun"> & { switchTopic?: boolean };
@@ -26,11 +26,15 @@ finish：仅返回 {"action":"finish","evidence":[{"from":1,"to":2,"metric":"wai
 CPU 对照用同一组 processes。policy 只用小写 fcfs 或 rr。quantum 必填 1–20 的整数，fcfs 用 1。比较 FCFS 和 RR 时，首次建议两组基线，其中一组 fcfs，一组 rr。两组有实测后，如目标要求优化，依据指标试至少一个不同 RR 时间片，即使 RR 基线较慢也要试。其他目标按工具能力决定。`;
 
 const dialogueInstructions = `Resolve the current user message using the preceding conversation and the remembered focus. Return one JSON object in the user's language.
-If the user asks to design, try, modify, or continue an experiment, return {"action":"plan","focus":{"topic":"specific subject and methods","goal":"complete experiment goal"}}. Fill in an omitted subject using previous Q&A. Keep the original comparison without adding algorithms, implementations or benchmarks. Preserve exact parameter values and changes in focus.constraints. Missing sample data is not a reason to clarify. Do not write a chat reply offering to make a plan.
+你在实验创造台。用户直接要求对比两个具名方法时，默认要用实验比较。即使请求没写「实验」，也返回 plan。只有问「有什么区别」或要求讲解原理时才直接回答。意图示例：
+用户「比较 FIFO 和 LRU」→ {"action":"plan","focus":{"topic":"FIFO 和 LRU","goal":"在相同页序列上观察缺页次数"}}
+用户「FIFO 和 LRU 有什么区别？」→ answer 并解释原理。
+用户「对比 FCFS 和 RR」→ plan 并记录两种策略。
+If the user asks to design, try, modify, or continue an experiment, return {"action":"plan","focus":{"topic":"specific subject and methods","goal":"complete experiment goal"}}. Fill in an omitted subject using previous Q&A. Keep the original comparison without adding algorithms, implementations or benchmarks. Preserve exact parameter values and changes in focus.constraints. Missing sample data is not a reason to clarify. For analysis of the just-completed experiment, choose explain and use the most recent relevant completed run. Do not write a chat reply offering to make a plan.
 Use {"action":"answer","observation":"reply","focus":{"topic":"specific subject and methods from the conversation"}} for technical Q&A, even when no run was requested. For casual conversation or writing, answer naturally and omit focus. 寒暄和日常对话默认一句，最多两句。不要自我介绍、提平台名称、列功能或推荐实验。For revisions, provide the revised text.
 When the user explicitly switches subjects, include {"focus":{"topic":"new subject","switchTopic":true}} in the response, even for a knowledge answer. A parameter change stays on the same topic. Keep known conditions in focus.constraints. Set focus.defaults to "allowed" when the user delegates input choices or "forbidden" when the user explicitly forbids default data. Otherwise omit defaults.
-For real results use {"action":"explain","evidence":["ID from evidenceOptions"],"observation":"evidence-based explanation"}. Prefer runs marked currentTopic unless the user refers to another run. For CPU scheduling omit observation; the workbench uses measured process data. Pending proposals are not measured results.
-Use clarify with one necessary question only when the combined conversation leaves the subject or goal unknown. Use unsupported for external operations such as sending a message, searching the web or operating on files. Never invent work or results. Do not emit tool calls.`;
+For real results use {"action":"explain","evidence":["ID from evidenceOptions"],"observation":"evidence-based explanation"}. An explicit round in the message takes priority. Otherwise use selectedRound if set, then prefer runs marked currentTopic. For CPU scheduling omit observation; the workbench uses measured process data. Pending proposals are not measured results.
+Use clarify with one necessary question only when the combined conversation leaves the subject or goal unknown. Use unsupported for external operations such as sending a message, searching the web or operating on files. Never invent work or results. Do not emit tool calls. 最后核对：直接对比具名方法用 plan，解释概念用 answer。`;
 
 const planningInstructions = `Plan the experiment defined in focus. request is the latest user message: copy any exact input or requested parameter change from it. Use focus to resolve omitted subjects. Return one JSON object in the user's language. Describe what the proposal will do; nothing has run yet. Scope the plan to the requested methods and the listed tool metrics. Do not promise extra comparisons, implementations or measurements. Use only a matching tool from tools. If no registered tool can perform the requested experiment, return {"action":"unsupported","observation":"the specific limitation"}. If remainingBatch is zero, explain the limit.
 For a proposal return {"action":"run","observation":"one sentence","plan":["step"],"calls":[{"tool":"registered tool ID","parameters":"preset"}]}. Use 1–3 steps. Do not add a focus field. Calls may not exceed remainingBatch. In a revision, use revisionBase when present. Set parameters to an object containing just the requested changes, using inputSchema field names and types. Unchanged values come from revisionBase. Do not use "preset" for a revision. When starting a fresh experiment, use "preset" if the engine default meets the goal and no specific data are required. Otherwise provide a complete configuration. Compare methods on the same inputs. CPU policies are lowercase; use quantum 1 for fcfs. Set autoContinue:true only if the goal requires multiple rounds and further analysis. The workbench asks for confirmation. Use clarify only for missing requirements that change the experiment.`;
@@ -214,14 +218,15 @@ function leaseActive(task: AgentTask) {
   return (task.leaseUntil ?? 0) > Date.now();
 }
 
-export async function replyToAgentMessage(task: AgentTask, message: string, credentials: AICredentials) {
+export async function replyToAgentMessage(task: AgentTask, message: string, credentials: AICredentials, operationId?: string, selectedRound?: number) {
+  credentials.signal.throwIfAborted();
   if (agentDialogueActive(task) || task.phase === "running" || (task.phase === "deciding" && leaseActive(task))) {
     throw new AIRequestError("当前请求还在处理。", 409);
   }
   const dialogue = task.dialogue ?? { turns: [], requests: 0 };
   if (dialogue.requests >= agentDialogueLimits.requests) throw new AIRequestError("已到本对话上限。", 429);
   const turns = dialogue.pending && dialogue.pending !== message ? [...dialogue.turns, { message: dialogue.pending }] : dialogue.turns;
-  let requested = { turns, focus: dialogue.focus, requests: dialogue.requests + 1, pending: message, activeUntil: Date.now() + leaseMs };
+  let requested = { turns, focus: dialogue.focus, requests: dialogue.requests + 1, pending: message, activeUntil: Date.now() + leaseMs, operationId };
   let claimed = await update(task, { dialogue: requested });
   const remainingBatch = availableBatch(task, task.steps + 1, task.requests + 1);
   let result: Decision;
@@ -229,6 +234,11 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
   let details;
   try {
     const evidenceOptions = dialogueEvidence(task);
+    const reports = await Promise.all(task.runs.map(async ({ id }, index) => {
+      const diagnosis = await getDiagnosis(id);
+      return diagnosis && { round: index + 1, conclusion: diagnosis.conclusion, evidence: diagnosis.evidence,
+        explanation: diagnosis.explanation, suggestion: diagnosis.suggestion };
+    }));
     details = await schedulingDetails(task);
     const context = decisionContext({ ...task, dialogue: { ...dialogue, turns } });
     const boundedCredentials = { ...credentials, signal: AbortSignal.any([credentials.signal, AbortSignal.timeout(leaseMs - 5000)]) };
@@ -236,7 +246,7 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
       operation: "experiment_agent", instructions: dialogueInstructions, maxTokens: agentDialogueLimits.outputTokens,
       input: { ...context, ...(task.dialogue || task.runs.length ? {} : { goal: task.goal }),
         message, remainingBatch, lastError: dialogue.error, evidenceOptions: [...evidenceOptions.keys()],
-        runDetails: details },
+        runDetails: details, diagnoses: reports.filter(Boolean), selectedRound },
       dialogue: [...context.conversation.flatMap(({ message: previous, reply }) => [
         { role: "user" as const, content: previous },
         ...(reply ? [{ role: "assistant" as const, content: reply }] : []),
@@ -255,7 +265,9 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
         input: { stage: "plan", focus, request: message, currentExperiment: focus.switchTopic ? undefined : context.currentExperiment,
           revisionBase: revisionBase && { tool: revisionBase.tool, config: revisionBase.config },
           pendingTools: focus.switchTopic ? [] : context.pendingTools,
-          runs: focus.switchTopic ? [] : context.runs.filter((run) => run.currentTopic), tools: agentPlanningTools(task.seed), remainingBatch },
+          runs: focus.switchTopic ? [] : context.runs.filter((run) => run.currentTopic),
+          diagnoses: focus.switchTopic ? [] : reports.filter((report) => report && context.runs[report.round - 1].currentTopic),
+          tools: agentPlanningTools(task.seed), remainingBatch },
         validate: (value) => {
           const proposal = asObject(value);
           if (proposal?.action !== "run" && proposal?.action !== "unsupported" && proposal?.action !== "clarify") return null;
@@ -267,14 +279,17 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
       model = response.model;
     }
   } catch (error) {
+    if (credentials.signal.aborted && operationId) return stopAgentAnalysis(claimed, operationId);
     return update(claimed, { dialogue: { ...requested, activeUntil: undefined,
       error: error instanceof AIRequestError ? error.message : "回复失败。请重试。" } });
   }
+  if (credentials.signal.aborted && operationId) return stopAgentAnalysis(claimed, operationId);
   if (result.action === "finish") throw new Error("Invalid dialogue action");
   const scheduling = result.action === "explain" && !result.observation ? schedulingEvidence(details, result.evidence) : undefined;
   const reply = result.action === "answer" && !task.pending.length && !task.runs.length
     ? trimChatInvitation(result.observation) : result.observation;
-  const turn: AgentTurn = { message, reply, action: result.action, evidence: result.evidence, model, scheduling };
+  const turn: AgentTurn = { message, reply, action: result.action, evidence: result.evidence, model, scheduling,
+    ...(result.calls.length && { proposalIds: result.calls.map(({ id }) => id) }) };
   const { switchTopic, ...nextFocus } = result.focus ?? {};
   const focus = result.focus ? {
     ...(switchTopic ? { firstRun: task.runs.length } : dialogue.focus),
@@ -291,12 +306,13 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
     autoContinue: result.autoContinue === true,
     plan: result.plan.length ? result.plan : task.plan,
     experimentGoal: result.focus?.goal ?? result.calls[0].config.goalLabel,
-    decisions: [...task.decisions, { observation: result.observation, evidence: result.evidence, model }],
+    decisions: [...task.decisions, { observation: result.observation, evidence: result.evidence, model, calls: result.calls, plan: result.plan }],
     question: undefined, leaseUntil: undefined, error: undefined, requests: task.requests + 1, steps: task.steps + 1,
   });
 }
 
-export async function decideAgentTask(task: AgentTask, credentials: AICredentials) {
+export async function decideAgentTask(task: AgentTask, credentials: AICredentials, operationId?: string) {
+  credentials.signal.throwIfAborted();
   if (task.dialogue?.pending) throw new AIRequestError("请先处理当前消息。", 409);
   if (task.phase !== "draft" && task.phase !== "observe" && task.phase !== "ai-error"
     && !(task.phase === "deciding" && !leaseActive(task))) throw new AIRequestError("当前不能分析。", 409);
@@ -304,7 +320,7 @@ export async function decideAgentTask(task: AgentTask, credentials: AICredential
     return update(task, { phase: "limit", error: "已到分析上限。" });
   }
   const claimed = await update(task, { phase: "deciding", requests: task.requests + 1, steps: task.steps + 1,
-    leaseUntil: Date.now() + leaseMs, error: undefined });
+    leaseUntil: Date.now() + leaseMs, error: undefined, operationId });
   const remainingBatch = availableBatch(task, claimed.steps, claimed.requests);
   const stageInstructions = task.runs.length <= (task.dialogue?.focus?.firstRun ?? 0)
     ? '现在制定计划。run 示例结构：{"action":"run","plan":["设置对照","运行基线","看结果再决策"],"observation":"说明如何对照","calls":[{"tool":"引擎 ID","parameters":{}}]}。plan 最多 6 项，按任务改写。未来参数等实测后再选。'
@@ -321,19 +337,33 @@ export async function decideAgentTask(task: AgentTask, credentials: AICredential
       validate: (value) => validateDecision(value, task, remainingBatch),
     });
   } catch (error) {
-    return update(claimed, { phase: "ai-error", leaseUntil: undefined,
+    if (credentials.signal.aborted && operationId) return stopAgentAnalysis(claimed, operationId);
+    return update(claimed, { phase: "ai-error", leaseUntil: undefined, operationId: undefined,
       error: error instanceof AIRequestError ? error.message : "分析失败。请重试。" });
   }
+  if (credentials.signal.aborted && operationId) return stopAgentAnalysis(claimed, operationId);
   const { result, model } = response;
   if (result.action === "answer" || result.action === "explain") throw new Error("Invalid experiment action");
   const phase = { run: "confirm", finish: "finished", clarify: "clarify", unsupported: "unsupported" } as const;
   return update(claimed, {
-    phase: phase[result.action], leaseUntil: undefined,
+    phase: phase[result.action], leaseUntil: undefined, operationId: undefined,
     ...(result.action === "run" && { autoContinue: true }),
     plan: task.plan.length ? task.plan : result.plan,
     pending: result.calls, question: result.action === "clarify" ? result.observation : undefined,
-    decisions: [...task.decisions, { observation: result.observation, evidence: result.evidence, model }],
+    decisions: [...task.decisions, { observation: result.observation, evidence: result.evidence, model, calls: result.calls, plan: result.plan }],
   });
+}
+
+export async function stopAgentAnalysis(task: AgentTask, operationId: string) {
+  const dialogue = task.dialogue;
+  if (dialogue?.pending && dialogue.operationId === operationId) {
+    return update(task, { dialogue: { focus: dialogue.focus, requests: dialogue.requests,
+      turns: [...dialogue.turns, { message: dialogue.pending, stopped: true }] } });
+  }
+  if (task.phase === "deciding" && task.operationId === operationId) {
+    return update(task, { phase: task.runs.length ? "observe" : "draft", operationId: undefined, leaseUntil: undefined });
+  }
+  return task;
 }
 
 export async function approveAgentTools(task: AgentTask) {

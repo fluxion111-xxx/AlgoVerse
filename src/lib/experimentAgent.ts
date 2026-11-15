@@ -2,7 +2,6 @@ import type { EngineId, ExperimentConfig } from "./experimentEngines";
 
 export const agentLimits = { decisions: 6, runs: 4, steps: 12, batch: 2, outputTokens: 1000 } as const;
 export const agentDialogueLimits = { requests: 24, context: 10, outputTokens: 1200 } as const;
-export const agentRoute = "/experiments/create?mode=agent";
 export type AgentCall = {
   id: string;
   sessionId: string;
@@ -16,6 +15,8 @@ export type AgentDecision = {
   observation: string;
   evidence: AgentEvidence[];
   model: string;
+  calls?: AgentCall[];
+  plan?: string[];
 };
 export type AgentTurnAction = "answer" | "explain" | "clarify" | "unsupported" | "run";
 export type SchedulingEvidence = {
@@ -24,9 +25,9 @@ export type SchedulingEvidence = {
   metric: "waiting" | "response" | "turnaround";
   processes: { process: number; before: number; after: number }[];
 };
-export type AgentTurn = { message: string } & (
-  { reply: string; model: string; action: AgentTurnAction; evidence: AgentEvidence[]; scheduling?: SchedulingEvidence[] }
-  | { reply?: never; model?: never; action?: never; evidence?: never; scheduling?: never }
+export type AgentTurn = { message: string; stopped?: boolean } & (
+  { reply: string; model: string; action: AgentTurnAction; evidence: AgentEvidence[]; scheduling?: SchedulingEvidence[]; proposalIds?: string[] }
+  | { reply?: never; model?: never; action?: never; evidence?: never; scheduling?: never; proposalIds?: never }
 );
 export type AgentFocus = {
   topic: string;
@@ -42,6 +43,7 @@ export type AgentDialogue = {
   focus?: AgentFocus;
   pending?: string;
   activeUntil?: number;
+  operationId?: string;
   error?: string;
 };
 export type AgentTask = {
@@ -63,6 +65,7 @@ export type AgentTask = {
   question?: string;
   error?: string;
   leaseUntil?: number;
+  operationId?: string;
   requests: number;
   steps: number;
 };

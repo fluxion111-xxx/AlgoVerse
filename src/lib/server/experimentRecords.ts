@@ -14,6 +14,7 @@ import { quickStartQuestion, type Diagnosis, type QuickStartPlan } from "@/lib/q
 const visitorCookie = "algoverse_visitor";
 const taskCookie = "algoverse_task";
 const workflowCookie = "algoverse_workflow";
+const agentCookie = "algoverse_agent";
 
 export type ExperimentSession = {
   id: string;
@@ -415,16 +416,30 @@ export async function getAgentTask(id: unknown): Promise<AgentTask | null> {
   return readRecord<AgentTask>(agentRevisionPath(owner, id, revision));
 }
 
-export async function createAgentTask(goal: string, reference?: ExperimentSession, run?: ExperimentRun) {
+export async function getActiveAgentTask() {
+  return getAgentTask((await cookies()).get(agentCookie)?.value);
+}
+
+async function rememberAgentTask(task: AgentTask) {
+  (await cookies()).set(agentCookie, task.id, {
+    httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production", path: "/", maxAge: 60 * 60 * 24 * 30,
+  });
+  return task;
+}
+
+export async function createAgentTask(goal: string, reference?: ExperimentSession, run?: ExperimentRun, importPlan = false) {
   const owner = await ensureVisitor();
   const id = randomUUID();
-  return writeOnce<AgentTask>(agentRevisionPath(owner, id, 0), {
-    id, revision: 0, goal, seed: randomBytes(4).readUInt32BE(0), phase: "draft",
-    plan: [], pending: [], decisions: [], clarifications: [], requests: 0, steps: 0,
+  const pending = importPlan && reference ? [{ id: randomUUID(), sessionId: randomUUID(), tool: reference.engineId,
+    version: reference.engineVersion, config: reference.config }] : [];
+  const task = await writeOnce<AgentTask>(agentRevisionPath(owner, id, 0), {
+    id, revision: 0, goal, seed: randomBytes(4).readUInt32BE(0), phase: pending.length ? "confirm" : "draft",
+    plan: [], pending, decisions: [], clarifications: [], requests: 0, steps: 0,
     runs: run ? [{ id: run.id, sessionId: run.session.id, tool: run.session.engineId, version: run.session.engineVersion,
       config: run.session.config, completedAt: run.completedAt, metrics: experimentEvidence(run.results) }] : [],
     ...(reference && { referenceConfig: { tool: reference.engineId, version: reference.engineVersion, config: reference.config } }),
   });
+  return rememberAgentTask(task);
 }
 
 export async function saveAgentTask(current: AgentTask, changes: Partial<Omit<AgentTask, "id" | "revision" | "goal" | "seed">>) {
@@ -432,7 +447,7 @@ export async function saveAgentTask(current: AgentTask, changes: Partial<Omit<Ag
   if (!owner || (await getAgentTask(current.id))?.revision !== current.revision) return null;
   const next = { ...current, ...changes, revision: current.revision + 1 };
   const saved = await writeOnce(agentRevisionPath(owner, current.id, next.revision), next);
-  return saved === next ? next : null;
+  return saved === next ? rememberAgentTask(next) : null;
 }
 
 export async function runConfirmedAgentCall(task: AgentTask, callId: string) {

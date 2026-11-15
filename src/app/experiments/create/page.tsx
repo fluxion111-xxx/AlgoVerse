@@ -12,13 +12,15 @@ import { experimentReviewTopics, knowledgeTopicRoute } from "@/lib/knowledge";
 import { getExperimentEngine, registeredEngines } from "@/lib/experimentEngines";
 import { experimentDomains } from "@/lib/experiments/engine";
 import { evidenceLabels, experimentEvidence } from "@/lib/experiments/evidence";
-import { experimentTaskLinks, quickStartRoute, withExperimentTask, workflowAISettingsRoute, workflowRoute, workflowSteps, type WorkflowStep } from "@/lib/navigation";
+import { experimentTaskLinks, quickStartRoute, runAnalysisLink, withExperimentTask, workflowAISettingsRoute, workflowRoute, workflowSteps, type WorkflowStep } from "@/lib/navigation";
 import { getExperimentContext, type ExperimentSearch } from "@/lib/server/experimentContext";
-import { getActiveAIWorkflow, getAgentTask, getDiagnosis, getQuickStart } from "@/lib/server/experimentRecords";
+import { getActiveAIWorkflow, getActiveAgentTask, getActiveExperimentTask, getAgentTask, getDiagnosis, getLearningProgress, getQuickStart } from "@/lib/server/experimentRecords";
+import type { Diagnosis } from "@/lib/quickStart";
 import { runCreatorExperiment } from "../actions";
 import "./creator-flow.css";
+import "./agent-workbench.css";
 
-type WorkflowSearch = ExperimentSearch & { step?: string; engine?: string; mode?: string; guide?: string; diagnose?: string; updated?: string; agentId?: string };
+type WorkflowSearch = ExperimentSearch & { step?: string; engine?: string; mode?: string; guide?: string; diagnose?: string; updated?: string; agentId?: string; intent?: string; new?: string };
 type Context = Awaited<ReturnType<typeof getExperimentContext>>;
 
 export const metadata: Metadata = { title: "AI 实验创造台｜AlgoVerse" };
@@ -33,9 +35,6 @@ function QuestionInput({ context: { task, workflow, run }, guided = false }: { c
 }
 
 function QuestionStage({ context, guided, missingPlan = false }: { context: Context; guided?: boolean; missingPlan?: boolean }) {
-  if (!guided) return <AgentWorkbench key={context.task?.runId ?? context.task?.sessionId ?? "new"}
-    initial={null} initialMessage={context.run?.session.question ?? context.workflow?.question}
-    reference={context.task ?? undefined} />;
   return <section className="creator-question-stage" aria-labelledby="creator-headline">
     <header>
       <p className="creator-flow-kicker">{guided ? "一分钟上手" : "AI 实验创造台"}</p>
@@ -86,14 +85,6 @@ export default async function CreatorPage({ searchParams }: { searchParams: Prom
   const params = await searchParams;
   const explicitTask = params.sessionId !== undefined || params.runId !== undefined;
 
-  if (params.mode === "agent") {
-    const task = params.agentId === undefined ? null : await getAgentTask(params.agentId);
-    if (params.agentId !== undefined && !task) notFound();
-    return <LabWorkspace className="catalog-page creator-studio creator-workflow theme-algorithms">
-      <div className="creator-spread"><AgentWorkbench key={task?.id ?? "new"} initial={task} /></div>
-    </LabWorkspace>;
-  }
-
   if (params.mode === "quick-start") {
     const old = params.sessionId === undefined ? null : await getQuickStart(params.sessionId);
     if (params.sessionId !== undefined && !old) notFound();
@@ -107,20 +98,52 @@ export default async function CreatorPage({ searchParams }: { searchParams: Prom
     redirect(engine.route);
   }
 
+  const legacyIntent = params.guide !== "1" && (params.step === "question" || (!explicitTask && params.step && Object.hasOwn(workflowSteps, params.step)))
+    ? params.step : undefined;
+  const useAgent = params.agentId !== undefined || params.mode === "agent" || params.intent !== undefined || legacyIntent !== undefined ||
+    (params.step === undefined && params.guide !== "1" && params.diagnose !== "1");
+  if (useAgent) {
+    if (params.intent !== undefined && (typeof params.intent !== "string" || !Object.hasOwn(workflowSteps, params.intent))) notFound();
+    const intent = (params.intent ?? legacyIntent ?? (params.mode === "question" ? "question" : undefined)) as WorkflowStep | undefined;
+    const context = await getExperimentContext(explicitTask ? params : {});
+    const source = context.run?.session.source;
+    const sourceId = source?.type === "agent" ? source.taskId : undefined;
+    const id = params.agentId ?? sourceId;
+    const task = id !== undefined ? await getAgentTask(id) : explicitTask || params.new === "1" ? null : await getActiveAgentTask();
+    if (id !== undefined && (!task || (context.run && !task.runs.some(({ id }) => id === context.run?.id)) ||
+      (params.sessionId && !context.run && ![...task.runs, ...task.pending].some(({ sessionId }) => sessionId === params.sessionId)))) notFound();
+    const legacyTask = !task && !explicitTask && params.new !== "1" ? await getActiveAIWorkflow() : null;
+    const reference = context.task ? context : legacyTask ? await getExperimentContext(legacyTask) : null;
+    const currentRun = context.run?.id ?? task?.runs.at(-1)?.id ?? reference?.run?.id;
+    if (intent === "diagnosis") {
+      const runId = currentRun ?? (!explicitTask && !params.agentId && params.new !== "1"
+        ? (await getActiveExperimentTask())?.runId ?? (await getLearningProgress()).recent[0]?.id : undefined);
+      if (runId) redirect(runAnalysisLink(runId, true));
+    }
+    if (intent === "run" && currentRun && !task?.pending.length && task?.phase !== "running") redirect(runAnalysisLink(currentRun));
+    const pairs = await Promise.all((task?.runs ?? []).map(async ({ id }) => [id, await getDiagnosis(id)] as const));
+    const diagnoses = Object.fromEntries(pairs.filter((pair): pair is readonly [string, Diagnosis] => pair[1] !== null));
+    return <LabWorkspace className="catalog-page creator-studio creator-workflow theme-algorithms agent-page">
+      <div className="creator-spread"><AgentWorkbench key={`${task?.id ?? reference?.task?.sessionId ?? "new"}:${intent ?? "default"}`}
+        initial={task} intent={intent} diagnoses={diagnoses} initialMessage={!task ? reference?.workflow?.question : undefined}
+        fresh={params.new === "1"} reference={reference?.task ?? undefined} selectedRunId={context.run?.id}
+        savedPlan={!task && !reference?.run ? reference?.session?.config : undefined} />
+    </div></LabWorkspace>;
+  }
+
   const active = params.runId === undefined && (params.step !== undefined || params.mode === "resume" || params.diagnose === "1") ? await getActiveAIWorkflow() : null;
   const context = await getExperimentContext(active && (!explicitTask || active.sessionId === params.sessionId) ? active : params);
   const { workflow, task, run, engine } = context;
   const currentRun = !!run && (run.session.revision ?? 0) === workflow?.revision;
   const latestTask = workflow ? { sessionId: workflow.id, runId: currentRun ? run?.id : undefined } : null;
   const links = experimentTaskLinks(latestTask);
-  const step = params.mode === "resume" ? (latestTask?.runId ? "run" : workflow ? "config" : "question")
-    : params.diagnose === "1" ? "diagnosis"
+  const step = params.diagnose === "1" ? "diagnosis"
     : params.mode === "question" ? "question"
     : params.step ?? (run ? "run" : workflow ? "config" : "question");
   if (typeof step !== "string" || !Object.hasOwn(workflowSteps, step)) notFound();
-  if (params.mode === "resume") redirect(workflowRoute(step as WorkflowStep, latestTask));
 
   const reviewing = step === "run" || step === "diagnosis";
+  if (reviewing && run?.session.source?.type === "agent") redirect(runAnalysisLink(run.id, step === "diagnosis"));
   const selectedDiagnosis = reviewing && run ? await getDiagnosis(run.id) : null;
   const diagnosisPanel = reviewing && run && engine ? (
     <section className="creator-diagnosis-split" id="creator-diagnosis" aria-label="结果诊断">

@@ -1,8 +1,9 @@
 import { maxQuestionLength } from "@/lib/experimentCreator";
 import { isAgentConfirmation } from "@/lib/experimentAgent";
 import { sortingEngine } from "@/lib/experiments/sorting";
+import { getExperimentEngine } from "@/lib/experimentEngines";
 import { aiErrorResponse, aiJson, asObject, readAICredentials } from "@/lib/server/aiProvider";
-import { approveAgentTools, cancelAgentTask, clarifyAgentTask, decideAgentTask, replyToAgentMessage } from "@/lib/server/experimentAgent";
+import { approveAgentTools, cancelAgentTask, clarifyAgentTask, decideAgentTask, replyToAgentMessage, stopAgentAnalysis } from "@/lib/server/experimentAgent";
 import { createAgentTask, getAgentTask, getExperimentRun, getExperimentWorkflow } from "@/lib/server/experimentRecords";
 
 function inputText(value: unknown) {
@@ -29,6 +30,7 @@ export async function POST(request: Request) {
   const body = asObject(await request.json().catch(() => null));
   if (!body) return aiJson({ message: "请求格式有误。" }, 400);
   const authorization = request.headers.get("authorization");
+  const operationId = typeof body.operationId === "string" && /^[a-f0-9-]{36}$/i.test(body.operationId) ? body.operationId : undefined;
   try {
     if (body.action === "start") {
       const goal = inputText(body.goal);
@@ -39,11 +41,17 @@ export async function POST(request: Request) {
       if ((body.sessionId !== undefined && !workflow) || (body.runId !== undefined && (!run || run.session.id !== workflow?.id))) {
         return aiJson({ message: "找不到本轮实验。" }, 404);
       }
-      return aiJson({ task: await createAgentTask(goal, run?.session ?? workflow?.plan, run ?? undefined) }, 201);
+      const importPlan = body.importPlan === true;
+      const plan = workflow?.plan;
+      if (importPlan && (run || !plan || !getExperimentEngine(plan.engineId, plan.engineVersion)?.validate(plan.config))) {
+        return aiJson({ message: "找不到可运行的方案。" }, 404);
+      }
+      return aiJson({ task: await createAgentTask(goal, run?.session ?? plan, run ?? undefined, importPlan) }, 201);
     }
     const task = await getAgentTask(body.id);
     if (!task) return aiJson({ message: "找不到这项任务。" }, 404);
     if (body.action === "status") return aiJson({ task });
+    if (body.action === "stop" && operationId) return aiJson({ task: await stopAgentAnalysis(task, operationId) });
     if (body.action === "sorting-replay") {
       const run = task.runs.some(({ id, tool }) => id === body.runId && tool === sortingEngine.id)
         ? await getExperimentRun(body.runId) : null;
@@ -67,9 +75,11 @@ export async function POST(request: Request) {
         if (containsKey(message, authorization) || message.includes(credentials.apiKey)) {
           return aiJson({ message: "请移除问题里的 Key。" }, 400);
         }
-        return aiJson({ task: await replyToAgentMessage(task, message, credentials) });
+        const selected = body.selectedRunId === undefined ? undefined : task.runs.findIndex(({ id }) => id === body.selectedRunId) + 1;
+        if (selected === 0) return aiJson({ message: "找不到本轮实验。" }, 404);
+        return aiJson({ task: await replyToAgentMessage(task, message, credentials, operationId, selected) });
       }
-      case "decide": return aiJson({ task: await decideAgentTask(task, readAICredentials(request)) });
+      case "decide": return aiJson({ task: await decideAgentTask(task, readAICredentials(request), operationId) });
       case "approve": return aiJson({ task: await approveAgentTools(task) });
       case "clarify": {
         const answer = inputText(body.answer);

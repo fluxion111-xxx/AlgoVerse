@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 
 const scope = Symbol.for("algoverse.test.agentCookies");
@@ -20,7 +21,7 @@ const hooks = registerHooks({
 });
 const { POST } = await import("../src/app/api/experiments/agent/route.ts");
 const { agentTools, prepareToolCall } = await import("../src/lib/server/agentTools.ts");
-const { getExperimentRun, getExperimentSession, runConfirmedAgentCall, getAgentTask } = await import("../src/lib/server/experimentRecords.ts");
+const { createAIExperimentSession, getActiveAgentTask, getExperimentRun, getExperimentSession, runConfirmedAgentCall, getAgentTask, saveDiagnosis } = await import("../src/lib/server/experimentRecords.ts");
 const { getExperimentEngine, registeredEngines } = await import("../src/lib/experimentEngines.ts");
 const { experimentEvidence } = await import("../src/lib/experiments/evidence.ts");
 const { schedulingWaitReport } = await import("../src/lib/experimentAgent.ts");
@@ -294,6 +295,51 @@ test("cancelling during model analysis prevents the late decision from publishin
   assert.deepEqual((await getAgentTask(draft.id)).pending, []);
 });
 
+test("stopping one reply preserves its proposal and ignores unrelated stop requests", async (t) => {
+  const entered = Promise.withResolvers();
+  const result = Promise.withResolvers();
+  const { post } = await setup(t, "192.0.2.24", ({ message }) => {
+    if (message === "比较排序。") return sortingPlan;
+    entered.resolve();
+    return result.promise;
+  });
+  const draft = (await post("start", null, { goal: "比较排序。" })).task;
+  const proposal = (await post("message", draft, { message: "比较排序。" })).task;
+  assert.equal((await getActiveAgentTask()).id, draft.id);
+  assert.equal(proposal.dialogue.turns[0].proposalIds[0], proposal.pending[0].id);
+  assert.equal(proposal.decisions[0].calls[0].id, proposal.pending[0].id);
+  const operationId = randomUUID();
+  const waiting = post("message", proposal, { message: "把输入改一下。", operationId });
+  await entered.promise;
+  const unrelated = (await post("stop", proposal, { operationId: randomUUID() })).task;
+  assert.equal(unrelated.dialogue.pending, "把输入改一下。");
+  const stopped = (await post("stop", proposal, { operationId })).task;
+  assert.equal(stopped.dialogue.pending, undefined);
+  assert.deepEqual(stopped.dialogue.turns.at(-1), { message: "把输入改一下。", stopped: true });
+  assert.deepEqual(stopped.pending, proposal.pending);
+  result.resolve(sortingPlan);
+  assert.equal((await waiting).http, 409);
+  const finished = (await post("approve", stopped)).task;
+  assert.equal(finished.runs.length, 1);
+  assert.equal((await getExperimentRun(finished.runs[0].id)).session.source.taskId, draft.id);
+});
+
+test("a saved creator configuration resumes in Agent and still requires approval", async (t) => {
+  const { post, upstreamFetch } = await setup(t, "192.0.2.25", () => { throw new Error("Unexpected model request"); });
+  const engine = getExperimentEngine("sorting");
+  const config = engine.preset(1);
+  const session = await createAIExperimentSession("比较排序。", engine.id, engine.version, config, model, "compare");
+  const proposal = (await post("start", null, { goal: session.question, sessionId: session.id, importPlan: true })).task;
+  assert.equal(proposal.phase, "confirm");
+  assert.deepEqual(proposal.pending[0].config, config);
+  assert.equal(await getExperimentRun(proposal.pending[0].id), null);
+  assert.equal((await getActiveAgentTask()).id, proposal.id);
+  const finished = (await post("approve", proposal)).task;
+  assert.equal(finished.runs.length, 1);
+  assert.equal((await post("approve", proposal)).http, 409);
+  assert.equal(upstreamFetch.mock.callCount(), 0);
+});
+
 test("one dialogue routes chat, writing, knowledge, clarification and external requests through the configured model", async (t) => {
   const messages = ["今天想放松一下。", "写一段雨后街角的开头。", "环形队列为什么需要取模？", "帮我弄一下这个。", "我是说，把上一段改得轻快些。", "替我发送邮件。"];
   const responses = [
@@ -337,6 +383,8 @@ test("experiment follow-ups share the authorized history, revise a pending propo
       assert.equal(input.runs[0].config.policy, "rr");
       assert.ok(input.evidenceOptions.includes("r1-r1-waiting"));
       assert.equal(input.runDetails[0].switchingConsumesTime, false);
+      assert.equal(input.selectedRound, 1);
+      assert.deepEqual(input.diagnoses.map(({ round, evidence }) => ({ round, evidence })), [{ round: 1, evidence: ["waiting"] }]);
       return { action: "explain", observation: "误把切换次数算成耗时。", evidence: ["r1-r1-waiting"] };
     },
     (input) => {
@@ -356,7 +404,11 @@ test("experiment follow-ups share the authorized history, revise a pending propo
   assert.equal((await post("approve", original)).http, 409);
   assert.equal(await getExperimentRun(task.pending[0].id), null);
   task = (await post("approve", task)).task;
-  task = (await post("message", task, { message: "为什么等待时间变长了？" })).task;
+  const selectedRunId = task.runs[0].id;
+  await saveDiagnosis({ runId: selectedRunId, model, promptVersion: 3, createdAt: new Date().toISOString(),
+    evidence: ["waiting"], conclusion: "平均等待为 6。", explanation: "本轮使用固定时间片。", suggestion: "试一个更大的时间片。" });
+  assert.equal((await post("message", task, { message: "看看这轮。", selectedRunId: randomUUID() })).http, 404);
+  task = (await post("message", task, { message: "为什么等待时间变长了？", selectedRunId })).task;
   assert.equal(task.dialogue.turns.at(-1).action, "explain");
   assert.equal(task.dialogue.turns.at(-1).reply, "");
   assert.deepEqual(task.dialogue.turns.at(-1).scheduling[0].processes.map(({ after }) => after), [7, 5, 6]);

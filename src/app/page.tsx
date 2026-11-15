@@ -5,8 +5,8 @@ import { CatalogIcon } from "@/components/experiments/CatalogEffects";
 import { EditorialStory } from "@/components/experiments/EditorialStory";
 import { ExperimentPrompt } from "@/components/experiments/ExperimentPrompt";
 import { courseRoute, courses } from "@/lib/courses";
-import { experimentTaskLinks, quickStartRoute, workflowSteps } from "@/lib/navigation";
-import { getActiveAIWorkflow } from "@/lib/server/experimentRecords";
+import { agentWorkbenchLink, quickStartRoute, workflowSteps } from "@/lib/navigation";
+import { getActiveAIWorkflow, getActiveAgentTask } from "@/lib/server/experimentRecords";
 import "./home-editorial.css";
 import "./story-editorial.css";
 
@@ -19,8 +19,7 @@ const workflowImages = {
 } satisfies Record<keyof typeof workflowSteps, { photo: string; position: string; label: string; description: string }>;
 
 export default async function Home() {
-  const task = await getActiveAIWorkflow();
-  const links = experimentTaskLinks(task);
+  const [agent, task] = await Promise.all([getActiveAgentTask(), getActiveAIWorkflow()]);
 
   return <div className="editorial-home editorial-dynamic editorial-landing">
     <a className="editorial-skip" href="#main-content">跳到正文</a>
@@ -45,13 +44,13 @@ export default async function Home() {
       <EditorialStory id="process" titleId="atlas-title" mode="workflow" kicker="一题四步"
         headline={["把想法", "放进实验。"]} intro="从一个问题，到一轮实测。"
         entries={steps.map((step) => ({ id: step, title: workflowSteps[step], ...workflowImages[step],
-          link: { href: links[step], label: "进入这一步" } }))}>
+          link: { href: agentWorkbenchLink({ intent: step }), label: "进入这一步" } }))}>
         <div id="home-ask" className="editorial-story-form">
           <div className="story-form-copy">
             <p className="editorial-kicker">AI 实验创造台</p>
             <h3>带个问题来。</h3>
             <p>先问，再动手。</p>
-            {task && <Link className="editorial-resume" href="/experiments/create?mode=resume">继续上次实验 <CatalogIcon icon="lucide:arrow-up-right" width={16} /></Link>}
+            {(agent || task) && <Link className="editorial-resume" href={agentWorkbenchLink({ agentId: agent?.id })}>继续上次实验 <CatalogIcon icon="lucide:arrow-up-right" width={16} /></Link>}
           </div>
           <div className="editorial-studio-form">
             <ExperimentPrompt appearance="editorial" />
