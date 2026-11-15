@@ -1,4 +1,6 @@
 import { maxQuestionLength } from "@/lib/experimentCreator";
+import { isAgentConfirmation } from "@/lib/experimentAgent";
+import { sortingEngine } from "@/lib/experiments/sorting";
 import { aiErrorResponse, aiJson, asObject, readAICredentials } from "@/lib/server/aiProvider";
 import { approveAgentTools, cancelAgentTask, clarifyAgentTask, decideAgentTask, replyToAgentMessage } from "@/lib/server/experimentAgent";
 import { createAgentTask, getAgentTask, getExperimentRun, getExperimentWorkflow } from "@/lib/server/experimentRecords";
@@ -42,6 +44,15 @@ export async function POST(request: Request) {
     const task = await getAgentTask(body.id);
     if (!task) return aiJson({ message: "找不到这项任务。" }, 404);
     if (body.action === "status") return aiJson({ task });
+    if (body.action === "sorting-replay") {
+      const run = task.runs.some(({ id, tool }) => id === body.runId && tool === sortingEngine.id)
+        ? await getExperimentRun(body.runId) : null;
+      if (!run || run.session.engineId !== sortingEngine.id || !sortingEngine.validate(run.session.config)
+        || !("kind" in run.results) || run.results.kind !== sortingEngine.id) {
+        return aiJson({ message: "找不到排序回放。" }, 404);
+      }
+      return aiJson({ config: run.session.config, results: run.results });
+    }
     if (body.action === "cancel") return aiJson({ task: await cancelAgentTask(task) });
     if (body.revision !== task.revision) return aiJson({ message: "任务已更新。请刷新。" }, 409);
     switch (body.action) {
@@ -49,6 +60,9 @@ export async function POST(request: Request) {
       case "retry-message": {
         const message = inputText(body.action === "message" ? body.message : task.dialogue?.pending);
         if (!message) return aiJson({ message: "请输入 1–300 字。" }, 400);
+        if (body.action === "message" && isAgentConfirmation(task, message)) {
+          return aiJson({ task: task.phase === "confirm" ? await approveAgentTools(task) : task });
+        }
         const credentials = readAICredentials(request);
         if (containsKey(message, authorization) || message.includes(credentials.apiKey)) {
           return aiJson({ message: "请移除问题里的 Key。" }, 400);

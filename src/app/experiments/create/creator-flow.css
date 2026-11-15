@@ -115,6 +115,9 @@
 .agent-workbench .agent-config { white-space: pre-wrap; overflow-wrap: anywhere; }
 .agent-workbench :is(.agent-message, .agent-reply) { white-space: pre-wrap; }
 .agent-workbench .agent-message { margin-bottom: 8px; }
+.agent-workbench .agent-sorting-replay { margin: 12px 0; color: var(--work-paper); }
+.agent-workbench .agent-sorting-replay .simulation-controls span,
+.agent-workbench .agent-sorting-replay .simulation-caption { color: var(--work-ink); }
 .agent-workbench :is(p, dd, li) { overflow-wrap: anywhere; }
 .creator-result-actions, .creator-run-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 16px; }
 .creator-run-strip { margin-bottom: 11px; border-block: 1px solid var(--work-line); font-size: 14px; }

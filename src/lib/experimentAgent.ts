@@ -28,9 +28,18 @@ export type AgentTurn = { message: string } & (
   { reply: string; model: string; action: AgentTurnAction; evidence: AgentEvidence[]; scheduling?: SchedulingEvidence[] }
   | { reply?: never; model?: never; action?: never; evidence?: never; scheduling?: never }
 );
+export type AgentFocus = {
+  topic: string;
+  goal?: string;
+  constraints?: string;
+  defaults?: "allowed" | "forbidden";
+  // Completed runs before this index remain available as history.
+  firstRun?: number;
+};
 export type AgentDialogue = {
   turns: AgentTurn[];
   requests: number;
+  focus?: AgentFocus;
   pending?: string;
   activeUntil?: number;
   error?: string;
@@ -49,6 +58,7 @@ export type AgentTask = {
   clarifications: { question: string; answer: string }[];
   dialogue?: AgentDialogue;
   experimentGoal?: string;
+  autoContinue?: boolean;
   referenceConfig?: Pick<AgentCall, "tool" | "version" | "config">;
   question?: string;
   error?: string;
@@ -56,6 +66,17 @@ export type AgentTask = {
   requests: number;
   steps: number;
 };
+
+const confirmationCommands = new Set([
+  "确认", "确认运行", "确认并运行", "开始", "开始运行", "开始实验", "运行", "运行实验", "执行", "执行实验",
+  "确认吧", "开始吧", "运行吧", "确认执行", "开始执行", "请开始", "请开始运行", "请运行", "请执行", "可以开始了",
+]);
+
+// A whole-message command grants consent for the current batch only.
+export function isAgentConfirmation(task: AgentTask, message: string) {
+  const command = message.normalize("NFKC").trim().replace(/[。.!]$/u, "");
+  return (task.pending.length > 0 || task.runs.length > 0) && confirmationCommands.has(command);
+}
 
 export function agentDialogueActive(task: AgentTask) {
   return (task.dialogue?.activeUntil ?? 0) > Date.now();

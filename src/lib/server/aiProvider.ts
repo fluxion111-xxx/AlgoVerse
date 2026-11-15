@@ -29,10 +29,12 @@ const siliconFlowModels = {
 const siliconFlowEndpoint = "https://api.siliconflow.cn/v1/chat/completions";
 export type PendingAIRequest<T> = { fingerprint: string; task: Promise<T> };
 type Operation = "connection_test" | "quick_start_plan" | "experiment_diagnosis" | "experiment_creator" | "experiment_agent" | "tutor" | "learning_advice";
+type DialogueMessage = { role: "user" | "assistant"; content: string };
 type RequestOptions<T> = {
   operation: Operation;
   instructions: string;
   input: unknown;
+  dialogue?: DialogueMessage[];
   maxTokens: number;
   normalizeContent?: (content: string) => string;
   backupTutorFormat?: { instructions: string; normalizeContent: (content: string) => string };
@@ -242,7 +244,7 @@ async function providerError(provider: AIProvider | "siliconflow", response: Res
 }
 
 export async function requestAIJson<T>(credentials: AICredentials, options: RequestOptions<T>) {
-  if (JSON.stringify(options.input)?.includes(credentials.apiKey)) {
+  if (JSON.stringify(options.input)?.includes(credentials.apiKey) || options.dialogue?.some(({ content }) => content.includes(credentials.apiKey))) {
     throw new AIRequestError("请先移除问题里的 Key。", 400);
   }
   if (credentials.visitor !== undefined) return requestPlatformAI(credentials, options);
@@ -342,7 +344,8 @@ async function requestCompletion<T>({ apiKey, selection: { provider }, signal }:
       body: JSON.stringify({
         model,
         ...parameters,
-        messages: [{ role: "system", content: options.instructions }, { role: "user", content: JSON.stringify(options.input) }],
+        messages: [{ role: "system", content: options.instructions }, { role: "user", content: JSON.stringify(options.input) },
+          ...(options.dialogue ?? [])],
         ...(output === "json-object" && { response_format: { type: "json_object" } }),
       }),
     });

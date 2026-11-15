@@ -12,13 +12,38 @@ export const agentTools = creatorCapabilities.map(({ id, version, title, domain,
   outputSchema: { metrics: { values: "string", description: metrics }, runId: "UUID", sessionId: "UUID", completedAt: "ISO 8601" },
 }));
 
-export function prepareToolCall(value: unknown, seed: number): AgentCall | null {
+export function agentPlanningTools(seed: number) {
+  return agentTools.map(({ tool, version, description, inputSchema, outputSchema }) => {
+    const preset = getExperimentEngine(tool, version)?.preset(seed);
+    const inputs = preset && Object.fromEntries(Object.entries(preset).filter(([key]) => Object.hasOwn(inputSchema, key)));
+    return { tool, description, inputSchema, metrics: outputSchema.metrics.description,
+      preset: inputs && (JSON.stringify(inputs).length <= 240 ? inputs : { goalLabel: preset?.goalLabel }) };
+  });
+}
+
+export function prepareToolCall(value: unknown, seed: number, options?: {
+  presetGoal?: string;
+  base?: Pick<AgentCall, "tool" | "version" | "config">;
+}): AgentCall | null {
   const input = fields(value, ["tool", "parameters"]);
   if (!input) return null;
   const tool = agentTools.find(({ tool }) => tool === input.tool);
   const engine = tool && getExperimentEngine(tool.tool, tool.version);
-  const config = engine?.configure(input.parameters, seed);
-  if (!engine || !config || !engine.validate(config)) return null;
+  if (!tool || !engine) return null;
+  const base = options?.base;
+  const changes = input.parameters !== null && typeof input.parameters === "object" && !Array.isArray(input.parameters)
+    ? input.parameters : undefined;
+  let config;
+  if (input.parameters === "preset" && options?.presetGoal) {
+    config = { ...engine.preset(seed), goalLabel: options.presetGoal };
+  } else if (base?.tool === engine.id && base.version === engine.version && changes
+    && Object.keys(changes).every((key) => Object.hasOwn(tool.inputSchema, key))) {
+    const revised = { ...base.config, ...changes };
+    config = engine.validate(revised) ? revised : engine.configure({ goalLabel: base.config.goalLabel, ...changes }, seed);
+  } else {
+    config = engine.configure(input.parameters, seed);
+  }
+  if (!config || !engine.validate(config)) return null;
   return { id: randomUUID(), sessionId: randomUUID(), tool: engine.id, version: engine.version, config };
 }
 
