@@ -1,62 +1,66 @@
 import type { Metadata } from "next";
-import { CourseTile } from "@/components/experiments/CatalogEffects";
-import { LabMasthead } from "@/components/experiments/LabMasthead";
-import { LabIcon } from "@/components/experiments/LabIcon";
-import { LabPaper, LabPaperMasks, LabSheet } from "@/components/experiments/LabPaper";
+import Link from "next/link";
+import { CatalogIcon } from "@/components/experiments/CatalogEffects";
+import { EditorialStory } from "@/components/experiments/EditorialStory";
 import { ExperimentCreator } from "@/components/experiments/ExperimentCreator";
-import { courses } from "@/lib/courses";
-import "./catalog-collage.css";
+import { LabMasthead } from "@/components/experiments/LabMasthead";
+import { courseRoute, courses, primaryExperimentRoute, type Course } from "@/lib/courses";
+import { registeredEngines } from "@/lib/experimentEngines";
+import { creatorRoute } from "@/lib/navigation";
+import "../home-editorial.css";
+import "../story-editorial.css";
+import "./catalog-editorial.css";
 
 export const metadata: Metadata = {
   title: "实验中心｜AlgoVerse 智算万象",
-  description: "六门计算机课程。选一门，动手做实验。",
+  description: "六个计算机方向。选一门，动手做实验。",
 };
 
+const photography = {
+  algorithms: { photo: "/phase-two/board.webp", position: "center 45%" },
+  "operating-systems": { photo: "/phase-two/processor.webp", position: "center 46%" },
+  networks: { photo: "/phase-two/switch.webp", position: "center 50%" },
+  programming: { photo: "/lab/laptop.jpg", position: "center 48%" },
+  databases: { photo: "/phase-two/storage.webp", position: "center 44%" },
+  ai: { photo: "/phase-two/gpu.webp", position: "center 55%" },
+} satisfies Record<Course["slug"], { photo: string; position: string }>;
+
 export default function ExperimentsPage() {
-  return (
-    <main className="lab-catalog collage-page">
-      <div className="lab-stage collage-canvas">
-        <LabPaperMasks />
-        <div className="lab-collage" aria-hidden="true">
-          <LabPaper shape="black" className="lab-graph-paper" />
-          <LabPaper shape="rust" className="lab-rust-top" />
-          <LabPaper shape="rust" className="lab-rust-right" />
-          <LabPaper shape="backing" className="lab-backing" />
-          <LabPaper shape="rust" className="lab-rust-bottom" />
-          <LabPaper shape="networkRibbon" className="lab-network-paper" />
-          <span className="lab-middle-scrap" />
-          <LabPaper shape="corner" className="lab-corner" />
-          <LabPaper shape="masthead" className="lab-header-paper" />
-          <span className="lab-mountain lab-mountain-left" />
-          <span className="lab-mountain lab-mountain-center" />
-          <span className="lab-mountain lab-mountain-right" />
-          <span className="lab-gear"><LabIcon name="gear" /></span>
+  return <div className="editorial-home editorial-dynamic lab-index">
+    <a className="editorial-skip" href="#main-content">跳到正文</a>
+    <LabMasthead />
+    <main id="main-content">
+      <section className="lab-index-hero editorial-frame" aria-labelledby="experiments-title">
+        <div>
+          <p className="editorial-kicker"><span lang="en">AlgoVerse</span><span>六大实验领域</span></p>
+          <h1 id="experiments-title">实验中心</h1>
         </div>
-        <LabMasthead />
-
-        <header className="lab-title">
-          <h1>实验中心</h1>
-          <LabSheet className="lab-title-label" shape="label"><p>把计算机拆开看看。</p></LabSheet>
-        </header>
-
-        <div className="lab-workbench" aria-hidden="true">
-          <span className="lab-work-scrap" />
-          <span className="lab-desk-surface" />
-          <span className="lab-prop lab-prop-books"><img src="/lab/books.jpg" alt="" width="850" height="535" /></span>
-          <span className="lab-prop lab-prop-mug"><img src="/lab/mug.jpg" alt="" width="850" height="567" /></span>
-          <span className="lab-prop lab-prop-laptop"><img src="/lab/laptop.jpg" alt="" width="850" height="566" /></span>
+        <div className="lab-index-hero-aside">
+          <p className="lab-index-hero-deck">拆开计算机。动手跑一遍。</p>
+          <div className="editorial-actions">
+            <a className="editorial-button editorial-button-primary" href="#courses">浏览六大模块 <CatalogIcon icon="lucide:arrow-down" width={17} /></a>
+            <a className="editorial-button" href="#process">用 AI 设计实验 <CatalogIcon icon="lucide:arrow-up-right" width={17} /></a>
+          </div>
         </div>
-
-        <LabSheet className="lab-creator-sheet" shape="creator">
-          <span className="lab-tape lab-tape-creator" aria-hidden="true" />
-          <ExperimentCreator />
-        </LabSheet>
-
-        <section className="lab-courses" id="courses" aria-label="课程目录">
-          {courses.map((course, index) => <CourseTile key={course.slug} course={course} index={index} />)}
-          <span className="lab-tape lab-tape-course" aria-hidden="true" />
-        </section>
-      </div>
+      </section>
+      <EditorialStory id="courses" titleId="lab-index-title" mode="directory" kicker="六大实验领域"
+        headline={["选个方向，", "动手试。"]} intro="从算法到模型，每门都能跑。"
+        entries={courses.map((course) => ({ id: course.slug, title: course.title, description: course.introduction, ...photography[course.slug],
+          label: `${registeredEngines.filter(({ domain }) => domain === course.slug).length} 个可运行实验`,
+          link: { href: courseRoute(course), label: "进入模块" },
+          secondary: { href: primaryExperimentRoute(course), label: `试试${course.primary.title}` } }))} />
+      <section id="process" className="lab-index-creation editorial-frame" aria-labelledby="lab-creation-title">
+        <div className="lab-index-creation-copy">
+          <p className="editorial-kicker" lang="en">AI WORKBENCH</p>
+          <h2 id="lab-creation-title">带个问题来。</h2>
+          <p>写下想法，再选参数。</p>
+          <nav className="lab-index-workflow-links" aria-label="实验入口">
+            <Link href={creatorRoute}>AI 智能创造 <CatalogIcon icon="lucide:arrow-up-right" width={17} /></Link>
+            <Link href="/experiments/create?mode=resume">继续当前任务 <CatalogIcon icon="lucide:arrow-up-right" width={17} /></Link>
+          </nav>
+        </div>
+        <ExperimentCreator />
+      </section>
     </main>
-  );
+  </div>;
 }

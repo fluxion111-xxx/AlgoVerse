@@ -1,109 +1,177 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { Icon } from "@iconify/react";
-import { motion, useReducedMotion } from "motion/react";
-import { COLS, GOAL, ROWS, START, search, type Algorithm, type SearchResult } from "@/lib/pathfinding";
+import Link from "next/link";
+import { pathfindingRoute } from "@/lib/courses";
+import { creatorRoute } from "@/lib/navigation";
+import { COLS, ROWS, type Algorithm, type Difficulty, type RandomMap, type SearchResult, type TimedSearchResult } from "@/lib/pathfinding";
 import { useLabStore } from "@/store/labStore";
+import "./algorithm-sandbox.css";
 
 const CELL = 31;
 const PAD = 14;
 const WIDTH = COLS * CELL + PAD * 2;
 const HEIGHT = ROWS * CELL + PAD * 2;
+const names = { dijkstra: "Dijkstra", astar: "A*" };
+const difficulties = { easy: "简单", normal: "普通", hard: "困难" };
+const seedText = (seed: number) => seed.toString(16).toUpperCase().padStart(8, "0");
 
 function center(node: number) {
   return {
-    x: PAD + (node % COLS) * CELL + CELL / 2,
-    y: PAD + Math.floor(node / COLS) * CELL + CELL / 2,
+    x: PAD + (node % COLS + 0.5) * CELL,
+    y: PAD + (Math.floor(node / COLS) + 0.5) * CELL,
   };
 }
 
-function Metric({ icon, value, label }: { icon: string; value: string; label: string }) {
-  return <span className="metric"><Icon icon={icon} width={17} /><strong>{value}</strong><small>{label}</small></span>;
+function Metric({ value, label }: { value: string; label: string }) {
+  return <span className="metric"><small>{label}</small><strong>{value}</strong></span>;
 }
 
-function Graph({ algorithm, result, frame, walls, onToggle }: {
+function Graph({ algorithm, result, frame, map }: {
   algorithm: Algorithm;
   result: SearchResult | null;
   frame: number;
-  walls: number[];
-  onToggle: (node: number) => void;
+  map: RandomMap | null;
 }) {
-  const reduceMotion = useReducedMotion();
-  const currentVisits = result?.visited.slice(0, frame) ?? [];
-  const visited = new Set(currentVisits);
-  const complete = result ? frame >= result.visited.length : false;
-  const path = complete ? result?.path ?? [] : [];
+  const grid = useId();
+  const visits = result?.visited.slice(0, frame) ?? [];
+  const segments = Math.max(0, frame - (result?.visited.length ?? 0));
+  const path = result && segments > 0 ? result.path.slice(0, segments + 1) : [];
   const points = path.map((node) => {
-    const point = center(node);
-    return `${point.x},${point.y}`;
+    const { x, y } = center(node);
+    return `${x},${y}`;
   }).join(" ");
 
   return (
-    <svg className="graph-svg" viewBox={`0 0 ${WIDTH} ${HEIGHT}`} role="img" aria-label={`${algorithm === "astar" ? "A 星" : "Dijkstra"} 寻路网格，点击格子可改变障碍`}>
+    <svg className="graph-svg" viewBox={`0 0 ${WIDTH} ${HEIGHT}`} role="img"
+      aria-label={`${names[algorithm]} 寻路沙盘`} data-seed={map?.seed} data-start={map?.start} data-goal={map?.goal}>
       <defs>
-        <pattern id={`grid-${algorithm}`} width={CELL} height={CELL} patternUnits="userSpaceOnUse" x={PAD} y={PAD}>
-          <path d={`M ${CELL} 0 L 0 0 0 ${CELL}`} fill="none" stroke="#dfd2c3" strokeWidth="1" />
+        <pattern id={grid} width={CELL} height={CELL} patternUnits="userSpaceOnUse" x={PAD} y={PAD}>
+          <path d={`M ${CELL} 0 H 0 V ${CELL}`} fill="none" stroke="#756c5a" strokeOpacity=".62" />
+          <path d="M15.5 13v5m-2.5-2.5h5" stroke="#938670" strokeOpacity=".27" strokeWidth=".8" />
         </pattern>
-        <linearGradient id={`route-${algorithm}`} x1="0" x2="0" y1="0" y2="1">
-          <stop stopColor={algorithm === "astar" ? "#86c63d" : "#ffb82d"} />
-          <stop offset="1" stopColor={algorithm === "astar" ? "#318619" : "#e4520b"} />
-        </linearGradient>
       </defs>
-      <rect x={PAD} y={PAD} width={COLS * CELL} height={ROWS * CELL} fill={`url(#grid-${algorithm})`} />
-      {Array.from({ length: COLS * ROWS }, (_, node) => {
+      <rect x={PAD} y={PAD} width={COLS * CELL} height={ROWS * CELL} fill={`url(#${grid})`} stroke="#605646" />
+      {map?.walls.map((node) => {
         const { x, y } = center(node);
-        const isWall = walls.includes(node);
-        const isVisited = visited.has(node) && node !== START && node !== GOAL;
         return (
-          <g key={node}>
-            {isVisited && !complete && <rect x={x - 12} y={y - 12} width="24" height="24" rx="4" fill={algorithm === "astar" ? "#dce8cd" : "#fbe1c9"} />}
-            {isWall && <rect x={x - 14} y={y - 14} width="28" height="28" rx="3" fill="#6e685e" />}
-            {node !== START && node !== GOAL && <rect className="graph-hit" x={x - CELL / 2} y={y - CELL / 2} width={CELL} height={CELL} fill="transparent" onClick={() => onToggle(node)}>
-              <title>{isWall ? "移除障碍" : "添加障碍"}</title>
-            </rect>}
+          <g key={node} className="sandbox-wall" data-cell={node} transform={`translate(${x},${y})`}>
+            <rect x="-10" y="-6" width="26" height="22" rx="3" fill="#141211" opacity=".66" />
+            <path d="M-12 -9 11 -9 11 9 7 13-12 13Z" fill="#302823" stroke="#171511" />
+            <path d="M-12 7 7 7 11 3 11 9 7 13-12 13Z" fill="#4c4034" />
+            <path d="M-12 -9-8 -13H11V3L7 7H-12Z" fill="#796958" stroke="#9b8a73" strokeWidth=".75" />
+            <path d="M-7 -10H8M-9 -7V3" stroke="#b9a58b" strokeOpacity=".58" strokeWidth=".75" />
           </g>
         );
       })}
-      {path.length > 1 && <motion.polyline points={points} fill="none" stroke={algorithm === "astar" ? "#36813d" : "#db651c"} strokeWidth="4.4" strokeLinecap="round" strokeLinejoin="round" pointerEvents="none" initial={reduceMotion ? false : { pathLength: 0 }} animate={{ pathLength: 1 }} transition={{ duration: reduceMotion ? 0 : 0.38, ease: "easeOut" }} />}
+      {visits.filter((node) => node !== map?.start && node !== map?.goal).map((node) => {
+        const { x, y } = center(node);
+        return <circle key={node} className="sandbox-visit" cx={x} cy={y} r="5" />;
+      })}
+      {points && <polyline className="sandbox-path" points={points} />}
       {path.slice(1, -1).map((node) => {
         const { x, y } = center(node);
-        return <circle key={node} cx={x} cy={y} r="6" fill={`url(#route-${algorithm})`} pointerEvents="none" />;
+        return <circle key={node} className="sandbox-path-pin" cx={x} cy={y} r="3.2" />;
       })}
-      {[START, GOAL].map((node) => {
-        const { x, y } = center(node);
-        return <g key={node} pointerEvents="none"><circle cx={x} cy={y} r="13" fill={`url(#route-${algorithm})`} /><text x={x} y={y + 5} textAnchor="middle" fill="white" fontSize="15" fontWeight="800">{node === START ? "S" : "G"}</text></g>;
-      })}
+      {map && (
+        <>
+          <g transform={`translate(${center(map.start).x},${center(map.start).y})`}>
+            <circle r="13" cy="2" fill="#141211" />
+            <circle r="11" fill="#4d6354" stroke="#c3ceb1" strokeWidth="1.5" />
+            <text className="sandbox-marker" y="4.5">S</text>
+          </g>
+          <g transform={`translate(${center(map.goal).x},${center(map.goal).y})`}>
+            <path d="M0 -14 14 0 0 16-14 0Z" fill="#141211" />
+            <path d="M0 -12 12 0 0 12-12 0Z" fill="#835235" stroke="#ecc399" strokeWidth="1.5" />
+            <text className="sandbox-marker" y="4.5">G</text>
+          </g>
+        </>
+      )}
     </svg>
   );
 }
 
-function AlgorithmCard({ algorithm, result, frame, walls, onToggle, position, onSelect }: {
+function AlgorithmCard({ algorithm, result, frame, map, position, onSelect }: {
   algorithm: Algorithm;
-  result: SearchResult | null;
+  result: TimedSearchResult | null;
   frame: number;
-  walls: number[];
-  onToggle: (node: number) => void;
+  map: RandomMap | null;
   position: "左侧" | "右侧";
   onSelect: (algorithm: Algorithm) => void;
 }) {
   const isAStar = algorithm === "astar";
   const count = Math.min(frame, result?.visited.length ?? 0);
-  const time = result ? (result.elapsedMs < 1 ? "<1" : result.elapsedMs.toFixed(1)) : "—";
+  const reached = result && frame >= result.visited.length;
+  const elapsed = reached ? result.elapsedMs : result?.visitElapsedMs[count - 1];
   return (
     <div className={`algorithm-card ${isAStar ? "algorithm-card-green" : ""}`}>
       <label className="algorithm-title">
-        <span>{isAStar ? "A*" : "Dijkstra"}</span><small>{isAStar ? "启发式" : "最短路"}</small><Icon icon="lucide:chevron-down" width={17} aria-hidden="true" />
-        <select aria-label={`${position}算法`} value={algorithm} onChange={(event) => onSelect(event.target.value === "astar" ? "astar" : "dijkstra")}>
+        <span>{names[algorithm]}</span><small>{isAStar ? "启发式" : "最短路"}</small><Icon icon="lucide:chevron-down" width={17} aria-hidden="true" />
+        <select aria-label={`${position}算法`} value={algorithm} onChange={(event) => onSelect(event.target.value as Algorithm)}>
           <option value="dijkstra">Dijkstra 最短路</option>
           <option value="astar">A* 启发式</option>
         </select>
       </label>
-      <Graph algorithm={algorithm} result={result} frame={frame} walls={walls} onToggle={onToggle} />
+      <Graph key={map?.seed} algorithm={algorithm} result={result} frame={frame} map={map} />
       <div className="metric-row">
-        <Metric icon="lucide:zap" value={time} label="ms" />
-        <Metric icon="lucide:layers-2" value={String(count)} label="访问节点" />
+        <Metric value={result ? String(count) : "—"} label="访问节点" />
+        <Metric value={reached ? result.pathLength?.toFixed(2) ?? "—" : "—"} label="路径长度" />
+        <Metric value={elapsed?.toFixed(3) ?? "—"} label="耗时 ms" />
       </div>
+    </div>
+  );
+}
+
+function DifficultyOptions() {
+  return Object.entries(difficulties).map(([value, label]) => <option key={value} value={value}>{label}</option>);
+}
+
+function RoundReport({ map, results, finished, reproduce }: {
+  map: RandomMap | null;
+  results: { dijkstra: SearchResult; astar: SearchResult } | null;
+  finished: boolean;
+  reproduce: (difficulty: Difficulty, seed: number) => void;
+}) {
+  const report = useRef<HTMLDivElement>(null);
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    const seed = String(data.get("seed"));
+    const difficulty = data.get("difficulty") as Difficulty;
+    reproduce(difficulty, Number.parseInt(seed, 16));
+    report.current?.hidePopover();
+  }
+
+  const saved = finished ? results : null;
+  return (
+    <div className="sandbox-report" id="sandbox-report" ref={report} popover="auto" role="dialog" aria-labelledby="sandbox-report-title">
+      <header>
+        <h2 id="sandbox-report-title">本轮实验报告</h2>
+        <button type="button" popoverTarget="sandbox-report" popoverTargetAction="hide" aria-label="关闭报告">关闭</button>
+      </header>
+      {map && <p>{difficulties[map.difficulty]} · {map.walls.length} 个障碍 · 种子 <code>{seedText(map.seed)}</code></p>}
+      {saved ? (
+        <table>
+          <caption>耗时为算法实际计算时间。</caption>
+          <thead><tr><th>算法</th><th>访问节点</th><th>路径长度</th><th>耗时 ms</th></tr></thead>
+          <tbody>
+            {(Object.keys(names) as Algorithm[]).map((algorithm) => {
+              const result = saved[algorithm];
+              return <tr key={algorithm}><th scope="row">{names[algorithm]}</th><td>{result.visited.length}</td><td>{result.pathLength?.toFixed(2)}</td><td>{result.elapsedMs.toFixed(3)}</td></tr>;
+            })}
+          </tbody>
+        </table>
+      ) : <p>跑完后看本轮数据。</p>}
+      <form key={map?.seed} onSubmit={submit}>
+        <label>种子
+          <input name="seed" required pattern="[0-9A-Fa-f]{8}" maxLength={8} autoComplete="off" spellCheck={false}
+            defaultValue={map ? seedText(map.seed) : ""} title="输入 8 位十六进制种子" />
+        </label>
+        <label>难度 <select name="difficulty" defaultValue={map?.difficulty ?? "normal"}><DifficultyOptions /></select></label>
+        <button type="submit">复现对比</button>
+      </form>
     </div>
   );
 }
@@ -111,46 +179,18 @@ function AlgorithmCard({ algorithm, result, frame, walls, onToggle, position, on
 export function AlgorithmLab() {
   const [leftAlgorithm, setLeftAlgorithm] = useState<Algorithm>("dijkstra");
   const rightAlgorithm = leftAlgorithm === "dijkstra" ? "astar" : "dijkstra";
-  const { walls, results, frame, running, toggleWall, resetWalls, setResults, setFrame, setRunning } = useLabStore();
-  const maxFrame = useMemo(() => Math.max(results?.dijkstra.visited.length ?? 0, results?.astar.visited.length ?? 0), [results]);
+  const [speed, setSpeed] = useState(1);
+  const { map, results, frame, lastFrame, running, difficulty, setDifficulty, ensureMap, run, randomize, togglePlayback, tick, step, reset, reproduce } = useLabStore();
+
+  useEffect(() => { ensureMap(); }, [ensureMap]);
 
   useEffect(() => {
-    const computed = { dijkstra: search("dijkstra", walls), astar: search("astar", walls) };
-    setResults(computed);
-    setFrame(Math.max(computed.dijkstra.visited.length, computed.astar.visited.length));
-    // Initial map preview; later edits are run with the button.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    if (!running || !results) return;
-    const timer = window.setInterval(() => {
-      const next = useLabStore.getState().frame + 2;
-      if (next >= maxFrame) {
-        setFrame(maxFrame);
-        setRunning(false);
-      } else {
-        setFrame(next);
-      }
-    }, 70);
+    if (!running) return;
+    const timer = window.setInterval(tick, 110 / speed);
     return () => window.clearInterval(timer);
-  }, [running, results, maxFrame, setFrame, setRunning]);
+  }, [map, running, speed, tick]);
 
-  function run() {
-    setResults({ dijkstra: search("dijkstra", walls), astar: search("astar", walls) });
-    setFrame(0);
-    setRunning(true);
-  }
-
-  function reset() {
-    resetWalls();
-    const defaults = useLabStore.getState().walls;
-    const computed = { dijkstra: search("dijkstra", defaults), astar: search("astar", defaults) };
-    setResults(computed);
-    setFrame(Math.max(computed.dijkstra.visited.length, computed.astar.visited.length));
-  }
-
-  const finished = !!results && frame >= maxFrame;
+  const finished = !!results && frame === lastFrame;
   const dijkstraVisits = results?.dijkstra.visited.length ?? 0;
   const astarVisits = results?.astar.visited.length ?? 0;
   let visitNote = "点运行，看访问差异。";
@@ -161,28 +201,42 @@ export function AlgorithmLab() {
   const routeNote = finished
     ? results.astar.path.length && results.dijkstra.path.length ? "两种算法都找到路。" : "终点不通，试试移开障碍。"
     : "跑完再看有没有路。";
+  const playback = running ? "暂停" : "播放";
 
   return (
     <section className="lab-assembly" id="lab">
       <div className="lab-shadow-sheet" aria-hidden="true" />
       <div className="lab-window">
         <div className="window-top"><span className="window-dots"><i /><i /><i /></span><span className="window-code">ALGOVERSE / LAB-01</span><span className="window-actions"><i /><i /><i /></span></div>
-        <div className="lab-inner">
-          <div className="lab-tape"><Icon icon="lucide:flask-conical" width={25} /><span>算法对比实验</span></div>
-          <div className="lab-intro"><span className="live-dot" />点格子，改障碍。<span className="lab-data-note">本地实时计算</span></div>
+        <div className="lab-inner pathfinding-sandbox" data-frame={frame}>
+          <Link className="lab-tape" href={pathfindingRoute}><Icon icon="lucide:flask-conical" width={25} /><span>算法对比实验</span></Link>
+          <div className="lab-intro">
+            <span className="sandbox-seed"><span className="live-dot" aria-hidden="true" />种子 <code>{map ? seedText(map.seed) : "--------"}</code></span>
+            <div className="sandbox-settings">
+              <label title="下一张地图的难度">难度 <select aria-label="地图难度" value={difficulty} onChange={(event) => setDifficulty(event.target.value as Difficulty)}><DifficultyOptions /></select></label>
+              <label>速度 <select aria-label="动画速度" value={speed} onChange={(event) => setSpeed(Number(event.target.value))}>
+                <option value={0.5}>0.5×</option><option value={1}>1×</option><option value={2}>2×</option><option value={4}>4×</option>
+              </select></label>
+            </div>
+          </div>
           <div className="algorithm-grid grid">
-            <AlgorithmCard algorithm={leftAlgorithm} result={results?.[leftAlgorithm] ?? null} frame={frame} walls={walls} onToggle={toggleWall} position="左侧" onSelect={setLeftAlgorithm} />
-            <AlgorithmCard algorithm={rightAlgorithm} result={results?.[rightAlgorithm] ?? null} frame={frame} walls={walls} onToggle={toggleWall} position="右侧" onSelect={(algorithm) => setLeftAlgorithm(algorithm === "astar" ? "dijkstra" : "astar")} />
+            <AlgorithmCard algorithm={leftAlgorithm} result={results?.[leftAlgorithm] ?? null} frame={frame} map={map} position="左侧" onSelect={setLeftAlgorithm} />
+            <AlgorithmCard algorithm={rightAlgorithm} result={results?.[rightAlgorithm] ?? null} frame={frame} map={map} position="右侧" onSelect={(algorithm) => setLeftAlgorithm(algorithm === "astar" ? "dijkstra" : "astar")} />
           </div>
           <div className="lab-controls">
-            <button className="run-button" onClick={run}><Icon icon={running ? "lucide:rotate-cw" : "lucide:play"} width={17} />{running ? "重新运行" : "运行对比"}</button>
-            <button className="reset-button" onClick={reset}><Icon icon="lucide:undo-2" width={16} />重置地图</button>
-            <span className="lab-hint">点击网格，试试改路。</span>
+            <button type="button" className="run-button" onClick={run}><Icon icon="lucide:play" width={16} aria-hidden="true" />运行对比</button>
+            <button type="button" onClick={randomize} aria-label="重新随机地图" title="重新随机地图"><Icon icon="lucide:shuffle" width={16} aria-hidden="true" /><span>换图</span></button>
+            <button type="button" onClick={togglePlayback} disabled={!results} aria-label={playback} title={playback}><Icon icon={running ? "lucide:pause" : "lucide:play"} width={16} aria-hidden="true" /><span>{playback}</span></button>
+            <button type="button" onClick={step} disabled={!results || finished} aria-label="单步执行" title="单步执行"><Icon icon="lucide:step-forward" width={16} aria-hidden="true" /><span>单步</span></button>
+            <button type="button" onClick={reset} disabled={!results} aria-label="重置实验" title="重置实验"><Icon icon="lucide:undo-2" width={16} aria-hidden="true" /><span>重置</span></button>
+            <button type="button" popoverTarget="sandbox-report" aria-label="本轮实验报告" title="本轮实验报告"><Icon icon="lucide:clipboard-list" width={16} aria-hidden="true" /><span>报告</span></button>
           </div>
+          <span className="sr-only" role="status">{finished ? "对比完成。可查看报告。" : running ? "正在运行对比。" : results ? "对比已暂停。" : "地图已就绪。"}</span>
+          <RoundReport map={map} results={results} finished={finished} reproduce={reproduce} />
         </div>
       </div>
-      <aside className="diagnosis-note">
-        <div className="diagnosis-heading"><Icon icon="lucide:sparkles" width={23} /><span>AI 诊断建议</span></div>
+      <aside className="diagnosis-note" id="lab-diagnosis">
+        <Link className="diagnosis-heading" href={`${creatorRoute}?mode=resume`}><Icon icon="lucide:sparkles" width={23} /><span>AI 诊断建议</span></Link>
         <p className="demo-label">规则演示 · 未接入 AI</p>
         <ul>
           <li><Icon icon="lucide:check" width={18} />{visitNote}</li>

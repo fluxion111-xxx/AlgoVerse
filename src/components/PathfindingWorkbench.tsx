@@ -2,7 +2,10 @@
 
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Icon } from "@iconify/react";
-import { COLS, ROWS, START, GOAL, initialWalls, search, type Algorithm, type SearchResult } from "@/lib/pathfinding";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { COLS, ROWS, START, GOAL, initialWalls, search, shortestStepCount, type Algorithm, type SearchResult } from "@/lib/pathfinding";
+import { PresetSubmit } from "@/components/experiments/PresetSubmit";
 
 const tools = [
   { id: "wall", label: "障碍", icon: "lucide:brick-wall" },
@@ -77,18 +80,73 @@ function MapEditor({ map, onEdit }: { map: MapState; onEdit: (node: number) => v
   );
 }
 
-function ResultSheet({ algorithm, map, result, frame }: {
+function editMap(map: MapState, tool: MapTool, node: number): { map?: MapState; notice?: string } {
+  if (tool === "wall") {
+    if (node === map.start || node === map.goal) return { notice: "起终点不能放障碍。" };
+    const walls = map.walls.includes(node) ? map.walls.filter((wall) => wall !== node) : [...map.walls, node];
+    return { map: { ...map, walls } };
+  }
+  if (node === map[tool]) return {};
+  if (node === map[tool === "start" ? "goal" : "start"] || map.walls.includes(node)) return { notice: "请选择一块空地。" };
+  return { map: { ...map, [tool]: node } };
+}
+
+export function PathfindingMapEditor({ map, onChange }: { map: MapState; onChange: (next: MapState) => void }) {
+  const [tool, setTool] = useState<MapTool>("wall");
+  const [notice, setNotice] = useState("");
+  return <>
+    <div className="experiment-tools" role="group" aria-label="地图工具">
+      {tools.map(({ id, label, icon }) => <button key={id} type="button" className="experiment-tool" aria-pressed={tool === id}
+        onClick={() => { setTool(id); setNotice(""); }}><Icon icon={icon} width={18} aria-hidden="true" />{label}</button>)}
+    </div>
+    <p className="sr-only" id="experiment-keyboard-tip">方向键移动，回车编辑。</p>
+    <MapEditor map={map} onEdit={(node) => {
+      const next = editMap(map, tool, node);
+      if (next.map) onChange(next.map);
+      setNotice(next.notice ?? "");
+    }} />
+    <p className="experiment-map-tip" role="status">{notice || (tool === "wall" ? "点格子，添加或移除障碍。" : "点一块空地。")}</p>
+  </>;
+}
+
+export function PathfindingMapView({ map, visits = [], path = [], current, label }: {
+  map: MapState;
+  visits?: readonly number[];
+  path?: readonly number[];
+  current?: number;
+  label?: string;
+}) {
+  const visited = new Set(visits);
+  const points = path.map((node) => `${node % COLS + 0.5},${Math.floor(node / COLS) + 0.5}`).join(" ");
+  return (
+    <div className="experiment-map" style={gridColumns} role={label ? "img" : undefined}
+      aria-label={label} aria-hidden={label ? undefined : true}>
+      {cells.map((node) => {
+        const kind = cellKind(node, map);
+        return (
+          <span key={node} className={`experiment-cell is-${kind}${visited.has(node) ? " is-visited" : ""}${node === current ? " is-current" : ""}`}>
+            {cellMarks[kind]}
+          </span>
+        );
+      })}
+      {path.length > 1 && (
+        <svg className="experiment-path" viewBox={`0 0 ${COLS} ${ROWS}`} preserveAspectRatio="none">
+          <polyline points={points} />
+        </svg>
+      )}
+    </div>
+  );
+}
+
+export function ResultSheet({ algorithm, map, result, frame }: {
   algorithm: Algorithm;
   map: MapState;
   result?: SearchResult;
   frame: number;
 }) {
   const visits = result?.visited.slice(0, frame) ?? [];
-  const visited = new Set(visits);
   const complete = !!result && frame >= result.visited.length;
   const path = complete ? result.path : [];
-  const points = path.map((node) => `${node % COLS + 0.5},${Math.floor(node / COLS) + 0.5}`).join(" ");
-  const latest = visits.at(-1);
   const elapsed = complete ? result.elapsedMs : null;
   const status = !result ? "等待运行" : !complete ? "搜索中" : path.length ? "找到路径" : "没有找到路";
 
@@ -98,21 +156,7 @@ function ResultSheet({ algorithm, map, result, frame }: {
         <h3>{algorithmNames[algorithm]}</h3>
         <span className="experiment-result-status">{status}</span>
       </div>
-      <div className="experiment-map" style={gridColumns} aria-hidden="true">
-        {cells.map((node) => {
-          const kind = cellKind(node, map);
-          return (
-            <span key={node} className={`experiment-cell is-${kind}${visited.has(node) ? " is-visited" : ""}${!complete && node === latest ? " is-current" : ""}`}>
-              {cellMarks[kind]}
-            </span>
-          );
-        })}
-        {path.length > 1 && (
-          <svg className="experiment-path" viewBox={`0 0 ${COLS} ${ROWS}`} preserveAspectRatio="none">
-            <polyline points={points} />
-          </svg>
-        )}
-      </div>
+      <PathfindingMapView map={map} visits={visits} path={path} current={complete ? undefined : visits.at(-1)} />
       <dl className="experiment-metrics">
         <div><dt>访问节点</dt><dd>{result ? visits.length : "—"}</dd></div>
         <div><dt>路径长度</dt><dd>{complete && result.pathLength !== null ? result.pathLength.toFixed(2) : "—"}</dd></div>
@@ -122,7 +166,70 @@ function ResultSheet({ algorithm, map, result, frame }: {
   );
 }
 
-export function PathfindingWorkbench() {
+export function SavedPathfindingReplay({ map, results, guide, studio = false }: {
+  map: MapState;
+  results: Record<Algorithm, SearchResult>;
+  guide?: { next: string; auto: boolean };
+  studio?: boolean;
+}) {
+  const router = useRouter();
+  const maxFrame = Math.max(results.dijkstra.visited.length, results.astar.visited.length);
+  const [frame, setFrame] = useState(guide || studio ? 0 : maxFrame);
+  const [playing, setPlaying] = useState(guide?.auto ?? false);
+  useEffect(() => {
+    if (studio && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) setPlaying(true);
+  }, [studio]);
+  const complete = frame >= maxFrame;
+  const auto = guide?.auto ?? false;
+  const next = guide?.next;
+
+  useEffect(() => {
+    if (!playing || complete) return;
+    const timer = window.setInterval(() => setFrame((value) => Math.min(value + 1, maxFrame)), 125);
+    return () => window.clearInterval(timer);
+  }, [playing, complete, maxFrame]);
+
+  useEffect(() => {
+    if (!auto || !complete || !next) return;
+    const timer = window.setTimeout(() => router.replace(next, { scroll: false }), 1500);
+    return () => window.clearTimeout(timer);
+  }, [auto, complete, next, router]);
+
+  return (
+    <section className="experiment-results preset-replay" aria-labelledby="saved-replay-title">
+      <div className="experiment-section-head experiment-results-head">
+        <h2 id="saved-replay-title">运行轨迹</h2>
+        <div className="experiment-legend" aria-label="结果图例"><span><i />已访问</span><span><i />最终路径</span></div>
+      </div>
+      <label className="experiment-actions">
+        回放进度
+        <input type="range" min={0} max={maxFrame} value={frame} onChange={(event) => { setPlaying(false); setFrame(Number(event.target.value)); }} />
+        <span>{frame} / {maxFrame}</span>
+      </label>
+      {(guide || studio) && (
+        <div className="preset-actions">
+          <button type="button" className="experiment-control" onClick={() => {
+            if (complete) setFrame(0);
+            setPlaying(complete || !playing);
+          }}>{studio && <Icon icon={playing && !complete ? "lucide:pause" : "lucide:play"} width={16} aria-hidden="true" />}{complete ? "重播" : playing ? "暂停" : "播放"}</button>
+          {studio && <>
+            <button type="button" className="experiment-control" disabled={complete} onClick={() => { setPlaying(false); setFrame((value) => Math.min(value + 1, maxFrame)); }}><Icon icon="lucide:step-forward" width={16} aria-hidden="true" />单步</button>
+            <button type="button" className="experiment-control" onClick={() => { setPlaying(false); setFrame(0); }}><Icon icon="lucide:rotate-ccw" width={16} aria-hidden="true" />重置</button>
+          </>}
+          {guide && <Link className="experiment-run" href={guide.next}>继续看诊断</Link>}
+        </div>
+      )}
+      {studio && <p className="sr-only" role="status">{complete ? "回放结束。" : playing ? "正在回放搜索。" : frame === 0 ? "回放位于起点。" : "回放已暂停。"}</p>}
+      <div className="experiment-sheets">
+        <ResultSheet algorithm="dijkstra" map={map} result={results.dijkstra} frame={frame} />
+        <ResultSheet algorithm="astar" map={map} result={results.astar} frame={frame} />
+      </div>
+      <p className="experiment-footnote">服务端计算。耗时不含回放。</p>
+    </section>
+  );
+}
+
+export function PathfindingWorkbench({ save }: { save?: (form: FormData) => Promise<void> }) {
   const [map, setMap] = useState(defaultMap);
   const [tool, setTool] = useState<MapTool>("wall");
   const [choice, setChoice] = useState<AlgorithmChoice>("both");
@@ -145,21 +252,10 @@ export function PathfindingWorkbench() {
   }, [playing]);
 
   function edit(node: number) {
-    if (tool === "wall") {
-      if (node === map.start || node === map.goal) {
-        setNotice("起终点不能放障碍。");
-        return;
-      }
-      const walls = map.walls.includes(node) ? map.walls.filter((wall) => wall !== node) : [...map.walls, node];
-      setMap({ ...map, walls });
-    } else {
-      if (node === map[tool]) return;
-      if (node === map[tool === "start" ? "goal" : "start"] || map.walls.includes(node)) {
-        setNotice("请选择一块空地。");
-        return;
-      }
-      setMap({ ...map, [tool]: node });
-    }
+    const next = editMap(map, tool, node);
+    if (next.notice) setNotice(next.notice);
+    if (!next.map) return;
+    setMap(next.map);
     setReplay(null);
     setNotice("地图已更新。");
   }
@@ -245,6 +341,10 @@ export function PathfindingWorkbench() {
           ))}
         </div>
         <p className="experiment-footnote">本地计算。耗时不含播放。</p>
+        {save && replay && shortestStepCount(map) !== null && <form className="preset-actions" action={save}>
+          <input type="hidden" name="parameters" value={JSON.stringify({ goalLabel: "对比两种搜索过程。", map: { kind: "custom", ...map } })} />
+          <PresetSubmit className="experiment-run" pending="正在保存…">用此图运行并保存对比</PresetSubmit>
+        </form>}
       </section>
     </div>
   );

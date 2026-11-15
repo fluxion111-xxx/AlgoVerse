@@ -1,0 +1,25 @@
+import { lesson } from "./types";
+
+export const networkTeaching = {
+  "packet-routing": lesson("基础", "看懂转发表和模拟丢包。",
+    "目的地址 10.1.2.7 同时匹配 /8 和 /24。真实转发表优先 /24。本实验则比较链路总延迟。",
+    "模拟里最短延迟路径是一种简化。真实设备按已有转发表逐跳处理。",
+    { id: "hop-loss", prompt: "实验每跳丢包率设为 100%，有包能走完全程吗？", options: ["有", "没有", "由排序算法决定"], answer: 1, explanation: "只要路径需要转发，包在第一跳就会全部丢弃。" }),
+  "tcp-udp": lesson("基础", "分清字节流和数据报边界。",
+    "TCP 先写 ABC，再写 DE。接收方可能先读到 AB，再读到 CDE。",
+    "一次 TCP 写入不保证对应一次读取。应用要自己拆消息。",
+    { id: "message-boundary", prompt: "哪个协议保留应用数据报的边界？", options: ["TCP", "两者都不保留", "UDP"], answer: 2, explanation: "UDP 以数据报交付。TCP 提供有序字节流。" }),
+  "tls-handshake": lesson("进阶", "说明握手如何建立加密会话。",
+    "浏览器访问 HTTPS。先协商算法，再校验服务器证书和握手签名，最后使用派生密钥。",
+    "看到证书还要核对名称、有效期和信任链。握手也要证明服务器持有私钥。",
+    { id: "server-identity", prompt: "常规 HTTPS 怎样确认服务器身份？", options: ["只看 IP", "校验证书与握手签名", "比较 HTTP 状态码"], answer: 1, explanation: "证书绑定域名和公钥。握手签名验证对端持有对应私钥。" }),
+  "cidr-prefix-match": lesson("基础", "为目的地址选择最长前缀。",
+    "10.2.3.4 同时匹配 10.0.0.0/8 和 10.2.0.0/16。应选择 /16。",
+    "前缀长度衡量匹配精度。默认路由 /0 只在没有更具体项时使用。",
+    { id: "longest-prefix", prompt: "同一地址匹配 /0、/16、/24。选哪项？", options: ["/24", "/16", "/0"], answer: 0, explanation: "/24 固定更多高位。在已有匹配中，它的前缀最长。" }),
+  "parameterized-sql": lesson("基础", "用参数绑定查询中的用户值。",
+    "把用户输入放入参数数组。即使输入含引号，也按值处理。",
+    "手写字符串拼接容易漏掉转义。表名等结构需另做允许列表。",
+    { id: "sql-parameter", prompt: "用户填写的姓名应该放在哪里？", options: ["拼到查询文本", "绑定参数", "作为表名"], answer: 1, explanation: "参数绑定让数据库按值接收姓名，保留既定查询结构。" },
+    { kind: "code", text: "SELECT id FROM users WHERE name = $1" }),
+};

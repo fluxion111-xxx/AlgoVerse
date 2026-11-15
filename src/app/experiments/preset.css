@@ -1,0 +1,18 @@
+.preset-details { margin-block: 12px; font-size: 14px; overflow-wrap: anywhere; }
+.preset-details > div { display: grid; grid-template-columns: 5em minmax(0, 1fr); gap: 8px; padding-block: 4px; }
+.preset-details dt { font-weight: 750; }
+.preset-details dd { margin: 0; }
+.preset-actions { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px; margin-block-start: 12px; }
+.preset-actions button:disabled { opacity: .65; cursor: wait; }
+.preset-replay input { max-width: 100%; accent-color: #a84318; }
+.preset-replay .experiment-sheets { margin-block-start: 14px; }
+.preset-error { color: #803315; }
+.quick-start-progress { margin-block: 14px 10px; font-size: 14px; }
+.quick-start-progress ol { display: flex; flex-wrap: wrap; gap: 5px 12px; margin-block-start: 6px; }
+.quick-start-progress li[aria-current="step"] { font-weight: 800; text-decoration: underline; text-underline-offset: 4px; }
+.quick-start-progress strong, .quick-start-progress li > span:first-child { font-variant-numeric: tabular-nums; }
+.quick-start-request .preset-error { margin-block-start: 6px; }
+.quick-start-diagnosis h3 { margin-block-start: 12px; font-weight: 800; }
+.quick-start-diagnosis td, .quick-start-diagnosis th { text-align: start; padding: 3px 7px 3px 0; font-size: 13px; }
+.quick-start-diagnosis table { margin-block-start: 8px; }
+.quick-start-run-config { margin-block-start: 12px; font-size: 14px; }

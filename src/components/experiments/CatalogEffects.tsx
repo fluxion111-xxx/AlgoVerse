@@ -2,7 +2,7 @@
 
 import { Icon } from "@iconify/react";
 import Link from "next/link";
-import type { Course } from "@/lib/courses";
+import { courseRoute, type Course } from "@/lib/courses";
 import { LabCourseDiagram } from "./LabCourseDiagram";
 import { LabIcon } from "./LabIcon";
 import { LabPaper } from "./LabPaper";
@@ -25,7 +25,7 @@ export function CourseTile({ course, index }: { course: Course; index: number })
   return (
     <article className={`lab-course lab-course-${shape}`}>
       <LabPaper shape={shape} />
-      <Link className="lab-course-link" href={`/experiments/${course.slug}`} aria-label={`进入${course.title}课程`}>
+      <Link className="lab-course-link" href={courseRoute(course)} aria-label={`进入${course.title}`}>
         <div className="lab-course-copy">
           <span className="lab-course-number" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
           <h3>{course.title}</h3>

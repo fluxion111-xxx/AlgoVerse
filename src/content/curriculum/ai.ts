@@ -1,0 +1,113 @@
+import { hainan, cs2023 } from "./sources";
+import { curriculumCourse as course } from "./types";
+
+const hfLLM = { title: "Hugging Face · LLM Course", href: "https://huggingface.co/learn/llm-course/chapter1/1" };
+const hfAgents = { title: "Hugging Face · Agents Course", href: "https://huggingface.co/learn/agents-course/en/unit1/introduction" };
+const sklearn = { title: "scikit-learn · User Guide", href: "https://scikit-learn.org/stable/user_guide.html" };
+
+export const aiCurriculum = [
+  course("ai-foundations", "人工智能导论", [hainan, cs2023], [
+    ["agents-and-environments", "智能体与环境", "状态、感知、动作、评价目标"],
+    ["state-space-search", "状态空间搜索", "状态表示、代价、启发式"],
+    ["adversarial-search", "对抗搜索", "极大极小、Alpha–Beta 剪枝"],
+    ["constraints-and-inference", "约束求解与推理", "约束传播、逻辑表示、推理规则"],
+    ["probabilistic-reasoning", "不确定性推理", "条件独立、贝叶斯网络、近似推断"],
+    ["graphical-model-inference", "概率图模型推断", "消元顺序、因子图、消息传递、似然加权与 Gibbs 采样"],
+    ["variational-inference", "变分推断与证据下界", "ELBO、KL、均值场、坐标更新与收敛诊断"],
+    ["particle-filtering", "粒子滤波与序贯估计", "状态空间、预测、加权、有效粒子数与重采样"],
+    ["particle-path-degeneracy", "长序列粒子退化", "祖先谱系、回溯步长、平滑、粒子 Gibbs 与内存"],
+    ["recorded-sensor-smoothing", "真实传感器长序列平滑", "时间轴、气敏标定、缺测掩码、卡尔曼与 RTS 平滑"],
+    ["nonlinear-trajectory-smoothing", "非线性传感器轨迹平滑", "距离方位、EKF、扩展 RTS 与独立参考轨迹"],
+    ["multisite-fixed-lag-smoothing", "多场地固定滞后平滑", "时间窗口、参考对齐、共用评分、位置平滑与场地分组"],
+    ["raw-vio-lag-latency", "原始视惯融合与交付时延", "原始帧、陀螺、旋转平滑、乱序水位线与延迟"],
+    ["six-dof-fixed-lag-delivery", "六自由度视惯融合与设备交付", "位姿、米制尺度、固定滞后平滑、采集时钟与交付延迟"],
+    ["spatial-vio-fixed-lag", "三维视惯固定滞后与设备时延", "多帧三角化、非平面建图、闭窗与下游交付"],
+    ["vio-map-recovery-delivery", "三维增量地图与失联恢复", "在线路标、关键帧检索、固定滞后与设备交付"],
+    ["cross-scene-loop-timing", "跨场景闭环与物理交付", "长程重定位、平移图、曝光和下游计时"],
+    ["long-loop-exposure-benchmark", "长程闭环与曝光交付", "室内外位姿图、求解收敛、物理时钟与签收"],
+    ["outdoor-vio-loop-screening", "室外视惯重定位与筛边", "原始传感器、几何和惯性门控、曝光签收"],
+  ]),
+  course("supervised-learning", "监督学习", [hainan, sklearn], [
+    ["training-objectives", "学习目标与损失", "分类与回归、经验风险、正则化"],
+    ["nearest-neighbors", "最近邻分类", "距离、归一化、K 值与投票"],
+    ["linear-models", "线性与逻辑回归", "最小二乘、对数几率、决策边界"],
+    ["tree-models", "树模型与集成", "分裂准则、随机森林、提升法"],
+    ["margin-models", "间隔与支持向量机", "最大间隔、软间隔、核方法"],
+  ]),
+  course("unsupervised-learning", "无监督学习", [cs2023, sklearn], [
+    ["clustering", "聚类", "K-means、层次聚类、密度聚类"],
+    ["dimension-reduction", "降维", "PCA、方差解释、低维投影"],
+    ["anomaly-detection", "异常检测", "异常分数、阈值、类别不均衡"],
+    ["cluster-validation", "聚类验证", "轮廓系数、稳定性、可解释性"],
+  ]),
+  course("model-evaluation", "模型评估", [hainan, sklearn], [
+    ["holdout-evaluation", "留出数据", "训练、验证、测试、数据泄漏"],
+    ["resampling", "交叉验证", "分层、分组、时间顺序、模型选择"],
+    ["metrics", "评价指标", "精确率、召回率、校准、回归误差"],
+    ["error-analysis", "误差与泛化分析", "偏差方差、错误分组、分布漂移"],
+  ]),
+  course("deep-learning", "深度学习", [cs2023], [
+    ["neural-networks", "神经网络与激活", "感知机、多层网络、前向传播"],
+    ["backpropagation", "反向传播", "计算图、链式法则、自动微分"],
+    ["optimization", "优化与训练稳定性", "SGD、Adam、初始化、归一化"],
+    ["regularization", "正则化与泛化", "权重衰减、Dropout、早停"],
+    ["training-systems", "训练与推理系统", "批处理、混合精度、显存与吞吐"],
+  ]),
+  course("computer-vision", "计算机视觉", [cs2023], [
+    ["image-formation", "图像与空间变换", "采样、像素、滤波、坐标变换"],
+    ["digital-image-processing", "数字图像处理", "颜色、滤波、边缘、形态学、连通区域与几何校正"],
+    ["video-processing", "视频采样与处理", "帧时间戳、运动估计、时域滤波、色度采样与码率"],
+    ["video-rate-distortion", "视频码率与画质对照", "视频包字节、帧对齐、PSNR、SSIM、CRF 与率失真曲线"],
+    ["real-video-codec-comparison", "实拍视频跨编码器对照", "同源帧、实际负载率、AVC 与 VP9、共同曲线范围"],
+    ["raw-video-codec-benchmark", "原始视频跨编码器比较", "Y4M、I420、多素材、亮度 PSNR 与载荷率"],
+    ["long-hd-codec-comparison", "高分辨率长视频编码对照", "连续帧、共同参考、GOP、质量、码率与资源预算"],
+    ["native-hd-uhd-encoding", "原生高清长片与 4K 多档编码", "输入规格、取帧范围、码率档位、质量与耗时"],
+    ["uhd-equal-rate-perception", "4K 整片等码率与感知画质", "视频包率、全片对齐、感知模型与观看条件"],
+    ["multi-title-4k-rate-quality", "多片源 4K 多档码率与画质", "动画、科普、全片匹配率与感知分位"],
+    ["natural-hdr-full-rate", "自然实拍与 HDR 全片编码", "分片完整性、原生信号、实际包率与质量配对"],
+    ["hdr10plus-frame-audit", "HDR10+ 全片保真与盲评", "动态字段、帧时序、显示校准、受试协议"],
+    ["hdr10plus-multisource-display", "多片源 HDR10+ 与显示盲评", "全片字段、校准条件、盲态与配对统计"],
+    ["hdr10plus-observer-validation", "HDR10+ 校准显示盲评", "播放校准、随机试次、盲态与受试日志"],
+    ["visual-features", "特征与卷积网络", "卷积、感受野、池化、残差"],
+    ["classification", "图像分类", "数据增强、迁移学习、类别偏差"],
+    ["detection", "目标检测", "边界框、IoU、NMS、平均精度"],
+    ["segmentation", "图像分割", "语义与实例分割、掩码、分割指标"],
+  ]),
+  course("nlp-transformer", "自然语言处理与 Transformer", [cs2023, hfLLM], [
+    ["text-units", "文本与分词", "词元、子词、词表、序列长度"],
+    ["representation", "文本表示与序列模型", "词向量、语言模型、循环网络"],
+    ["attention", "注意力机制", "查询键值、缩放点积、掩码"],
+    ["transformer", "Transformer 架构", "多头注意力、位置表示、编码器与解码器"],
+    ["nlp-tasks", "文本任务与评价", "分类、实体识别、翻译、生成评价"],
+  ]),
+  course("large-language-models", "大语言模型、RAG 与 Agent", [hfLLM, hfAgents, {
+    title: "Lewis et al. · Retrieval-Augmented Generation",
+    href: "https://ai.meta.com/research/publications/retrieval-augmented-generation-for-knowledge-intensive-nlp-tasks",
+  }], [
+    ["pretraining", "预训练与微调", "自回归预测、指令数据、参数高效微调"],
+    ["inference", "文本生成与推理", "解码策略、上下文窗口、KV 缓存"],
+    ["rag", "检索增强生成", "切块、向量检索、重排、引用与检索评估"],
+    ["agent-tools", "Agent 与工具调用", "结构化工具、状态、权限、停止条件"],
+    ["evaluation", "系统评价与回归", "任务成功率、证据一致性、延迟与成本"],
+  ]),
+  course("reinforcement-learning", "强化学习", [cs2023], [
+    ["markov-decisions", "马尔可夫决策过程", "状态、动作、奖励、折扣回报"],
+    ["value-functions", "价值函数", "贝尔曼方程、策略迭代、价值迭代"],
+    ["sampling", "采样与时序差分", "蒙特卡洛、TD、SARSA、Q-learning"],
+    ["exploration", "探索与利用", "ε-贪心、上置信界、离线数据偏差"],
+    ["policy-optimization", "策略优化", "策略梯度、Actor–Critic、奖励设计"],
+  ]),
+  course("recommender-systems", "推荐系统", [cs2023], [
+    ["signals", "交互数据与推荐目标", "显式反馈、隐式反馈、曝光偏差"],
+    ["collaborative-filtering", "协同过滤", "相似度、矩阵分解、冷启动"],
+    ["retrieval", "候选召回", "双塔模型、向量搜索、候选覆盖"],
+    ["ranking", "排序与重排", "排序损失、多样性、约束"],
+    ["measurement", "离线与在线评价", "Recall@K、NDCG、实验指标"],
+  ]),
+  course("ai-safety", "AI 安全与伦理", [hainan, cs2023], [
+    ["fairness-and-privacy", "公平与隐私", "群体差异、数据同意、隐私泄漏"],
+    ["robustness", "鲁棒性与分布变化", "对抗样本、漂移、失效检测"],
+    ["prompt-injection", "提示注入与工具风险", "不可信上下文、权限边界、人工确认"],
+    ["risk-evaluation", "风险评估与监测", "红队测试、拒答、上线监测与回滚"],
+  ]),
+];

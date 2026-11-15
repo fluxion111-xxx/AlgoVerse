@@ -1,5 +1,8 @@
 node_modules
 .next
+.algoverse-data/
 out
 .env*
+.dev.vars*
+.wrangler/
 *.tsbuildinfo

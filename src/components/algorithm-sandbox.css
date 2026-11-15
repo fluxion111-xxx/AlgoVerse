@@ -1,0 +1,148 @@
+.pathfinding-sandbox {
+  --sandbox-ink: #493327;
+  --sandbox-control: linear-gradient(#fff4e4, #e8d0ba);
+  --sandbox-edge: #98785f;
+}
+
+.pathfinding-sandbox .lab-intro {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 4px;
+  color: var(--sandbox-ink);
+  font-size: 12px;
+}
+
+.sandbox-seed, .sandbox-settings, .sandbox-settings label { display: inline-flex; align-items: center; gap: .35em; white-space: nowrap; }
+.sandbox-seed code { font-weight: 700; }
+.sandbox-seed .live-dot { flex: none; margin: 0; }
+.sandbox-settings { gap: .65em; }
+.sandbox-settings select {
+  min-width: 0;
+  padding-inline: .2em;
+  border: 1px solid var(--sandbox-edge);
+  border-radius: 3px;
+  background: var(--sandbox-control);
+  color: var(--sandbox-ink);
+  cursor: pointer;
+}
+
+.pathfinding-sandbox .algorithm-card { --route-color: #ee9158; }
+.pathfinding-sandbox .algorithm-card-green { --route-color: #a9bba1; }
+.pathfinding-sandbox .algorithm-card-green .algorithm-title span { color: #46624c; }
+.pathfinding-sandbox .graph-svg {
+  background: url('/paper-grain.svg') center / 120px, radial-gradient(ellipse at 40% 10%, #45413a, #2c2926 68%, #23211e);
+  background-blend-mode: soft-light, normal;
+  box-shadow: inset 0 0 0 1px #827463, inset 0 4px 10px #151310bc, 0 2px 3px #573b2c54;
+}
+
+.sandbox-visit {
+  fill: var(--route-color);
+  opacity: .55;
+  stroke: #211e1b;
+  stroke-width: 1.4;
+  filter: drop-shadow(1px 1px 1px #171410);
+  animation: sandbox-node-in 120ms ease-out both;
+}
+@keyframes sandbox-node-in { from { opacity: 0; } }
+.sandbox-path {
+  fill: none;
+  stroke: var(--route-color);
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  filter: drop-shadow(0 2px 1px #1b1713);
+}
+.sandbox-path-pin { fill: #eee3cf; stroke: var(--route-color); stroke-width: 1.5; }
+.sandbox-marker { text-anchor: middle; fill: #fff5e5; font: 800 13px/1 ui-monospace, monospace; }
+
+.pathfinding-sandbox .metric-row { align-items: center; }
+.pathfinding-sandbox .metric { min-width: 0; flex-direction: column; gap: 0; white-space: nowrap; line-height: 1.1; }
+.pathfinding-sandbox .metric strong { font-variant-numeric: tabular-nums; }
+.pathfinding-sandbox .metric small { color: #624e40; }
+.pathfinding-sandbox .lab-controls { gap: 5px; margin-inline-start: 0; }
+.pathfinding-sandbox .lab-controls button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--sandbox-edge);
+  border-radius: 5px;
+  background: var(--sandbox-control);
+  color: var(--sandbox-ink);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.pathfinding-sandbox .lab-controls .run-button { background: linear-gradient(125deg, #b6582c, #953716); border-color: #873b20; color: #fff5e8; }
+.pathfinding-sandbox .lab-controls button:not(:disabled):hover { filter: brightness(1.11); }
+.pathfinding-sandbox .lab-controls button:disabled { opacity: .5; cursor: default; }
+
+.sandbox-report {
+  position: fixed;
+  inset: 0;
+  width: min(440px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
+  margin: auto;
+  padding: 18px;
+  overflow: auto;
+  color: #38271e;
+  border: 1px solid #8b6247;
+  border-radius: 5px 10px 5px 8px;
+  background: url('/paper-grain.svg'), linear-gradient(145deg, #fff0db, #ecd1b5);
+  background-blend-mode: multiply, normal;
+  box-shadow: 3px 5px #bd9676, 8px 12px 30px #25160ec2;
+  font-size: 14px;
+}
+.sandbox-report::backdrop { background: #21170f80; }
+.sandbox-report header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.sandbox-report h2 { font-size: 22px; font-weight: 900; }
+.sandbox-report p { margin-block: 8px; }
+.sandbox-report table { width: 100%; text-align: start; font-variant-numeric: tabular-nums; }
+.sandbox-report caption { text-align: start; margin-block: 2px 7px; }
+.sandbox-report :is(td, th) { border-bottom: 1px solid #bea084; padding: 5px 3px; }
+.sandbox-report form { display: flex; align-items: end; flex-wrap: wrap; gap: 7px 10px; margin-top: 14px; }
+.sandbox-report label { display: flex; flex-direction: column; gap: 3px; }
+.sandbox-report :is(input, select, button) {
+  padding: 4px 6px;
+  border: 1px solid #98785f;
+  border-radius: 3px;
+  background: linear-gradient(#fff4e4, #ead2ba);
+}
+.sandbox-report input { width: 11ch; font-family: ui-monospace, monospace; }
+.sandbox-report button { font-weight: 800; }
+
+@media (min-width: 1081px) {
+  .pathfinding-sandbox .lab-intro { margin-bottom: 0; font-size: calc(13 * var(--u)); }
+  .pathfinding-sandbox .algorithm-title { margin-bottom: calc(5 * var(--v)); }
+  .pathfinding-sandbox .graph-svg { height: calc(218 * var(--v)); }
+  .pathfinding-sandbox .metric-row { height: calc(44 * var(--v)); margin-top: calc(7 * var(--v)); }
+  .pathfinding-sandbox .metric strong { font-size: calc(17 * var(--u)); }
+  .pathfinding-sandbox .metric small { font-size: calc(12 * var(--u)); }
+  .pathfinding-sandbox .lab-controls button {
+    height: calc(30 * var(--v));
+    min-height: 0;
+    font-size: calc(14 * var(--u));
+    padding-inline: calc(10 * var(--u));
+  }
+}
+
+@media (max-width: 700px) {
+  .pathfinding-sandbox .lab-intro { margin-bottom: 0; font-size: 10px; }
+  .pathfinding-sandbox .metric strong { font-size: 11px; }
+  .pathfinding-sandbox .metric small { font-size: 9px; }
+  .pathfinding-sandbox .lab-controls { gap: 3px; }
+  .pathfinding-sandbox .lab-controls button { min-height: 27.5px; height: 27.5px; padding-inline: 4px; font-size: 10px; }
+  .pathfinding-sandbox .lab-controls button svg { width: 12px; height: 12px; }
+}
+
+@media (max-width: 389px) {
+  .pathfinding-sandbox .lab-controls button:not(.run-button) span { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sandbox-visit { animation: none; }
+}

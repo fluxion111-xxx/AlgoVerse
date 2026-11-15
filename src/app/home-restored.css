@@ -93,8 +93,12 @@
 .home-restored .flow-number { font-family: Arial, sans-serif; font-style: normal; }
 .home-restored .flow-two :is(h3,p,.flow-number) { color: #fff8eb; }
 .home-restored .flow-arrow { color: #b65124; filter: drop-shadow(1px 1px #ffedcf); }
-.home-restored .idea-input:hover { background: #ffefe0; color: #813416; }
-.home-restored .idea-input:focus-visible { outline: 2px solid #8f381b; outline-offset: 2px; }
+.home-restored .flow-card-link::after { content: ''; position: absolute; inset: 0; z-index: 1; }
+.home-restored .flow-card:has(.flow-card-link:hover) .idea-input { background: #ffefe0; color: #813416; }
+.home-restored :is(.brand, .nav-link, .primary-cta, .secondary-cta, .lab-tape, .diagnosis-heading):focus-visible,
+.home-restored .flow-card:has(.flow-card-link:focus-visible) { outline: 2px solid #8f381b; outline-offset: 2px; }
+.home-restored .mobile-nav a { padding: 13px 5px; text-align: center; background: #f8efdf; color: var(--ink); font-weight: 800; }
+.home-restored .mobile-nav a[aria-current] { text-decoration: underline; text-underline-offset: 4px; }
 .home-restored .check-sketch { box-shadow: inset 0 0 0 1px #dfb58f; }
 .home-restored .check-sketch svg { color: #35251b; border: 1px solid currentColor; border-radius: 2px; }
 
@@ -199,3 +203,18 @@
   .home-restored :is(.home-paper,.lab-assembly,.diagnosis-note,.flow-card) { animation: none; }
   .home-restored :is(.hero-copy,.lab-assembly,.diagnosis-note,.flow-card) { opacity: 1 !important; }
 }
+.home-restored .atlas-window { min-height: 0; padding: clamp(17px, 2vw, 38px); color: #f9e8ce; background: repeating-linear-gradient(0deg, #e6bf9820 0 1px, transparent 1px 24px), repeating-linear-gradient(90deg, #e6bf9820 0 1px, transparent 1px 24px), linear-gradient(145deg, #302820, #191715); }
+.atlas-window header p { color: #eda77b; font-size: clamp(11px, 1.1vw, 17px); font-weight: 800; }
+.atlas-window h2 { margin: 4px 0; font-size: clamp(22px, 2.55vw, 45px); font-weight: 850; letter-spacing: -.06em; }
+.atlas-topology { position: relative; isolation: isolate; display: grid; grid-template-columns: 1.1fr .8fr 1fr; gap: 8px 10px; padding-block: 15px; }
+.atlas-trace { position: absolute; z-index: -1; inset: 28% 9% 18%; border: 1px dashed #d8996f; transform: skewY(-7deg); }
+.atlas-trace.trace-two { inset: 32% 19% 21%; border-color: #8e9b74; transform: skewY(11deg); }
+.atlas-node { display: flex; align-items: center; gap: 6px; min-height: 39px; padding: 5px 8px; color: #f7e6cc; background: linear-gradient(115deg, #5c4230, #463322); border: 1px solid #a88362; font-size: clamp(10px, 1.15vw, 18px); font-weight: 750; }
+.atlas-node:nth-of-type(2n) { background: linear-gradient(115deg, #4c5140, #363b2e); border-color: #80876b; }
+.atlas-node-2, .atlas-node-6 { transform: translateY(-5px); }
+.atlas-node-4 { transform: translateX(6px); }
+.atlas-node:hover { outline: 2px solid #eba778; outline-offset: 2px; }
+.home-experiment-prompt { display: flex; gap: 6px; margin-top: 5px; }
+.home-experiment-prompt input { flex: 1; min-width: 0; padding: 7px 9px; border: 1px solid #b89473; color: #38281d; background: linear-gradient(120deg, #f8ead3, #e5c8a6); font-size: clamp(12px, 1vw, 16px); }
+.home-experiment-prompt button { padding: 7px 11px; color: #fff1dc; background: linear-gradient(130deg, #ae562e, #8e391d); }
+@media (max-width: 520px) { .atlas-topology { grid-template-columns: 1.06fr .94fr; } }

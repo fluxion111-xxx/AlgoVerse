@@ -1,0 +1,48 @@
+import { fullTopic as topic } from "@/content/knowledge/coverage/types";
+import { distributedSource } from "@/content/curriculum/undergraduate";
+const lamport = { title: "Lamport · Time, Clocks, and the Ordering of Events", href: "https://lamport.azurewebsites.net/pubs/time-clocks.pdf" };
+const raft = { title: "Ongaro & Ousterhout · Raft", href: "https://raft.github.io/raft.pdf" };
+const linearization = { title: "Herlihy & Wing · Linearizability", href: "https://cs.brown.edu/people/mph/HerlihyW90/p463-herlihy.pdf" };
+
+export const distributedTopics = [
+  topic(["distributed-systems", "systems-model"], ["rpc-partial-failure", "远程调用与部分故障", "基础"], ["connect-read-total-timeouts"], distributedSource,
+    "没收到回执，仍不能确定远端状态。", "远程调用可能在请求送达前失败，也可能在处理完成后丢回执。调用方超时只表示等待结束。",
+    "画出已执行但响应丢失的过程。", "库存服务已扣掉一件商品，但响应在返回时丢了。", "本地超时不会自动撤回远端副作用。",
+    ["请求超时，能否确定远端从未执行？", ["不能", "能", "仅当请求需要写入时能"], 0, "超时看不到回执，无法区分请求未达与回执丢失。"]),
+  topic(["distributed-systems", "systems-model"], ["rpc-dedup-atomic-commit", "远程操作去重与原子提交", "进阶"], ["rpc-partial-failure", "retry-idempotency", "transactions"], distributedSource,
+    "去重结果和业务状态一起提交。", "持久保存请求标识及返回结果。若业务写入和去重记录能在同一事务提交，崩溃时不会只留下其中一个。",
+    "识别写入与去重分开的故障窗口。", "扣完库存后进程在写去重记录前崩溃。重试看到空记录，可能再次扣除。", "只在进程内存存去重标记，重启后没有同样保证。",
+    ["库存和去重记录位于同一事务库，怎样封住该窗口？", ["先扣库存，隔天记标记", "只在客户端改按钮样式", "同一事务提交"], 2, "原子提交让两项一起成功或一起撤销。"]),
+  topic(["distributed-systems", "time-ordering"], ["happens-before-causal-order", "分布式事件的先发生关系", "基础"], ["partial-order-incomparability"], lamport,
+    "用进程与消息追踪因果顺序。", "同一进程中的先后、发送到接收，以及它们的传递闭包构成先发生关系。缺少双向因果路径时两事件并发。",
+    "从消息图判断事件能否比较。", "A 写值再发通知。B 收通知再读取。A 的写先发生于 B 的读。", "不同机器的物理钟可能有偏差。墙钟显示早不足以证明有因果关系。",
+    ["A 与 B 各有一个事件，彼此无消息或因果链。两事件怎样？", ["编号较小的一定先发生", "在此关系下并发", "时间戳字面值决定因果"], 1, "先发生关系依赖进程和消息链。"]),
+  topic(["distributed-systems", "time-ordering"], ["lamport-clock-receive", "Lamport 逻辑时钟的收件规则", "进阶"], ["happens-before-causal-order"], lamport,
+    "收到消息后要超过两边的时标。", "每次本地或发送事件加一。接收事件令 L=max(本地L,消息L)+1。若 a 先发生于 b，则 L(a)<L(b)。",
+    "按规则计算一次接收事件。", "本地计数 3，收到时标 7。收件后计数为 8。", "时标较小不能反推因果。两个并发事件也可有不同计数。",
+    ["本地计数 9，消息时标 4。收件后计数多少？", ["5", "13", "10"], 2, "取两个计数的最大值 9，再加一。"]),
+  topic(["distributed-systems", "replication-consistency"], ["replicated-state-machine-determinism", "复制状态机的确定性", "进阶"], ["rpc-partial-failure", "write-ahead-logging"], raft,
+    "同样的起点和指令要得到同样结果。", "副本从相同状态出发。按同一顺序应用确定性指令，就会到达相同状态。有随机数或时间参与决策时，把选定的值放入指令。",
+    "识别重放会导致不同状态的指令。", "订单创建时间由领导者选定。各副本重放日志时使用这个值。", "日志顺序相同也不够。每台机器若各读本地钟，结果仍可能不同。",
+    ["创建订单时，怎样保证每台副本保存同一时间？", ["各取本地时间", "把选定的时间写进命令", "各随机延迟后取本地时间"], 1, "相同初始状态和命令字段才能避免重放时分叉。"]),
+  topic(["distributed-systems", "replication-consistency"], ["linearizability-real-time", "线性一致性的实时约束", "进阶"], ["replica-read-lag"], linearization,
+    "已结束的操作排在后发操作前。", "每个操作看起来在调用与返回之间某时刻生效。前一操作已结束，后一操作才开始时，要保持这个顺序。",
+    "判断简单读写历史是否符合要求。", "寄存器初值 0。写 1 返回后才开始读，且期间无其他写。读须得到 1。", "并发操作的区间可重叠。模型允许按规范挑合理的先后。",
+    ["上述历史的后续读返回 0，能线性化吗？", ["不能", "能，因为副本收到请求", "能，只要最终变成 1"], 0, "写已结束，后发读必须排在它之后。"]),
+  topic(["distributed-systems", "replication-consistency"], ["eventual-convergence", "最终一致性与停止写入", "进阶"], ["replica-read-lag"], distributedSource,
+    "更新停止且能传播后，副本趋于一致。", "系统允许短期差异。若不再产生更新，传播与冲突解决可让可达副本收敛。",
+    "区分立即可见与最终收敛。", "两地各收到一次更新。互通后按同一策略合并，最终呈现同一状态。", "最终一致性一般不给出固定延迟上限，也不自动提供读己之写。",
+    ["传播尚未完成时，两副本返回不同值符合该模型吗？", ["不可以", "可以", "只在本地钟相等时可以"], 1, "模型约束收敛，容许传播窗口内暂时不同。"]),
+  topic(["distributed-systems", "consensus"], ["majority-quorum-intersection", "多数派交集", "基础"], ["inclusion-exclusion"], raft,
+    "两组严格多数必有共同成员。", "在固定 N 个成员中，任意两组各有超过 N/2 个成员，就不可能互不相交。很多共识协议借交集保留历史。",
+    "从节点数算最少票数。", "五节点的多数是三。两个三人组至少重叠一人。", "有交集只是必要工具。协议还需规定成员可何时投票和接受日志。",
+    ["固定七节点至少需几票形成多数？", ["3", "4", "7"], 1, "四票严格超过七的一半。"]),
+  topic(["distributed-systems", "consensus"], ["raft-election-term", "Raft 选举与任期", "进阶"], ["majority-quorum-intersection"], raft,
+    "任期编号区分不同轮次。", "候选人发起新任期并请求投票。每个任期一名节点最多投一票。候选人需要多数票才成为领导者。",
+    "用多数交集解释同任期唯一领导者。", "五节点中，A 已拿三票。在同一任期，B 无法再拿互不相交的三票。", "节点在任期切换中可能暂时听到旧领导者。较新任期信息会促使旧领导者退位。",
+    ["五节点里，两个候选人各只拿两票，能宣布谁当选吗？", ["都可", "不能", "编号最小者自动当选"], 1, "两票未过半，均未满足当选条件。"]),
+  topic(["distributed-systems", "consensus"], ["raft-current-term-commit", "Raft 当前任期日志提交", "拓展"], ["raft-election-term"], raft,
+    "当前任期的条目达到多数才能直接提交。", "领导者用多数副本确认当前任期条目。该条目提交后，其日志前缀也提交。旧任期条目不能单凭多数计数直接提交。",
+    "区分直接提交与前缀随同提交。", "任期 4 的条目写到五节点中的三个。领导者可提交该新条目，日志中的旧前缀也随之提交。", "旧条目即使暂时存在于多数上，单计数量仍缺少 Raft 的直接提交条件。",
+    ["领导者发现一个旧任期条目有多数副本。能仅凭这一点直接提交吗？", ["不能", "能", "只能在副本数为偶数时能"], 0, "Raft 用当前任期条目的多数复制来推进提交，再连带旧前缀。"]),
+];

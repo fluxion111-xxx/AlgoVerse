@@ -1,0 +1,25 @@
+import { lesson } from "./types";
+
+export const databaseTeaching = {
+  "b-plus-index": lesson("基础", "沿叶节点完成范围查找。",
+    "查 [12,25]。先找到含 12 或其后继的叶子。沿叶链接继续，遇到大于 25 就停。",
+    "内节点的键用于导航。范围扫描通常要访问叶子，且可能跨叶。",
+    { id: "range-scan", prompt: "找到范围下界后，怎么扫后续键？", options: ["沿叶链接", "从根重查每个键", "倒序读内部节点"], answer: 0, explanation: "叶按键有序并相互链接，可顺序扫描到上界。" }),
+  "query-plans": lesson("进阶", "比较顺序扫描和索引扫描。",
+    "一张百万行表只取 3 行。索引常有利。若取九成行，连续扫表可能更省。",
+    "索引存在不代表优化器必用。估计行数、访问成本和表大小都影响选择。",
+    { id: "wide-scan", prompt: "取表中九成行，哪种说法合理？", options: ["索引总更快", "顺序扫描可能更省", "查询不会读表"], answer: 1, explanation: "大量随机访问可能比连续扫页更昂贵，最终要看代价和实测。" }),
+  "transactions": lesson("基础", "把必须共同成功的操作放入事务。",
+    "A 转给 B 十元。A 扣款后，B 加款失败。回滚会撤销扣款。",
+    "分别提交两条语句会留下中间状态。把两步放入同一事务再提交。",
+    { id: "transfer-failure", prompt: "第二步失败，要撤销第一步。选什么？", options: ["COMMIT", "ROLLBACK", "SELECT"], answer: 1, explanation: "同一未提交事务中，回滚会撤销这两步已有的修改。" },
+    { kind: "code", text: "BEGIN;\n-- 执行两条更新\nROLLBACK; -- 失败时撤销" }),
+  "sql-inner-left-join": lesson("基础", "预测连接结果中的空值。",
+    "学生 A 有选课。B 无选课。学生左连接选课后，B 仍在，右侧列为 NULL。",
+    "连接后在 WHERE 检查右侧列，可能把无匹配行过滤掉。",
+    { id: "unmatched-row", prompt: "要保留无订单用户，应从用户表做什么？", options: ["INNER JOIN", "LEFT JOIN", "只查订单表"], answer: 1, explanation: "以用户为左表，左连接会保留没有匹配订单的用户行。" }),
+  "mvcc-row-versions": lesson("进阶", "按快照判断行版本可见性。",
+    "读者先拿快照。随后写者更新并提交。旧快照仍可能读到更新前的值。",
+    "可见性取决于隔离级别。以 PostgreSQL 为例，读已提交通常每条语句取新快照。",
+    { id: "older-snapshot", prompt: "旧快照仍需旧版本时，系统应怎样？", options: ["立即回收旧版本", "保留旧版本", "让读者重写旧值"], answer: 1, explanation: "旧快照仍需访问该版本。要等它不再可见给相关事务后再回收。" }),
+};

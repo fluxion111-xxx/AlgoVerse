@@ -1,73 +1,41 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { Icon } from "@iconify/react";
-import { motion, AnimatePresence } from "motion/react";
-import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { SiteLinks } from "./SiteLinks";
 
-const links = [
-  { label: "首页", target: "top" },
-  { label: "实验中心", target: "/experiments" },
-  { label: "学习路径", target: "process" },
-  { label: "AI 助教", target: "/experiments#creator-title" },
-];
+export function Header({ children, action }: { children?: ReactNode; action?: { href: string; label: string } }) {
+  const [open, setOpen] = useState(false);
+  const toggle = useRef<HTMLButtonElement>(null);
+  const actionHref = action?.href ?? "#process";
+  const actionLabel = <>{action?.label ?? "发起实验"} <Icon icon="lucide:arrow-up-right" width={15} aria-hidden="true" /></>;
 
-export function Header() {
-  const router = useRouter();
-  const [menuOpen, setMenuOpen] = useState(false);
-
-  function navigate(target: string) {
-    setMenuOpen(false);
-    if (target.startsWith("/")) {
-      router.push(target);
-      return;
+  return <header id="top" className="editorial-header" onKeyDown={(event) => {
+    if (open && event.key === "Escape" && !event.defaultPrevented) {
+      setOpen(false);
+      toggle.current?.focus();
     }
-    document.getElementById(target)?.scrollIntoView({ behavior: "smooth" });
-  }
-
-  return (
-    <>
-      <header className="site-header flex items-center" id="top">
-        <button className="brand" onClick={() => navigate("top")} aria-label="回到首页">
-          <span className="brand-mark" aria-hidden="true"><i /><i /></span>
-          <span>AlgoVerse</span>
-          <span className="brand-name-cn">智算万象</span>
+  }}>
+    <div className="editorial-header-inner editorial-frame">
+      <Link className="editorial-brand" href="/" onClick={() => setOpen(false)} aria-label="AlgoVerse 智算万象，首页">
+        <Icon icon="lucide:triangle" width={22} aria-hidden="true" />
+        <span><b lang="en">AlgoVerse</b><small>智算万象</small></span>
+      </Link>
+      <nav className="editorial-nav" aria-label="主导航"><SiteLinks /></nav>
+      <div className="editorial-header-actions">
+        {children}
+        {actionHref.startsWith("#")
+          ? <a className="editorial-nav-cta" href={actionHref}>{actionLabel}</a>
+          : <Link className="editorial-nav-cta" href={actionHref}>{actionLabel}</Link>}
+        <button type="button" ref={toggle} className="editorial-nav-toggle" aria-expanded={open}
+          aria-controls="editorial-mobile-navigation" onClick={() => setOpen(!open)}>
+          {open ? "关闭" : "菜单"} <Icon icon={open ? "lucide:x" : "lucide:menu"} width={19} aria-hidden="true" />
         </button>
-        <nav className="desktop-nav flex items-center" aria-label="主导航">
-          {links.map((link) => (
-            <button
-              key={link.label}
-              className={`nav-link ${link.label === "首页" ? "active" : ""}`}
-              onClick={() => navigate(link.target)}
-            >
-              <span>{link.label}</span>
-            </button>
-          ))}
-        </nav>
-        <button
-          className="menu-toggle"
-          onClick={() => setMenuOpen((value) => !value)}
-          aria-label={menuOpen ? "关闭导航" : "打开导航"}
-          aria-expanded={menuOpen}
-        >
-          <Icon icon={menuOpen ? "lucide:x" : "lucide:menu"} width={24} />
-        </button>
-      </header>
-      <AnimatePresence>
-        {menuOpen && (
-          <motion.nav
-            className="mobile-nav"
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            aria-label="移动端导航"
-          >
-            {links.map((link) => (
-              <button key={link.label} onClick={() => navigate(link.target)}>{link.label}</button>
-            ))}
-          </motion.nav>
-        )}
-      </AnimatePresence>
-    </>
-  );
+      </div>
+    </div>
+    <nav className="editorial-mobile-nav editorial-frame" id="editorial-mobile-navigation" aria-label="主导航" hidden={!open}>
+      <SiteLinks onNavigate={() => setOpen(false)} />
+    </nav>
+  </header>;
 }

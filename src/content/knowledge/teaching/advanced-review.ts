@@ -1,0 +1,28 @@
+import { lesson } from "./types";
+
+export const advancedReviewTeaching = {
+  "counting-sort": lesson("进阶", "从频数写出排序后的序列。", "读入 2、0、2、1。频数为 1、1、2。按键序输出 0、1、2、2。", "计数数组大小取决于键范围。少量稀疏大键也可能耗很多内存。",
+    { id: "count-buckets", prompt: "键只在 0 至 3，直接按键计数需几个桶？", options: ["4", "3", "等于输入项数"], answer: 0, explanation: "区间包含 0、1、2、3 四个可能值，各要一个桶。" }),
+  "singly-linked-list": lesson("基础", "插入新节点时保留后继。", "要把 X 插到 A→B 中间。先令 X.next=B，再令 A.next=X。", "只有找到前驱后，改链才是常数次操作。按序号寻找前驱仍可能扫描全表。",
+    { id: "link-order", prompt: "插入 X 前，先让 X 指向哪里？", options: ["A 自身", "原后继 B", "任意空节点"], answer: 1, explanation: "先接住 B，才能在改写 A 的链接后保留后半段。" }),
+  "edge-relaxation": lesson("进阶", "比较原距离和经一条边的候选。", "d[A]=4，A→B 权重 3，旧 d[B]=9。候选为 7，因此更新。", "松弛不直接保证目标已最优。它只是一次局部改进。",
+    { id: "relax-candidate", prompt: "d[A]=4，边权 3，旧 d[B]=5。松弛后 d[B] 是多少？", options: ["3", "7", "5"], answer: 2, explanation: "候选为 4+3=7，比旧值 5 更差，故保留原值。" }),
+  "recursive-base-case": lesson("基础", "检查每条递归分支能否到达基例。", "对非负整数求阶乘。n=0 直接返回 1，其余转到 n−1。", "即使写了基例，参数不变或方向错误也可能永远到不了。",
+    { id: "progress-toward-base", prompt: "基例为 n=0，且 n>0。哪种调用会朝基例推进？", options: ["递归传 n−1", "递归传原 n", "递归传 n+1"], answer: 0, explanation: "每次减少一，非负输入可在有限步到零。" }),
+  "residual-network": lesson("拓展", "读出增广路径的瓶颈。", "沿途正残量为 5、2、4。该路径一次最多增加 2 单位流。", "反向残量允许撤回之前分配。它不等于原图凭空多了一条物理通道。",
+    { id: "augment-bottleneck", prompt: "一条增广路径的残量是 7、3、6。最多增多少？", options: ["7", "3", "16"], answer: 1, explanation: "每条边都须能承载同一增量，因此取最小残量 3。" }),
+  "kmp-prefix-function": lesson("进阶", "算出一个字符串的最长真前后缀。", "ababa 的前缀 aba 也是后缀，长 3。全串不算真前缀。", "前后缀可重叠。只要求内容相同，且均短于整段。",
+    { id: "proper-border", prompt: "abab 的最长真前缀兼后缀是什么？", options: ["abab", "ba", "ab"], answer: 2, explanation: "开头和结尾两字符都是 ab。长度三的前后缀不同。" }),
+  "covariance": lesson("进阶", "用偏离均值的同向程度判断符号。", "成对数据是 (1,2) 和 (3,6)。低低、高高的中心化乘积都为正。", "协方差受量纲影响。改用厘米后数值可变，不能直接跨单位比较。",
+    { id: "joint-sign", prompt: "两变量通常同升同降，协方差倾向于什么？", options: ["正", "负", "仅由均值决定"], answer: 0, explanation: "高高和低低时，两项偏差乘积为正，平均后倾向为正。" }),
+  "law-of-large-numbers": lesson("进阶", "区分长期平均稳定与单次预测。", "反复掷公平硬币。次数增多，正面比例趋近一半。下一次仍可能是任一面。", "短期偏差不要求未来立刻补偿。独立试验没有记忆。",
+    { id: "next-toss", prompt: "公平硬币连出五次正面。独立假设下下一次正面概率是多少？", options: ["小于一半", "一半", "大于一半"], answer: 1, explanation: "独立试验的单次概率不因之前的结果改变。" }),
+  "eigenvectors": lesson("进阶", "检查矩阵作用后是否仍同方向。", "对角矩阵 diag(2,3) 作用于 (1,0) 得 (2,0)。该向量的特征值是 2。", "零向量不能当特征向量。负特征值可让方向反转。",
+    { id: "diagonal-eigenvalue", prompt: "diag(2,3) 作用于 (0,1)，其对应特征值是多少？", options: ["0", "2", "3"], answer: 2, explanation: "结果为 (0,3)，等于原向量乘 3。" }),
+  "cpp-copy-move": lesson("进阶", "判断何时应转移独占资源。", "两个对象分别拥有资源时，应明确用移动交接。交接后接收方负责释放。", "std::move 本身只允许按可移动值处理。实际转移取决于随后调用的操作。",
+    { id: "move-expression", prompt: "只写 std::move(x) 并丢弃结果。会自动迁走资源吗？", options: ["不会", "一定会", "仅整数会"], answer: 0, explanation: "类型转换本身不会调用移动构造或移动赋值。" }),
+  "branch-coverage": lesson("进阶", "为条件的每条出边设计输入。", "函数在 x>0 时走成功分支，其他走备用分支。用 x=1 与 x=0 可走两条。", "执行过每条分支不表示所有条件组合都验证过。还需要断言结果。",
+    { id: "branch-both-sides", prompt: "只用 x=1 测 x>0。补哪个值能走另一条分支？", options: ["2", "0", "100"], answer: 1, explanation: "0 不大于 0，能执行先前未覆盖的假分支。" }),
+  "symbol-table-scope": lesson("进阶", "沿作用域向外定位最近声明。", "外层声明 x。内层也声明 x。内层引用先命中自己，离开后恢复外层。", "同名可合法存在于不同作用域。是否允许同一作用域重名，由语言规定。",
+    { id: "shadowed-binding", prompt: "允许遮蔽的语言中，内层已声明 x。内层随后读取 x 绑定谁？", options: ["总是全局 x", "按变量值大小", "内层声明"], answer: 2, explanation: "先搜索当前作用域，命中后无需再向外找。" }),
+};

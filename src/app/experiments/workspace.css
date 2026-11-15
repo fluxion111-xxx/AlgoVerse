@@ -1,0 +1,214 @@
+.lab-workspace:is(.catalog-page, .creator-studio, .experiment-page) {
+  --work-ink: #20241c;
+  --work-muted: #53584c;
+  --work-paper: #ebe9df;
+  --work-paper-wash: linear-gradient(135deg, #f6f4eb, var(--work-paper));
+  --work-line: #c5c6b7;
+  --work-dark: #101710;
+  --work-dark-wash: linear-gradient(135deg, #282f24, var(--work-dark));
+  --work-dark-line: #51594c;
+  --work-gold: #e8c577;
+  --work-accent: #65501e;
+  --work-plot: linear-gradient(145deg, #222b21, #182017);
+  --catalog-ink: var(--work-ink);
+  --catalog-muted: var(--work-muted);
+  --catalog-orange: var(--work-accent);
+  --catalog-line: var(--work-line);
+  --course-accent: var(--work-accent);
+  --course-edge: var(--work-line);
+  --course-wash: #d8c9a1;
+  --studio-ink: var(--work-ink);
+  --studio-muted: var(--work-muted);
+  --studio-light: #f1f1e8;
+  --studio-dim: #c4c6b9;
+  --lab-ink: var(--work-ink);
+  --lab-muted: var(--work-muted);
+  --lab-line: var(--work-line);
+  --lab-orange: var(--work-accent);
+  --content-pad: max(clamp(16px, 5.55vw, 96px), calc((100% - 1376px) / 2));
+  color: var(--work-ink);
+  background: radial-gradient(ellipse at 15% 6%, #f8f6ec, transparent 64%), var(--work-paper-wash);
+  font-family: "AlgoVerse Satoshi", "AlgoVerse Editorial SC", "Microsoft YaHei", "PingFang SC", sans-serif;
+}
+
+.lab-workspace > .editorial-header {
+  --text: #f1f1e8;
+  --muted: #c4c6b9;
+  --signal: var(--work-gold);
+  --line: var(--work-dark-line);
+  color: var(--text);
+  background: var(--work-dark-wash);
+}
+.lab-workspace .editorial-header-inner { min-height: 66px; grid-template-columns: minmax(0, 1fr) auto; }
+.lab-workspace .editorial-nav-cta { display: none; }
+@media (min-width: 941px) {
+  .lab-workspace .editorial-header-actions { display: none; }
+}
+.lab-workspace .editorial-brand b { font-weight: 760; }
+.lab-workspace .editorial-mobile-nav:not([hidden]) { background: var(--work-dark-wash); }
+.lab-workspace .editorial-skip { background: var(--work-gold); }
+.lab-workspace-frame { padding: 10px var(--content-pad) clamp(32px, 5vw, 76px); }
+.lab-workspace :is(.creator-spread, .experiment-content) { width: auto; margin: 0; padding: 0; }
+.lab-workspace-frame:focus, .lab-workspace .creator-stage:focus { outline: none; }
+.lab-workspace-back {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 8px;
+  color: var(--work-accent);
+  font-size: 13px;
+  font-weight: 650;
+}
+.lab-workspace-back svg { transition: transform .2s ease; }
+.lab-workspace-back:is(:hover, :focus-visible) svg { transform: translateX(-3px); }
+.lab-workspace :is(a, button, input, textarea, select, summary):focus-visible { outline: 2px solid var(--work-accent); outline-offset: 3px; }
+.lab-workspace > .editorial-header :focus-visible,
+.lab-workspace .creator-canvas :focus-visible { outline-color: var(--work-gold); }
+.lab-workspace :is(.workflow-title, .workflow-note, .knowledge-sheet, .creator-stage) { min-width: 0; }
+.lab-workspace :is(.workflow-title h1, .experiment-intro h1, .course-hero h1, .creator-editorial h1) {
+  margin: 0;
+  font-family: inherit;
+  font-size: clamp(32px, 3.9vw, 62px);
+  font-weight: 750;
+  line-height: 1.13;
+  letter-spacing: -.056em;
+  color: var(--work-ink);
+  overflow-wrap: anywhere;
+}
+.lab-workspace :is(.workflow-title, .experiment-intro) { margin: 0; padding: 9px 0 clamp(15px, 2vw, 25px); }
+.lab-workspace :is(.workflow-title, .experiment-intro, .course-hero) p { font-size: 14px; color: var(--work-muted); }
+.lab-workspace .experiment-kicker { margin-bottom: 6px; color: var(--work-accent); letter-spacing: .06em; }
+.lab-workspace .experiment-kicker::before { background: currentColor; }
+.lab-workspace .experiment-intro h1 { margin-bottom: 7px; }
+.lab-workspace :is(.workflow-note h2, .workflow-plan h2, .knowledge-sheet h2, .creator-canvas-head h2) {
+  font-family: inherit;
+  font-size: clamp(24px, 2.3vw, 35px);
+  font-weight: 720;
+  line-height: 1.2;
+  letter-spacing: -.044em;
+}
+
+.lab-workspace .course-entry { animation: none; padding: 0; }
+.lab-workspace .course-hero {
+  grid-template-columns: minmax(0, 1.55fr) minmax(200px, .7fr);
+  gap: clamp(22px, 6vw, 94px);
+  padding-block: 10px clamp(20px, 2.6vw, 38px);
+}
+.lab-workspace .course-index { gap: 7px; margin-bottom: 8px; }
+.lab-workspace .course-index span { font-family: inherit; font-style: normal; font-weight: 650; font-size: 16px; }
+.lab-workspace .course-hero p { margin-block: 9px 12px; }
+.lab-workspace .course-hero-paper { padding: 10px; rotate: none; }
+.lab-workspace :is(.course-hero-paper, .course-topics, .knowledge-sheet, .workflow-note) {
+  border: 1px solid var(--work-line);
+  border-top: 2px solid var(--work-accent);
+  border-radius: 0;
+  background: var(--work-paper-wash);
+  box-shadow: none;
+}
+.lab-workspace .course-diagram { border-radius: 0; }
+.lab-workspace .knowledge-views { margin-bottom: clamp(16px, 2.3vw, 29px); border: solid var(--work-line); border-width: 1px 0; }
+.lab-workspace .knowledge-views a { display: flex; align-items: center; min-height: 44px; padding-inline: 12px; font-weight: 650; }
+.lab-workspace .knowledge-views a[aria-current] { color: var(--work-ink); background: linear-gradient(0deg, #e6d6ac, transparent); }
+.lab-workspace .course-body { grid-template-columns: minmax(205px, .62fr) minmax(0, 2fr); gap: clamp(20px, 4vw, 62px); }
+.lab-workspace .course-workshop { grid-template-columns: minmax(0, 1.7fr) minmax(205px, .68fr); }
+.lab-workspace :is(.course-topics h2, .catalog-section-heading h2) { font-size: clamp(20px, 2.2vw, 29px); font-weight: 720; }
+.lab-workspace .course-experiments li { padding-block: 11px; }
+.lab-workspace .course-lab-actions a { min-height: 42px; }
+.lab-workspace .course-lab-ready { border-radius: 0; background: linear-gradient(120deg, #eeeee4, #e0e5d3); }
+.lab-workspace .course-lab-pending { border-radius: 0; background: var(--work-paper-wash); }
+
+.lab-workspace .creator-flow { gap: 0 clamp(13px, 2.7vw, 42px); border: solid var(--work-line); border-width: 1px 0; padding: 0; margin: 4px 0 10px; }
+.lab-workspace .creator-flow li { min-height: 45px; position: relative; color: var(--work-muted); font-size: 14px; font-weight: 650; }
+.lab-workspace .creator-flow a { display: flex; align-items: center; min-height: 44px; }
+.lab-workspace .creator-flow li[aria-current] { color: var(--work-ink); text-decoration: none; box-shadow: inset 0 -2px var(--work-accent); }
+.lab-workspace .creator-flow li > span:first-child { color: var(--work-accent); }
+.lab-workspace .creator-opening { grid-template-columns: minmax(190px, .55fr) minmax(0, 1.35fr); gap: clamp(16px, 5vw, 70px); padding: clamp(16px, 3vw, 44px) 0; align-items: start; }
+.lab-workspace :is(.creator-editorial, .creator-compose, .creator-canvas) { animation: none; filter: none; }
+.lab-workspace .creator-eyebrow { padding: 0; clip-path: none; background: none; transform: none; color: var(--work-accent); font-weight: 650; letter-spacing: .07em; }
+.lab-workspace .creator-editorial h1 { margin: 6px 0 8px; }
+.lab-workspace .creator-compose { margin: 0; padding: clamp(14px, 2.7vw, 36px); background: var(--work-dark-wash); color: var(--studio-light); border-top: 2px solid var(--work-accent); }
+.lab-workspace .creator-compose::before, .lab-workspace .creator-compose::after { content: none; }
+.lab-workspace .creator-compose :is(.creator-settings-link, .creator-count) { color: var(--studio-dim); }
+.lab-workspace .creator-compose :focus-visible { outline-color: var(--work-gold); }
+.lab-workspace .creator-page-form textarea { min-height: 108px; border-radius: 0; border-color: var(--work-line); background: var(--work-paper-wash); }
+.lab-workspace .creator-compose .creator-inspiration > span { color: var(--studio-dim); }
+.lab-workspace .creator-inspiration button { min-height: 34px; border-color: var(--work-line); border-radius: 0; background: var(--work-paper-wash); color: var(--work-ink); }
+.lab-workspace .creator-inspiration button:hover { background: linear-gradient(120deg, #fff1c7, var(--work-gold)); }
+.lab-workspace .creator-compose .preset-error { color: #ffd2a9; }
+.lab-workspace .workflow-build-page { grid-template-columns: minmax(190px, .55fr) minmax(0, 1.35fr); gap: clamp(16px, 5vw, 70px); padding-block: clamp(12px, 2vw, 26px); }
+.lab-workspace .workflow-diagnosis-grid { gap: clamp(14px, 2.3vw, 32px); }
+.lab-workspace .workflow-diagnosis-report { margin: 0; }
+.lab-workspace .workflow-metrics .preset-details > div { padding-block: 8px; border-bottom: 1px solid var(--work-line); }
+.lab-workspace .workflow-metrics dd { font-variant-numeric: tabular-nums; }
+.lab-workspace .workflow-compare-head .catalog-direct { min-height: 40px; }
+.lab-workspace .workflow-title + .workflow-note { margin-bottom: 12px; }
+
+.lab-workspace :is(.catalog-jump, .creator-submit, .experiment-run) {
+  border: 1px solid #a78844;
+  border-radius: 0;
+  background: linear-gradient(115deg, #efd08c, var(--work-gold));
+  box-shadow: none;
+  color: #201c10;
+  font-weight: 720;
+}
+.lab-workspace :is(.catalog-jump, .creator-submit, .experiment-run):not(:disabled):hover { background: linear-gradient(115deg, #f8e2ab, #ebc777); }
+.lab-workspace .catalog-direct { text-decoration-color: #8a793f; }
+.lab-workspace .creator-canvas { --lab-ink: var(--studio-light); --lab-muted: var(--studio-dim); --lab-line: var(--work-dark-line); padding: clamp(12px, 2vw, 28px); }
+.lab-workspace .creator-canvas::before {
+  clip-path: none;
+  background: radial-gradient(ellipse at 22% 0%, #424b363d, transparent 65%),
+    repeating-linear-gradient(90deg, #e0ebe40a 0 1px, transparent 1px 28px), var(--work-dark-wash);
+}
+.lab-workspace .creator-canvas-head { border-color: var(--work-dark-line); align-items: center; padding-bottom: 10px; }
+.lab-workspace .creator-canvas-label { color: var(--work-gold); font-weight: 650; }
+.lab-workspace .creator-canvas-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 18px; }
+.lab-workspace .creator-canvas-status i { background: var(--work-gold); box-shadow: none; }
+.lab-workspace .creator-console { grid-template-columns: minmax(186px, .36fr) minmax(0, 1fr); gap: clamp(18px, 2.6vw, 36px); margin-top: 16px; }
+.lab-workspace .creator-parameters { border-color: var(--work-dark-line); border-style: solid; padding-inline-end: clamp(12px, 2vw, 24px); }
+.lab-workspace .creator-parameters h3 { font-weight: 720; }
+.lab-workspace :is(.creator-parameters select, .simulation-fields input, .simulation-fields textarea) { min-height: 40px; color: var(--work-ink); border-radius: 0; border-color: #858877; background: var(--work-paper-wash); }
+.lab-workspace .creator-param-actions { min-width: 0; }
+.lab-workspace :is(.creator-tool, .creator-record) { color: var(--work-gold); min-height: 44px; }
+.lab-workspace .creator-stage { scroll-margin-top: 12px; }
+.lab-workspace :is(.simulation-panel, .creator-canvas .experiment-result) { background: var(--work-plot); border-color: var(--work-dark-line); border-radius: 0; box-shadow: none; }
+.lab-workspace .simulation-panel h3 { font-weight: 700; }
+.lab-workspace .simulation-table :is(th, td) { border-color: var(--work-dark-line); }
+.lab-workspace .simulation-controls { gap: 7px; margin-bottom: 12px; }
+.lab-workspace .simulation-controls span { margin-inline-start: 3px; font-variant-numeric: tabular-nums; }
+.lab-workspace :is(.experiment-control, .experiment-tool) { min-height: 44px; border: 1px solid var(--work-line); border-radius: 0; box-shadow: none; background: var(--work-paper-wash); color: var(--work-ink); }
+.lab-workspace :is(.experiment-control, .experiment-tool):not(:disabled):hover,
+.lab-workspace .experiment-tool[aria-pressed="true"] { border-color: #a78844; background: linear-gradient(120deg, #f3dca5, #e7c476); color: var(--work-ink); }
+.lab-workspace .creator-canvas :is(.experiment-control, .experiment-tool) { border-color: #818777; background: linear-gradient(120deg, #414b3b, #30382c); color: var(--studio-light); }
+.lab-workspace .creator-canvas :is(.experiment-control, .experiment-tool):not(:disabled):hover,
+.lab-workspace .creator-canvas .experiment-tool[aria-pressed="true"] { border-color: var(--work-gold); background: linear-gradient(120deg, #4d583f, #404932); color: #ffe3a8; }
+.lab-workspace .creator-canvas .preset-replay input { accent-color: var(--work-gold); }
+.lab-workspace .creator-canvas .experiment-map { --path-color: #ffe0a0; background: var(--work-plot); border-color: var(--work-dark-line); }
+.lab-workspace .creator-canvas .is-astar .experiment-map { --path-color: #c5e2a7; }
+.lab-workspace .experiment-workbench { grid-template-columns: minmax(280px, .63fr) minmax(0, 1fr); gap: clamp(17px, 2.5vw, 32px); }
+.lab-workspace .experiment-editor, .lab-workspace.experiment-page .experiment-result { border-radius: 0; border-color: var(--work-line); box-shadow: none; background: var(--work-paper-wash); }
+.lab-workspace.experiment-page .experiment-result { border-top-color: var(--work-accent); }
+.lab-workspace.experiment-page .experiment-result.is-astar { border-top-color: #4d724f; }
+
+@media (max-width: 900px) {
+  .lab-workspace .experiment-workbench { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 720px) {
+  .lab-workspace .lab-workspace-frame { --content-pad: clamp(12px, 4vw, 28px); }
+  .lab-workspace .editorial-header-inner { min-height: 58px; }
+  .lab-workspace :is(.course-hero, .course-body, .course-workshop, .creator-opening, .workflow-build-page, .creator-console, .workflow-diagnosis-grid) { grid-template-columns: minmax(0, 1fr); }
+  .lab-workspace .course-hero { gap: 12px; }
+  .lab-workspace .course-hero-paper { max-width: 340px; margin: 0; }
+  .lab-workspace .creator-flow { gap: 0 13px; }
+  .lab-workspace .creator-flow li { font-size: 12px; gap: 4px; }
+  .lab-workspace .creator-flow li span { font-size: 10px; }
+  .lab-workspace .creator-parameters { border: solid var(--work-dark-line); border-width: 0 0 1px; padding: 0 0 14px; }
+  .lab-workspace .creator-settings-link { min-height: 44px; }
+  .lab-workspace .creator-page-form textarea { min-height: 94px; }
+  .lab-workspace .creator-compose .creator-inspiration button { min-height: 40px; }
+  .lab-workspace .creator-canvas-actions { gap: 3px 11px; }
+  .lab-workspace .creator-stage { scroll-margin-top: 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html:has(.lab-workspace) { scroll-behavior: auto; }
+  .lab-workspace *, .lab-workspace *::before, .lab-workspace *::after { animation: none; transition: none; }
+}

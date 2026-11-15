@@ -1,17 +1,20 @@
-import type { Course } from "./courses";
-
 export const maxQuestionLength = 300;
+export const maxCreatorReplyLength = 1800;
+export const maxCreatorHistory = 4;
 
-export type CreatorRequest = { question: string };
+export const creatorAnswerIntents = ["chat", "knowledge", "algorithm", "compare", "analyze", "clarify", "unsupported"] as const;
+export type CreatorAnswerIntent = typeof creatorAnswerIntents[number];
+export type CreatorTurn = { question: string; answer: string };
+export type CreatorRequest = { question: string; history?: CreatorTurn[]; sessionId?: string; runId?: string; revision?: number };
 
-// The integration will return a simulator plan, then explain its real result.
+export type CreatorAnswer = {
+  status: "answer";
+  intent: CreatorAnswerIntent;
+  answer: string;
+  alternatives?: { title: string; href: string }[];
+};
+
 export type CreatorResponse =
-  | { status: "unavailable" | "invalid"; message: string }
-  | {
-      status: "ready";
-      plan: {
-        course: Course["slug"];
-        topic: string;
-        simulator: { id: "pathfinding"; start: number; goal: number; walls: number[] };
-      };
-    };
+  | CreatorAnswer
+  | { status: "ready"; sessionId: string }
+  | { status: "error"; message: string };
