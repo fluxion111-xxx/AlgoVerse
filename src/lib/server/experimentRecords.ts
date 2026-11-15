@@ -4,6 +4,9 @@ import { link, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/p
 import { dirname, resolve } from "node:path";
 import { cookies } from "next/headers";
 import { createPathfindingConfig, getExperimentEngine, pathfindingEngine, type EngineId, type ExperimentConfig, type ExperimentResults } from "@/lib/experimentEngines";
+import type { CreatorPlanIntent } from "@/lib/experimentCreator";
+import type { AgentTask } from "@/lib/experimentAgent";
+import { experimentEvidence } from "@/lib/experiments/evidence";
 import { getExperimentTopic, getKnowledgeTopic } from "@/lib/knowledge";
 import { gradeKnowledgeExercise, hasPracticeExercise, type PracticeAttempts } from "@/lib/knowledgePractice";
 import { quickStartQuestion, type Diagnosis, type QuickStartPlan } from "@/lib/quickStart";
@@ -21,7 +24,8 @@ export type ExperimentSession = {
   revision?: number;
   createdAt: string;
   source?: { type: "quick-start"; model: string }
-    | { type: "creator"; model: string; revisedFrom?: string }
+    | { type: "creator"; model: string; revisedFrom?: string; intent?: CreatorPlanIntent }
+    | { type: "agent"; taskId: string }
     | { type: "workbench" };
 };
 
@@ -303,8 +307,8 @@ async function createSession(question: string, engineId: EngineId, engineVersion
   });
 }
 
-export async function createAIExperimentSession(question: string, engineId: EngineId, version: number, config: ExperimentConfig, model: string, revisedFrom?: string) {
-  return createSession(question, engineId, version, config, { type: "creator", model, revisedFrom });
+export async function createAIExperimentSession(question: string, engineId: EngineId, version: number, config: ExperimentConfig, model: string, intent: CreatorPlanIntent) {
+  return createSession(question, engineId, version, config, { type: "creator", model, intent });
 }
 
 export async function createWorkbenchSession(question: string, engineId: EngineId, version: number, config: ExperimentConfig) {
@@ -392,6 +396,59 @@ export async function getExperimentRun(id: unknown) {
   const owner = await visitor();
   if (!owner || !isRecordId(id)) return null;
   return readRecord<ExperimentRun>(recordPath(owner, "runs", id));
+}
+
+function agentRevisionPath(owner: string, id: string, revision: number) {
+  return recordPath(owner, `agent-tasks/${id}`, String(revision));
+}
+
+export async function getAgentTask(id: unknown): Promise<AgentTask | null> {
+  const owner = await visitor();
+  if (!owner || !isRecordId(id)) return null;
+  let files: string[];
+  try { files = await readdir(dirname(agentRevisionPath(owner, id, 0))); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  const revision = files.reduce((latest, name) => /^\d+\.json$/.test(name) ? Math.max(latest, Number(name.slice(0, -5))) : latest, 0);
+  return readRecord<AgentTask>(agentRevisionPath(owner, id, revision));
+}
+
+export async function createAgentTask(goal: string, reference?: ExperimentSession, run?: ExperimentRun) {
+  const owner = await ensureVisitor();
+  const id = randomUUID();
+  return writeOnce<AgentTask>(agentRevisionPath(owner, id, 0), {
+    id, revision: 0, goal, seed: randomBytes(4).readUInt32BE(0), phase: "draft",
+    plan: [], pending: [], decisions: [], clarifications: [], requests: 0, steps: 0,
+    runs: run ? [{ id: run.id, sessionId: run.session.id, tool: run.session.engineId, version: run.session.engineVersion,
+      config: run.session.config, completedAt: run.completedAt, metrics: experimentEvidence(run.results) }] : [],
+    ...(reference && { referenceConfig: { tool: reference.engineId, version: reference.engineVersion, config: reference.config } }),
+  });
+}
+
+export async function saveAgentTask(current: AgentTask, changes: Partial<Omit<AgentTask, "id" | "revision" | "goal" | "seed">>) {
+  const owner = await visitor();
+  if (!owner || (await getAgentTask(current.id))?.revision !== current.revision) return null;
+  const next = { ...current, ...changes, revision: current.revision + 1 };
+  const saved = await writeOnce(agentRevisionPath(owner, current.id, next.revision), next);
+  return saved === next ? next : null;
+}
+
+export async function runConfirmedAgentCall(task: AgentTask, callId: string) {
+  const current = await getAgentTask(task.id);
+  const call = current?.pending.find(({ id }) => id === callId);
+  if (!current || current.revision !== task.revision || current.phase !== "running" || !call) return null;
+  const owner = await visitor();
+  const engine = getExperimentEngine(call.tool, call.version);
+  if (!owner || !engine?.validate(call.config)) return null;
+  const session = await writeOnce<ExperimentSession>(recordPath(owner, "sessions", call.sessionId), {
+    id: call.sessionId, question: task.experimentGoal ?? task.goal, engineId: call.tool, engineVersion: call.version,
+    config: call.config, source: { type: "agent", taskId: task.id }, createdAt: new Date().toISOString(),
+  });
+  if (session.source?.type !== "agent" || session.source.taskId !== task.id
+    || !await confirmExperimentSession(session.id, 0)) return null;
+  return runExperimentSession(session.id, call.id, 0);
 }
 
 export async function getDiagnosis(runId: unknown) {

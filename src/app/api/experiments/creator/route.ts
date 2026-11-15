@@ -1,5 +1,5 @@
 import { maxCreatorHistory, maxCreatorReplyLength, maxQuestionLength, type CreatorResponse } from "@/lib/experimentCreator";
-import { registeredEngines } from "@/lib/experimentEngines";
+import { getExperimentEngine } from "@/lib/experimentEngines";
 import { experimentEvidence } from "@/lib/experiments/evidence";
 import { aiErrorResponse, aiJson, asObject, readAICredentials, reusePendingAI, type PendingAIRequest } from "@/lib/server/aiProvider";
 import { interpretCreatorRequest } from "@/lib/server/creatorAI";
@@ -69,27 +69,27 @@ export async function POST(request: Request) {
     const current = previous ? { engine: previous.engineId, version: previous.engineVersion, question: previous.question, config: previous.config,
       ...(run && { metrics: experimentEvidence(run.results) }) } : null;
     // Keep accidentally pasted credentials out of model inputs and experiment files.
-    if (JSON.stringify({ question, turns, current }).includes(credentials.apiKey)) {
+    const input = JSON.stringify({ question, turns, current });
+    if (input.includes(credentials.apiKey) || /\bsk-[A-Za-z0-9_-]{16,}\b/i.test(input)) {
       return aiJson({ status: "error", message: "请先移除问题里的 Key。" }, 400);
     }
 
     const { result, model } = await interpretCreatorRequest({ question, history: turns }, current, credentials);
     if ("answer" in result) {
-      const alternatives = result.recommend ? registeredEngines.filter((engine) => engine.id === result.recommend)
-        : result.intent === "unsupported" ? registeredEngines : [];
+      const alternative = getExperimentEngine(result.recommend);
       return aiJson({ status: "answer", intent: result.intent, answer: result.answer,
-        ...(alternatives.length > 0 && { alternatives: alternatives.map((engine) => ({ title: engine.creator.title, href: engine.route })) }),
+        ...(alternative && { alternatives: [{ title: alternative.creator.title, href: alternative.route }] }),
       } satisfies CreatorResponse);
     }
     let id: string;
     if (record) {
       const saved = await saveWorkflowRevision(record.id, record.revision, question, {
-        engineId: result.engineId, engineVersion: result.version, config: result.config, source: { type: "creator", model },
+        engineId: result.engineId, engineVersion: result.version, config: result.config, source: { type: "creator", model, intent: result.intent },
       });
       if (saved === null) return aiJson({ status: "error", message: "会话已更新，请刷新。" }, 409);
       id = record.id;
     } else {
-      id = (await createAIExperimentSession(question, result.engineId, result.version, result.config, model)).id;
+      id = (await createAIExperimentSession(question, result.engineId, result.version, result.config, model, result.intent)).id;
     }
     await rememberExperimentTask(id);
     return aiJson({ status: "ready", sessionId: id } satisfies CreatorResponse, 201);

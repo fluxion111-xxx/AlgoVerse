@@ -1,0 +1,71 @@
+import { maxQuestionLength } from "@/lib/experimentCreator";
+import { aiErrorResponse, aiJson, asObject, readAICredentials } from "@/lib/server/aiProvider";
+import { approveAgentTools, cancelAgentTask, clarifyAgentTask, decideAgentTask, replyToAgentMessage } from "@/lib/server/experimentAgent";
+import { createAgentTask, getAgentTask, getExperimentRun, getExperimentWorkflow } from "@/lib/server/experimentRecords";
+
+function inputText(value: unknown) {
+  return typeof value === "string" && value.length <= maxQuestionLength ? value.trim() : "";
+}
+
+function containsKey(value: string, auth?: string | null) {
+  const platformKey = process.env.SILICONFLOW_API_KEY?.trim();
+  const key = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+  return /\bsk-[A-Za-z0-9_-]{16,}\b/i.test(value) || (!!platformKey && value.includes(platformKey)) || (!!key && value.includes(key));
+}
+
+export async function POST(request: Request) {
+  const site = request.headers.get("sec-fetch-site");
+  const origin = request.headers.get("origin");
+  const url = new URL(request.url);
+  const host = request.headers.get("host") ?? url.host;
+  if ((site && site !== "same-origin" && site !== "none") || (origin && origin !== `${url.protocol}//${host}`)) {
+    return aiJson({ message: "请在本站操作。" }, 403);
+  }
+  if (request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase() !== "application/json") {
+    return aiJson({ message: "请求格式有误。" }, 415);
+  }
+  const body = asObject(await request.json().catch(() => null));
+  if (!body) return aiJson({ message: "请求格式有误。" }, 400);
+  const authorization = request.headers.get("authorization");
+  try {
+    if (body.action === "start") {
+      const goal = inputText(body.goal);
+      if (!goal) return aiJson({ message: "请输入 1–300 字。" }, 400);
+      if (containsKey(goal, authorization)) return aiJson({ message: "请移除问题里的 Key。" }, 400);
+      const workflow = body.sessionId === undefined ? null : await getExperimentWorkflow(body.sessionId);
+      const run = body.runId === undefined ? null : await getExperimentRun(body.runId);
+      if ((body.sessionId !== undefined && !workflow) || (body.runId !== undefined && (!run || run.session.id !== workflow?.id))) {
+        return aiJson({ message: "找不到本轮实验。" }, 404);
+      }
+      return aiJson({ task: await createAgentTask(goal, run?.session ?? workflow?.plan, run ?? undefined) }, 201);
+    }
+    const task = await getAgentTask(body.id);
+    if (!task) return aiJson({ message: "找不到这项任务。" }, 404);
+    if (body.action === "status") return aiJson({ task });
+    if (body.action === "cancel") return aiJson({ task: await cancelAgentTask(task) });
+    if (body.revision !== task.revision) return aiJson({ message: "任务已更新。请刷新。" }, 409);
+    switch (body.action) {
+      case "message":
+      case "retry-message": {
+        const message = inputText(body.action === "message" ? body.message : task.dialogue?.pending);
+        if (!message) return aiJson({ message: "请输入 1–300 字。" }, 400);
+        const credentials = readAICredentials(request);
+        if (containsKey(message, authorization) || message.includes(credentials.apiKey)) {
+          return aiJson({ message: "请移除问题里的 Key。" }, 400);
+        }
+        return aiJson({ task: await replyToAgentMessage(task, message, credentials) });
+      }
+      case "decide": return aiJson({ task: await decideAgentTask(task, readAICredentials(request)) });
+      case "approve": return aiJson({ task: await approveAgentTools(task) });
+      case "clarify": {
+        const answer = inputText(body.answer);
+        if (!answer) return aiJson({ message: "请输入 1–300 字。" }, 400);
+        if (containsKey(answer, authorization)) return aiJson({ message: "请移除问题里的 Key。" }, 400);
+        return aiJson({ task: await clarifyAgentTask(task, answer) });
+      }
+      default: return aiJson({ message: "操作无效。" }, 400);
+    }
+  } catch (error) {
+    return aiErrorResponse(error);
+  }
+}

@@ -2,54 +2,40 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { LabWorkspace } from "@/components/experiments/LabWorkspace";
+import { AgentWorkbench } from "@/components/experiments/AgentWorkbench";
 import { ExperimentBench } from "@/components/experiments/ExperimentBench";
 import { ExperimentCreator } from "@/components/experiments/ExperimentCreator";
 import { ExperimentSteps } from "@/components/experiments/ExperimentSteps";
 import { QuickStartDiagnosis } from "@/components/experiments/QuickStartDiagnosis";
+import { creatorObservations } from "@/lib/creatorCapabilities";
 import { experimentReviewTopics, knowledgeTopicRoute } from "@/lib/knowledge";
-import { getExperimentEngine, registeredEngines, type EngineId } from "@/lib/experimentEngines";
+import { getExperimentEngine, registeredEngines } from "@/lib/experimentEngines";
 import { experimentDomains } from "@/lib/experiments/engine";
 import { evidenceLabels, experimentEvidence } from "@/lib/experiments/evidence";
 import { experimentTaskLinks, quickStartRoute, withExperimentTask, workflowAISettingsRoute, workflowRoute, workflowSteps, type WorkflowStep } from "@/lib/navigation";
 import { getExperimentContext, type ExperimentSearch } from "@/lib/server/experimentContext";
-import { getActiveAIWorkflow, getDiagnosis, getQuickStart } from "@/lib/server/experimentRecords";
+import { getActiveAIWorkflow, getAgentTask, getDiagnosis, getQuickStart } from "@/lib/server/experimentRecords";
 import { runCreatorExperiment } from "../actions";
 import "./creator-flow.css";
 
-type WorkflowSearch = ExperimentSearch & { step?: string; engine?: string; mode?: string; guide?: string; diagnose?: string; updated?: string };
+type WorkflowSearch = ExperimentSearch & { step?: string; engine?: string; mode?: string; guide?: string; diagnose?: string; updated?: string; agentId?: string };
 type Context = Awaited<ReturnType<typeof getExperimentContext>>;
 
 export const metadata: Metadata = { title: "AI 实验创造台｜AlgoVerse" };
 
 const guidedQuestion = "请创建冒泡排序和快速排序的对比实验。用 7, 2, 9, 1, 5，观察比较次数与交换次数。";
-const outputLabels: Record<EngineId, string> = {
-  pathfinding: "访问节点、路径长度、耗时",
-  sorting: "比较次数、交换次数、排序结果",
-  "cpu-scheduling": "等待、周转、响应、进程切换",
-  "network-transmission": "路由、送达、丢包、延迟",
-  "memory-visualization": "阶乘结果、最大栈深、调用次数",
-  "b-plus-tree": "树高、分裂次数、访问节点、命中键",
-  "knn-classification": "分类结果、邻居距离、投票",
-  "page-replacement": "缺页次数、页命中次数",
-  "hash-collisions": "检查次数、冲突、满表失败",
-  "k-means": "迭代轮次、簇大小、簇内平方距离和",
-  "gradient-descent": "执行步数、损失变化、最终位置",
-  "tree-traversal": "访问顺序、节点数",
-  "graph-traversal": "BFS 和 DFS 顺序、不可达顶点",
-  "deadlock-avoidance": "原状态、请求决策、安全序列",
-  "tcp-congestion": "拥塞窗口、慢启动阈值、重传",
-  "dynamic-routing": "变更前后路径、路由成本",
-  "memory-allocation": "分配失败次数、空块、碎片",
-  "transaction-concurrency": "提交值、写冲突、读取记录",
-};
+const planIntents = { create: "创建实验", modify: "修改实验", compare: "对比实验" };
 
-function QuestionInput({ context: { task, workflow }, guided = false }: { context: Context; guided?: boolean }) {
-  return <ExperimentCreator key={`${task?.sessionId ?? "new"}:${workflow?.revision ?? 0}:${guided}`}
+function QuestionInput({ context: { task, workflow, run }, guided = false }: { context: Context; guided?: boolean }) {
+  return <ExperimentCreator key={`${task?.sessionId ?? "new"}:${task?.runId ?? "draft"}:${workflow?.revision ?? 0}:${guided}`}
     mode="question" sessionId={task?.sessionId} runId={task?.runId} revision={workflow?.revision}
-    savedQuestion={workflow?.question ?? (guided ? guidedQuestion : "")} guided={guided} />;
+    savedQuestion={run?.session.question ?? workflow?.question ?? (guided ? guidedQuestion : "")} guided={guided} />;
 }
 
 function QuestionStage({ context, guided, missingPlan = false }: { context: Context; guided?: boolean; missingPlan?: boolean }) {
+  if (!guided) return <AgentWorkbench key={context.task?.runId ?? context.task?.sessionId ?? "new"}
+    initial={null} initialMessage={context.run?.session.question ?? context.workflow?.question}
+    reference={context.task ?? undefined} />;
   return <section className="creator-question-stage" aria-labelledby="creator-headline">
     <header>
       <p className="creator-flow-kicker">{guided ? "一分钟上手" : "AI 实验创造台"}</p>
@@ -75,16 +61,22 @@ function PlanStage({ context }: { context: Context }) {
   const engine = plan && getExperimentEngine(plan.engineId, plan.engineVersion);
   if (!plan || !engine) return <QuestionStage context={context} missingPlan />;
   const links = experimentTaskLinks({ sessionId: plan.id });
+  const intent = plan.source?.type === "creator" ? plan.source.intent : undefined;
 
   return <section className="creator-plan-stage" aria-labelledby="creator-headline">
     <header className="creator-stage-header">
       <div><p className="creator-flow-kicker">AI 实验创造台</p><h1 id="creator-headline">设计方案</h1></div>
-      <Link className="catalog-direct" href={links.question}>修改问题</Link>
+      <div className="creator-result-actions">
+        <Link className="catalog-direct" href={links.question}>修改问题</Link>
+        <a className="catalog-direct" href="#creator-parameters-title">修改配置</a>
+      </div>
     </header>
     <dl className="creator-plan-summary">
       <div><dt>本次问题</dt><dd>{plan.question}</dd></div>
-      <div><dt>{context.workflow?.isAI ? "匹配执行器" : "执行器"} · 已校验</dt><dd>{engine.creator.title}</dd></div>
-      <div><dt>运行后可看</dt><dd>{outputLabels[engine.id]}</dd></div>
+      <div><dt>实验领域</dt><dd>{experimentDomains[engine.domain]}</dd></div>
+      <div><dt>{intent ? `${planIntents[intent]} · 已校验` : "实验类型 · 已校验"}</dt><dd>{engine.creator.title}</dd></div>
+      <div><dt>实验目标</dt><dd>{plan.config.goalLabel}</dd></div>
+      <div><dt>预计观察指标</dt><dd>{creatorObservations[engine.id].metrics}</dd></div>
     </dl>
     <ExperimentBench engine={engine} context={{ ...context, session: plan, run: null }} action={runCreatorExperiment} presentation="plan" />
   </section>;
@@ -93,6 +85,14 @@ function PlanStage({ context }: { context: Context }) {
 export default async function CreatorPage({ searchParams }: { searchParams: Promise<WorkflowSearch> }) {
   const params = await searchParams;
   const explicitTask = params.sessionId !== undefined || params.runId !== undefined;
+
+  if (params.mode === "agent") {
+    const task = params.agentId === undefined ? null : await getAgentTask(params.agentId);
+    if (params.agentId !== undefined && !task) notFound();
+    return <LabWorkspace className="catalog-page creator-studio creator-workflow theme-algorithms">
+      <div className="creator-spread"><AgentWorkbench key={task?.id ?? "new"} initial={task} /></div>
+    </LabWorkspace>;
+  }
 
   if (params.mode === "quick-start") {
     const old = params.sessionId === undefined ? null : await getQuickStart(params.sessionId);

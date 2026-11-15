@@ -59,14 +59,13 @@ export const pathfindingEngine = defineEngine({
   route: pathfindingRoute,
   creator: {
     title: "Dijkstra 与 A* 寻路对比",
-    description: "在同一张地图比较访问顺序、节点数、路径和耗时。直走成本 1，斜走成本 √2。",
+    description: `在同一张地图比较访问顺序、节点数、路径和耗时。直走成本 1，斜走成本 √2。地图固定 ${COLS} 列 × ${ROWS} 行。编号从左上角 0 起逐行递增。障碍不能占起点或终点，地图必须可达。`,
     parameters: {
       goalLabel: "1–100 字的实验目标",
       map: [
         { kind: "random", difficulty: difficulties },
         { kind: "custom", start: `0–${COLS * ROWS - 1} 的整数`, goal: "不同于起点的整数", walls: "不重复的障碍格编号" },
       ],
-      rules: `地图固定 ${COLS} 列 × ${ROWS} 行。编号从左上角 0 起逐行递增。障碍不能占起点或终点，地图必须可达。`,
     },
   },
   configure(value: unknown, seed: number): PathfindingConfig | null {

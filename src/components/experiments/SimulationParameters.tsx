@@ -53,7 +53,7 @@ export function SimulationWorkbench({ engineId, initial, results, action, sessio
 
   return <div className="creator-console simulation-console">
     {presentation !== "result" && <aside className="creator-parameters" aria-labelledby="creator-parameters-title">
-      <h3 id="creator-parameters-title">实验参数</h3>
+      <h3 id="creator-parameters-title" tabIndex={-1}>{presentation === "plan" ? "推荐参数" : "实验参数"}</h3>
       <form action={action}>
         {sessionId && <><input type="hidden" name="sessionId" value={sessionId} /><input type="hidden" name="revision" value={revision} /></>}
         <input type="hidden" name="engineId" value={engineId} />

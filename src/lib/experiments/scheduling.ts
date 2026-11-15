@@ -67,8 +67,8 @@ export const schedulingEngine = defineEngine({
   route: "/experiments/operating-systems/cpu-scheduling",
   creator: {
     title: "CPU 进程调度",
-    description: "单核 CPU。支持轮转抢占（rr）和先来先服务（fcfs）。不支持优先级或最短剩余时间。模拟时间使用整数刻度。",
-    parameters: { goalLabel: "实验目标", policy: ["rr", "fcfs"], quantum: "1–20，fcfs 时不使用",
+    description: "单核 CPU。支持轮转抢占（rr）和先来先服务（fcfs）。不支持优先级或最短剩余时间。时间使用整数刻度。切换只计次数，不消耗模拟时间。",
+    parameters: { goalLabel: "实验目标", policy: '单个字符串 "rr" 或 "fcfs"', quantum: "必填整数 1–20。fcfs 填 1，调度时忽略。禁止填 0",
       processes: "2–6 个进程，例如 [{arrival:0,burst:6},{arrival:1,burst:4},{arrival:2,burst:3}]；到达 0–40，运行 1–25" },
   },
   preset: (): SchedulingConfig => ({ goalLabel: "观察进程怎样轮流占用 CPU。", policy: "rr", quantum: 2,

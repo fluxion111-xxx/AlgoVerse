@@ -1895,7 +1895,7 @@ test("pending generation is shared only by the same selection and key", async ()
 });
 
 test("creator passes model answers through and builds only validated engine configurations", async (t) => {
-  let decision = { intent: "chat", answer: "你好，很高兴见到你。" };
+  let decision = { intent: "knowledge", answer: "你好，很高兴见到你。" };
   const fetch = t.mock.method(globalThis, "fetch", async () => completion(JSON.stringify(decision)));
   const credentials = readAICredentials(request(qwen("qwen3.7-plus", "cn-beijing")));
   const question = { question: "你今天好吗？", history: [{ question: "你好", answer: "你好。" }] };

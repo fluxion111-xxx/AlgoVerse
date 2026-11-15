@@ -28,7 +28,7 @@ const siliconFlowModels = {
 } as const;
 const siliconFlowEndpoint = "https://api.siliconflow.cn/v1/chat/completions";
 export type PendingAIRequest<T> = { fingerprint: string; task: Promise<T> };
-type Operation = "connection_test" | "quick_start_plan" | "experiment_diagnosis" | "experiment_creator" | "tutor" | "learning_advice";
+type Operation = "connection_test" | "quick_start_plan" | "experiment_diagnosis" | "experiment_creator" | "experiment_agent" | "tutor" | "learning_advice";
 type RequestOptions<T> = {
   operation: Operation;
   instructions: string;
@@ -273,7 +273,8 @@ export async function requestAIJson<T>(credentials: AICredentials, options: Requ
 async function requestPlatformAI<T>(credentials: PlatformCredentials, options: RequestOptions<T>) {
   const preferred = credentials.selection.model;
   // A connection test checks the selected model itself. Business calls may retry on the backup once.
-  const choices: PlatformModel[] = preferred === "primary" && options.operation !== "connection_test" ? ["primary", "backup"] : [preferred];
+  const singleAttempt = options.operation === "connection_test" || options.operation === "experiment_agent";
+  const choices: PlatformModel[] = preferred === "primary" && !singleAttempt ? ["primary", "backup"] : [preferred];
   for (const choice of choices) {
     try {
       return await requestPlatformCompletion(credentials, options, choice).catch((error: unknown) => {

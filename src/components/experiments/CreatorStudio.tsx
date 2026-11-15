@@ -69,7 +69,7 @@ export function CreatorStudio({ draft, engineId, run, nextRunId, defaultSeed, ac
         </header>
         {engineId === "pathfinding" && "walls" in config ? <div className="creator-console">
           {!readOnly && <aside className="creator-parameters" aria-labelledby="creator-parameters-title">
-            <h3 id="creator-parameters-title">实验参数</h3>
+            <h3 id="creator-parameters-title" tabIndex={-1}>{presentation === "plan" ? "推荐参数" : "实验参数"}</h3>
             <form action={action}>
               {draft && <><input type="hidden" name="sessionId" value={draft.id} /><input type="hidden" name="revision" value={draft.revision} /></>}
               <input type="hidden" name="runId" value={nextRunId} />
@@ -104,7 +104,7 @@ export function CreatorStudio({ draft, engineId, run, nextRunId, defaultSeed, ac
             </div>
             {showRun && "dijkstra" in run.results ? <SavedPathfindingReplay key={run.id} map={config} results={run.results} studio /> : <>
               <div className="creator-stage-head"><h3>地图预览</h3><p>直走 1，斜走 √2。</p></div>
-              {draft?.generated && <p className="creator-preview-goal">观察目标 · {draft.config.goalLabel}</p>}
+              {draft?.generated && presentation !== "plan" && <p className="creator-preview-goal">观察目标 · {draft.config.goalLabel}</p>}
               <div className="experiment-sheets">
                 <ResultSheet algorithm="dijkstra" map={config} frame={0} />
                 <ResultSheet algorithm="astar" map={config} frame={0} />
