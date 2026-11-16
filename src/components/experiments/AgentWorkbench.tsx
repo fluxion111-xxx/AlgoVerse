@@ -9,7 +9,7 @@ import { getExperimentEngine, type ExperimentConfig } from "@/lib/experimentEngi
 import { evidenceLabels } from "@/lib/experiments/evidence";
 import { agentWorkbenchLink, runAnalysisLink, workflowAISettingsRoute, type ExperimentTask, type WorkflowStep } from "@/lib/navigation";
 import type { Diagnosis } from "@/lib/quickStart";
-import { fetchWithTemporaryAI, useActiveAI } from "@/lib/temporaryAI";
+import { fetchWithTemporaryAI, requestAgentTask as agentRequest, useActiveAI } from "@/lib/temporaryAI";
 import { CatalogIcon } from "./CatalogEffects";
 import { DiagnosisSummary } from "./QuickStartDiagnosis";
 import { SortingReplay } from "./SimulationReplay";
@@ -20,13 +20,6 @@ const phases: Record<AgentTask["phase"], string> = {
   observe: "等待分析", clarify: "需要补充", finished: "任务完成", unsupported: "暂不支持",
   cancelled: "任务已取消", limit: "已到任务上限", "ai-error": "分析失败", "tool-error": "运行失败",
 };
-
-async function agentRequest(body: object, connection?: ReturnType<typeof useActiveAI>, signal?: AbortSignal): Promise<AgentTask> {
-  const response = await fetchWithTemporaryAI("/api/experiments/agent", connection, body, signal);
-  const payload = await response.json();
-  if (!response.ok || !payload.task) throw new Error(payload.message ?? "请求失败。请重试。");
-  return payload.task;
-}
 
 function ToolDetails({ config }: { config: ExperimentConfig }) {
   return <>
@@ -372,7 +365,8 @@ export function AgentWorkbench({ initial, initialMessage = "", reference, savedP
           <p className="agent-user">{turn.message}</p>
           <div className="agent-answer">
             {turn.action ? <><span className="agent-speaker"><CatalogIcon icon="lucide:sparkles" width={16} /> Agent</span>
-              {turn.action !== "run" || !decision
+              {turn.tutor ? <LazyTutorReply answer={turn.reply} codeBlocks={turn.tutor.codeBlocks} reveal={false} />
+                : turn.action !== "run" || !decision
                 ? <DecisionDetails decision={{ observation: turn.reply, evidence: turn.evidence }} runs={task.runs} />
                 : proposal(decision.calls ?? [], decision)}
               {turn.scheduling && <SchedulingDetails evidence={turn.scheduling} />}</>

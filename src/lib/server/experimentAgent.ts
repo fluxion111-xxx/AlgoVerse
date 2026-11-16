@@ -53,7 +53,7 @@ function trimChatInvitation(reply: string) {
   return reply.slice(0, invitation.index).trimEnd() + punctuation;
 }
 
-function readFocus(value: unknown): FocusUpdate | undefined {
+export function readAgentFocus(value: unknown): FocusUpdate | undefined {
   const object = asObject(value);
   if (!object) return;
   const topic = shortText(object.topic, 100);
@@ -69,19 +69,21 @@ function readFocus(value: unknown): FocusUpdate | undefined {
   };
 }
 
-export type TutorResolution = { action: "plan"; focus: FocusUpdate }
-  | { action: "answer"; observation: string; focus?: FocusUpdate; tutor: TutorTurnDetails };
+type PlanRequest = { action: "plan"; focus: FocusUpdate };
+type TutorAnswer = { action: "answer"; observation: string; focus?: FocusUpdate; tutor: TutorTurnDetails };
+export type TutorResolution = PlanRequest | TutorAnswer;
 
 type TutorDelegate = {
   access: TutorContext;
   run: ExperimentRun | null;
-  resolve: (turns: AgentTurn[], context: { focus?: AgentFocus; pendingTool?: string }, credentials: AICredentials) => Promise<{ result: TutorResolution; model: string }>;
+  resolve: (turns: AgentTurn[], context: { focus?: AgentFocus; pendingTool?: string }, credentials: AICredentials) => Promise<(PlanRequest & { model?: string }) | (TutorAnswer & { model: string })>;
 };
 
-export function readTutorResolution(value: unknown) {
+export function readPlanFocus(value: unknown) {
   const object = asObject(value);
-  return object?.action === "plan" && Object.keys(object).every((key) => key === "action" || key === "focus")
-    ? readFocus(object.focus) : undefined;
+  const focus = readAgentFocus(object?.focus);
+  return object?.action === "plan" && focus?.goal && Object.keys(object).every((key) => key === "action" || key === "focus" || key === "observation")
+    ? focus : undefined;
 }
 
 function visibleTurns(turns: AgentTurn[], access?: TutorContext, hasRuns = false) {
@@ -121,8 +123,9 @@ function validateDecision(value: unknown, task: AgentTask, limit: number, option
   if (action !== "run" && action !== "clarify" && action !== "unsupported"
     && action !== "answer" && action !== "explain" && action !== "finish") return null;
   if (dialogue ? action === "finish" : action === "answer" || action === "explain") return null;
-  if (object.autoContinue !== undefined && (!dialogue || action !== "run" || typeof object.autoContinue !== "boolean")) return null;
-  const focus = dialogue ? readFocus(object.focus) : undefined;
+  const autoContinue = object.autoContinue ?? undefined;
+  if (autoContinue !== undefined && (typeof autoContinue !== "boolean" || (autoContinue && (!dialogue || action !== "run")))) return null;
+  const focus = dialogue ? readAgentFocus(object.focus) : undefined;
   const plan = object.plan ?? [];
   if (!Array.isArray(plan) || plan.length > 6 || (action === "run" && !plan.length && (!task.plan.length || focus?.switchTopic))) return null;
   const steps = plan.map((step) => shortText(step, 80));
@@ -134,8 +137,8 @@ function validateDecision(value: unknown, task: AgentTask, limit: number, option
   if (!Array.isArray(references) || references.length > 6 || (needsEvidence && !references.length)) return null;
   const evidence: AgentEvidence[] = [];
   for (const reference of references) {
-    if (action === "explain") {
-      const entry = typeof reference === "string" ? options?.get(reference) : undefined;
+    if (action === "explain" && typeof reference === "string") {
+      const entry = options?.get(reference);
       if (!entry) return null;
       evidence.push(entry);
       continue;
@@ -144,6 +147,7 @@ function validateDecision(value: unknown, task: AgentTask, limit: number, option
     if (!item || Object.keys(item).length !== 3) return null;
     const { from, to, metric } = item;
     if (typeof from !== "number" || !Number.isInteger(from) || typeof to !== "number" || !Number.isInteger(to) || typeof metric !== "string") return null;
+    if (action === "explain" && !options?.has(`r${from}-r${to}-${metric}`)) return null;
     if (!dialogue && (from <= firstRun || to <= firstRun)) return null;
     const left = task.runs[from - 1];
     const right = task.runs[to - 1];
@@ -171,15 +175,14 @@ function validateDecision(value: unknown, task: AgentTask, limit: number, option
     })) return null;
     calls.push(call);
   }
-  return { action, plan: steps.filter((step) => step !== null), observation, evidence, calls, autoContinue: object.autoContinue, focus };
+  return { action, plan: steps.filter((step) => step !== null), observation, evidence, calls, autoContinue, focus };
 }
 
 function validateDialogueDecision(value: unknown, task: AgentTask, limit: number, evidence: Map<string, AgentEvidence>): DialogueDecision | null {
   const object = asObject(value);
   if (object?.action !== "plan") return validateDecision(value, task, limit, evidence);
-  const focus = readFocus(object.focus);
-  return focus?.goal && Object.keys(object).every((key) => key === "action" || key === "focus" || key === "observation")
-    ? { action: "plan", focus } : null;
+  const focus = readPlanFocus(object);
+  return focus ? { action: "plan", focus } : null;
 }
 
 async function update(task: AgentTask, changes: Parameters<typeof saveAgentTask>[1]) {
@@ -221,7 +224,10 @@ function decisionContext(task: AgentTask, currentTopicOnly = false) {
   const firstRun = focus?.firstRun ?? 0;
   const currentExperiment = currentProposal(task);
   const conversation = visibleTurns(task.dialogue?.turns ?? []).slice(-agentDialogueLimits.context)
-    .map(({ message, reply, action, evidence }) => ({ message, reply, action, evidence }));
+    .map(({ message, reply, action, evidence, tutor }) => ({
+      message, reply: tutor?.codeBlocks?.length ? JSON.stringify({ answer: reply, codeBlocks: tutor.codeBlocks }) : reply,
+      action, evidence,
+    }));
   return {
     goal: focus?.goal ?? task.experimentGoal ?? (task.dialogue ? undefined : task.goal),
     focus: focus && { topic: focus.topic, goal: focus.goal, constraints: focus.constraints, defaults: focus.defaults },
@@ -286,17 +292,19 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
         ...(reply ? [{ role: "assistant" as const, content: reply }] : []),
       ]), { role: "user", content: `Resolve the following request using the conversation. Inherit the exact subject and methods when omitted.\n${JSON.stringify({ context: { focus: context.focus, lastExchange: context.lastExchange }, message })}` }],
       validate: (value) => validateDialogueDecision(value, task, remainingBatch, evidenceOptions),
-    });
-    if (response.result.action === "plan") {
-      if (requested.requests >= agentDialogueLimits.requests) throw new AIRequestError("已到本对话上限。", 429);
-      const { focus: resolvedFocus } = response.result;
+    }).then(({ result, model }) => ({ ...result, model }));
+    if (response.action === "plan") {
+      if (response.model !== undefined) {
+        if (requested.requests >= agentDialogueLimits.requests) throw new AIRequestError("已到本对话上限。", 429);
+        requested = { ...requested, requests: requested.requests + 1 };
+        claimed = await update(claimed, { dialogue: requested });
+      }
+      const { focus: resolvedFocus } = response;
       const focus = { ...(resolvedFocus.switchTopic ? undefined : accessibleFocus), ...resolvedFocus };
       const sharedSession = tutor?.run?.session;
       const base = tutor ? task.pending[0] ?? (sharedSession && { tool: sharedSession.engineId, version: sharedSession.engineVersion, config: sharedSession.config })
         : currentProposal(task);
       const revisionBase = !focus.switchTopic && task.pending.length <= 1 ? base : undefined;
-      requested = { ...requested, requests: requested.requests + 1 };
-      claimed = await update(claimed, { dialogue: requested });
       ({ result, model } = await requestAIJson<Decision>(boundedCredentials, {
         operation: "experiment_agent", instructions: planningInstructions, maxTokens: agentDialogueLimits.outputTokens,
         input: { stage: "plan", focus, request: message, currentExperiment: !focus.switchTopic && base ? { tool: base.tool, config: base.config } : undefined,
@@ -312,13 +320,12 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
           return validateDecision({ ...proposal, focus }, task, remainingBatch, evidenceOptions, revisionBase, !!tutor && !base);
         },
       }));
-    } else if ("tutor" in response.result) {
-      const answer = response.result;
-      tutorDetails = answer.tutor;
-      result = { action: "answer", plan: [], observation: answer.observation, calls: [], evidence: [], focus: answer.focus };
+    } else if ("tutor" in response) {
+      tutorDetails = response.tutor;
+      result = { action: "answer", plan: [], observation: response.observation, calls: [], evidence: [], focus: response.focus };
       model = response.model;
     } else {
-      result = response.result;
+      result = response;
       model = response.model;
     }
   } catch (error) {
@@ -374,7 +381,8 @@ export async function decideAgentTask(task: AgentTask, credentials: AICredential
       : '运行额度已满，只能根据 runs 输出 finish 的证据，或用 clarify 说明还缺什么信息。';
   let response;
   try {
-    response = await requestAIJson<Decision>(credentials, {
+    const signal = AbortSignal.any([credentials.signal, AbortSignal.timeout(leaseMs - 5000)]);
+    response = await requestAIJson<Decision>({ ...credentials, signal }, {
       operation: "experiment_agent", instructions: `${instructions}\n${stageInstructions}`, maxTokens: agentLimits.outputTokens,
       input: {
         ...decisionContext(task, true), tools: agentTools, remainingBatch, lastError: task.error,
@@ -402,8 +410,10 @@ export async function decideAgentTask(task: AgentTask, credentials: AICredential
 export async function stopAgentAnalysis(task: AgentTask, operationId: string) {
   const dialogue = task.dialogue;
   if (dialogue?.pending && dialogue.operationId === operationId) {
+    const scope = task.tutorContext;
     return update(task, { dialogue: { focus: dialogue.focus, requests: dialogue.requests,
-      turns: [...dialogue.turns, { message: dialogue.pending, stopped: true }] } });
+      turns: [...dialogue.turns, { message: dialogue.pending, stopped: true,
+        ...((scope?.includeExperiment || scope?.includePractice) && { tutorScope: scope }) }] } });
   }
   if (task.phase === "deciding" && task.operationId === operationId) {
     return update(task, { phase: task.runs.length ? "observe" : "draft", operationId: undefined, leaseUntil: undefined });

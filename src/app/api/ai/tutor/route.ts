@@ -4,8 +4,9 @@ import { registeredEngines } from "@/lib/experimentEngines";
 import { experimentEvidence } from "@/lib/experiments/evidence";
 import { experimentReviewTopics, getExperimentTopic, getKnowledgeTopic, knowledgeTopicRoute } from "@/lib/knowledge";
 import { searchKnowledge } from "@/lib/knowledgeSearch";
+import { agentWorkbenchLink } from "@/lib/navigation";
 import { AIRequestError, aiErrorResponse, aiJson, asObject, readAICredentials, requestAIJson, type AICredentials } from "@/lib/server/aiProvider";
-import { readTutorResolution, replyToAgentMessage, type TutorResolution } from "@/lib/server/experimentAgent";
+import { readAgentFocus, readPlanFocus, replyToAgentMessage, type TutorResolution } from "@/lib/server/experimentAgent";
 import { createAgentTask, getAgentTask, getExperimentRun, getTopicPractice, saveAgentTask } from "@/lib/server/experimentRecords";
 import { getDeepLesson } from "@/content/lessons/index";
 import { normalizeTutorFencedReply, normalizeTutorReplyJson, readTutorCodeBlocks, requestedPythonVerbatimLine, type TutorCodeBlock } from "@/lib/tutorReply";
@@ -24,10 +25,13 @@ const tutorCodeInstructions = [
   "用户要求一段完整代码时，把所有对应的行放进同一个代码块。",
 ];
 const experimentIntent = [
-  '用户明确要设计、创建、修改、重试或优化实验时，返回 {"action":"plan","focus":{"topic":"从当前问题和历史找到的对象","goal":"完整的实验目标"}}。',
-  '追问「帮我设计一个实验」时，沿用上一轮已经讨论的主题。已知主题就生成 plan，样例数据可由平台选择。明确指定新主题时加 focus.switchTopic:true。修改参数可记录在 focus.constraints。',
-  '问概念、区别、代码或实测结果时正常回答。不要擅自创建实验，也不要编造实验数据。',
+  '用户要求设计、创建、试跑、修改或继续实验时，返回 {"action":"plan","focus":{"topic":"对象与方法","goal":"完整的实验目标"}}。',
+  '例如，用户先问「冒泡排序和快速排序谁更快？」再说「请你帮我实验」，必须返回 {"action":"plan","focus":{"topic":"冒泡排序和快速排序","goal":"用同一组输入比较冒泡排序和快速排序的比较及交换次数"}}。',
+  '用最近对话和 conversation.focus 补全「帮我实验」「跑一下看看」里的省略。已知对象时直接返回 plan；缺少样例数据时平台可选择。保留明确给定的数值、方法和限制，在 focus.constraints 记录。',
+  '问谁更快、概念、区别、代码或实测结果时直接回答。技术答复附上 focus.topic，并在有清楚的可测目标时写 focus.goal。改话题时在 focus 中加 switchTopic:true。闲聊可省略 focus。',
+  '只在当前请求和对话均未说明实验对象时问一个问题。不要在回答中声称已运行。平台只接收 plan 对象来打开工作台。',
 ];
+const experimentFollowUp = /^(?:请(?:你|您)?)?(?:(?:帮我|给我|替我|来)?(?:设计|做|跑|运行|执行)?(?:一?[个次轮场组])?(?:这个|那个|刚才的)?实验(?:一下|看看|吧)?|(?:帮我)?(?:跑|试|验证)(?:一下|看看|一遍|吧))[。.!！]?$/u;
 
 function citationId(citation: unknown) {
   if (typeof citation === "string") return citation;
@@ -45,12 +49,13 @@ export async function POST(request: Request) {
     const origin = request.headers.get("origin");
     const site = request.headers.get("sec-fetch-site");
     const url = new URL(request.url);
-    if (shared && ((site && site !== "same-origin" && site !== "none") || (origin && origin !== url.origin))) {
+    const host = request.headers.get("host") ?? url.host;
+    if (shared && ((site && site !== "same-origin" && site !== "none") || (origin && origin !== `${url.protocol}//${host}`))) {
       return aiJson({ status: "error", message: "请在本站操作。" }, 403);
     }
     let task = shared && payload.agentId !== undefined ? await getAgentTask(payload.agentId) : null;
     if (shared && payload.agentId !== undefined && !task) return aiJson({ status: "error", message: "找不到这段对话。" }, 404);
-    if (task && task.revision !== payload?.revision) return aiJson({ status: "error", message: "对话已更新。请刷新。" }, 409);
+    if (task && task.revision !== payload?.revision) return aiJson({ status: "error", message: "对话已更新。请重试。", task }, 409);
     const rawQuestion = typeof payload?.question === "string" ? payload.question : "";
     const question = rawQuestion.trim();
     const history = shared ? [] : payload?.history ?? [];
@@ -109,7 +114,7 @@ export async function POST(request: Request) {
     const fallback = !matched.length && turns.length ? searchKnowledge(turns.at(-1)!.question) : [];
     const review = run ? experimentReviewTopics(run.session.engineId, run.topicId) : [];
     const sources = [...new Set([...(topic ? [topic] : []), ...review, ...matched, ...fallback])].slice(0, 4);
-    const input = { question, history: turns, ...(shared && { conversation: context }),
+    const input = { question, ...(shared ? { conversation: context } : { history: turns }),
       ...(lesson && { lesson: { title: lesson.title, goals: lesson.goals, material: lesson.blocks.map((block) =>
         block.kind === "code" ? block.source : block.kind === "steps" ? block.steps.map(({ text }) => text).join("\n")
           : [block.formula, ...block.paragraphs].filter(Boolean).join("\n")).join("\n").slice(0, 2400) } }),
@@ -144,7 +149,12 @@ export async function POST(request: Request) {
         ]),
       ].join("\n"),
       input,
+      ...(shared && { dialogue: [...turns.flatMap(({ question, answer, codeBlocks }) => [
+        { role: "user" as const, content: question },
+        ...(answer || codeBlocks?.length ? [{ role: "assistant" as const, content: codeBlocks?.length ? JSON.stringify({ answer, codeBlocks }) : answer }] : []),
+      ]), { role: "user" as const, content: question }] }),
       maxTokens: 1100,
+      retryFormat: shared,
       normalizeContent: normalizeTutorReplyJson,
       backupTutorFormat: {
         instructions: (requestedLine !== null ? [
@@ -163,35 +173,39 @@ export async function POST(request: Request) {
       validate(value) {
         const output = asObject(value);
         if (shared && output?.action === "plan") {
-          const focus = readTutorResolution(output);
+          const focus = readPlanFocus(output);
           return focus ? { action: "plan", focus } : null;
         }
-        if (typeof output?.answer !== "string" || output.answer.length > maxCreatorReplyLength) return null;
-        const answer = output.answer.trim();
-        const modelBlocks = readTutorCodeBlocks(output.codeBlocks, output.answer.length);
+        if (!output) return null;
+        const rawAnswer = shared ? output.answer ?? output.observation : output.answer;
+        if (typeof rawAnswer !== "string" || rawAnswer.length > maxCreatorReplyLength) return null;
+        const answer = rawAnswer.trim();
+        const modelBlocks = readTutorCodeBlocks(output.codeBlocks, rawAnswer.length);
         if (!modelBlocks || (requestedLine !== null && (!answer || answer.includes("```")))) return null;
         const codeBlocks = requestedLine !== null
-          ? readTutorCodeBlocks([{ language: "python", lines: [requestedLine] }], output.answer.length) : modelBlocks;
+          ? readTutorCodeBlocks([{ language: "python", lines: [requestedLine] }], rawAnswer.length) : modelBlocks;
         if (!codeBlocks || (!answer && !codeBlocks.length)) return null;
-        if (Object.keys(output).some((key) => !["answer", "codeBlocks", "recommend", "citations"].includes(key))) return null;
+        if (Object.keys(output).some((key) => !["answer", "codeBlocks", "recommend", "citations"].includes(key)
+          && !(shared && (key === "focus" || key === "observation"
+            || (key === "action" && (output.action === "answer" || output.action === "clarify")))))) return null;
+        if (shared && output.answer !== undefined && output.observation !== undefined && output.answer !== output.observation) return null;
         // An optional recommendation never supplies its own destination or invalidates the answer.
         const recommendation = registeredEngines.find((engine) => engine.id === output.recommend);
         const citations = output.citations ?? [];
-        if (!Array.isArray(citations) || citations.length > sources.length) return null;
-        const ids = citations.map(citationId);
-        if (new Set(ids).size !== ids.length) return null;
-        const cited = ids.map((id) => sources.find(({ topic }) => topic.id === id));
-        if (cited.some((entry) => !entry)) return null;
+        if (!shared && (!Array.isArray(citations) || citations.length > sources.length)) return null;
+        const ids = Array.isArray(citations) ? citations.map(citationId) : [];
+        const cited = [...new Set(ids)].flatMap((id) => sources.filter(({ topic }) => topic.id === id));
+        if (!shared && cited.length !== ids.length) return null;
         const linked = recommendation && [...cited, topic, runTopic].find((entry) =>
           entry?.topic.experiments.some(({ engineId }) => engineId === recommendation.id));
         const experimentHref = recommendation && (linked
           ? `${recommendation.route}?${new URLSearchParams({ topic: linked.topic.id })}#knowledge-lab`
           : recommendation.route);
         return {
-          action: "answer", observation: answer,
+          action: "answer", observation: answer, focus: shared ? readAgentFocus(output.focus) : undefined,
           tutor: {
             ...(codeBlocks.length > 0 && { codeBlocks }),
-            sources: cited.flatMap((entry) => entry ? [{ title: entry.topic.title, href: knowledgeTopicRoute(entry) }] : []),
+            sources: cited.map((entry) => ({ title: entry.topic.title, href: knowledgeTopicRoute(entry) })),
             ...(recommendation && experimentHref && { recommendation: { title: recommendation.creator.title, href: experimentHref } }),
           },
         };
@@ -203,15 +217,25 @@ export async function POST(request: Request) {
       if (result.action !== "answer") throw new AIRequestError("AI 回复格式有误。", 502);
       return aiJson({ status: "answer", answer: result.observation, ...result.tutor });
     }
-    task ??= await createAgentTask(question, run?.session, run ?? undefined);
+    task ??= await createAgentTask(question, run?.session, run ?? undefined, { tutorContext: access });
     const operationId = typeof payload.operationId === "string" && /^[a-f0-9-]{36}$/i.test(payload.operationId) ? payload.operationId : undefined;
     const next = await replyToAgentMessage(task, question, credentials, operationId, undefined, {
       access, run,
-      resolve: (history, context, credentials) => resolve(history.slice(-maxCreatorHistory).map((turn) => ({
-        question: turn.message, answer: turn.reply ?? "", codeBlocks: turn.tutor?.codeBlocks,
-      })), context, credentials),
+      async resolve(history, context, credentials) {
+        const focus = context.focus;
+        if (focus && experimentFollowUp.test(question.normalize("NFKC"))) {
+          return { action: "plan", focus: { ...focus, goal: focus.goal ?? focus.topic } };
+        }
+        const { result, model } = await resolve(history.slice(-maxCreatorHistory).map((turn) => ({
+          question: turn.message, answer: turn.reply ?? "", codeBlocks: turn.tutor?.codeBlocks,
+        })), context, credentials);
+        return { ...result, model };
+      },
     });
-    return aiJson(next.dialogue?.error ? { status: "error", message: next.dialogue.error, task: next } : { status: "shared", task: next });
+    if (next.dialogue?.error) return aiJson({ status: "error", message: next.dialogue.error, task: next });
+    const lastTurn = next.dialogue?.turns.at(-1);
+    const workbench = lastTurn?.action === "run" && next.phase === "confirm" ? agentWorkbenchLink({ agentId: next.id }) : undefined;
+    return aiJson({ status: "shared", task: next, workbench });
   } catch (error) {
     return aiErrorResponse(error);
   }

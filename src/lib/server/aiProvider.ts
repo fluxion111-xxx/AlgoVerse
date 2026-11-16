@@ -38,6 +38,7 @@ type RequestOptions<T> = {
   maxTokens: number;
   normalizeContent?: (content: string) => string;
   backupTutorFormat?: { instructions: string; normalizeContent: (content: string) => string };
+  retryFormat?: boolean;
   validate: (value: unknown) => T | null;
 };
 type CompletionOptions = {
@@ -198,15 +199,29 @@ class PlatformUpstreamError extends AIRequestError {
   }
 }
 
-type CompletionFormatError = "json" | "schema" | "empty";
+type CompletionFormatError = "json" | "schema" | "empty" | "truncated";
 
 class AICompletionFormatError extends AIRequestError {
   readonly reason: CompletionFormatError;
 
   constructor(reason: CompletionFormatError) {
-    super(reason === "empty" ? "AI 未返回正文，请重试。" : "AI 返回格式有误，请重试。", 502);
+    super(reason === "empty" ? "AI 未返回正文，请重试。"
+      : reason === "truncated" ? "AI 回复未写完，请重试。" : "AI 返回格式有误，请重试。", 502);
     this.reason = reason;
   }
+}
+
+async function retryCompletionFormat<T>(enabled: boolean, attempt: (retry: boolean) => Promise<T>) {
+  try {
+    return await attempt(false);
+  } catch (error) {
+    if (!enabled || !(error instanceof AICompletionFormatError)) throw error;
+    return attempt(true);
+  }
+}
+
+function repairInstructions(instructions: string) {
+  return `${instructions}\n上次回复为空、未写完或未通过格式校验。请重新作答。只输出一个完整的 JSON 对象。保留用户的要求，缩短解释，按上面的字段和类型输出。省略用不到的可选字段。`;
 }
 
 async function providerError(provider: AIProvider | "siliconflow", response: Response) {
@@ -247,7 +262,8 @@ export async function requestAIJson<T>(credentials: AICredentials, options: Requ
   if (JSON.stringify(options.input)?.includes(credentials.apiKey) || options.dialogue?.some(({ content }) => content.includes(credentials.apiKey))) {
     throw new AIRequestError("请先移除问题里的 Key。", 400);
   }
-  if (credentials.visitor !== undefined) return requestPlatformAI(credentials, options);
+  const completion = options.operation === "experiment_agent" ? { ...options, retryFormat: true } : options;
+  if (credentials.visitor !== undefined) return requestPlatformAI(credentials, completion);
   const byok = credentials.selection;
   const { provider, model } = byok;
   const profile = getAIModel(byok);
@@ -263,27 +279,30 @@ export async function requestAIJson<T>(credentials: AICredentials, options: Requ
       ...(profile.thinking !== "provider-default" && { enable_thinking: reasoning }),
       ...(reasoning && { thinking_budget: reasoningBudget }),
     };
-  const release = reserveRequest(provider, credentials.apiKey);
-  try {
-    return await requestCompletion(credentials, options, { endpoint, model, parameters, output: profile.output,
-      timeoutMs: reasoning ? reasoningTimeoutMs : requestTimeoutMs, region: byok.provider === "qwen" ? byok.region : undefined });
-  } finally {
-    release();
-  }
+  return retryCompletionFormat(!!completion.retryFormat, async (retry) => {
+    if (credentials.signal.aborted) throw new AIRequestError("请求已取消。", 499);
+    const release = reserveRequest(provider, credentials.apiKey);
+    try {
+      return await requestCompletion(credentials, retry ? { ...completion, instructions: repairInstructions(completion.instructions) } : completion,
+        { endpoint, model, parameters, output: profile.output,
+          timeoutMs: reasoning ? reasoningTimeoutMs : requestTimeoutMs, region: byok.provider === "qwen" ? byok.region : undefined });
+    } finally {
+      release();
+    }
+  });
 }
 
 async function requestPlatformAI<T>(credentials: PlatformCredentials, options: RequestOptions<T>) {
   const preferred = credentials.selection.model;
-  // A connection test checks the selected model itself. Business calls may retry on the backup once.
-  const singleAttempt = options.operation === "connection_test" || options.operation === "experiment_agent";
-  const choices: PlatformModel[] = preferred === "primary" && !singleAttempt ? ["primary", "backup"] : [preferred];
+  const keepSelectedModel = options.operation === "connection_test" || options.operation === "experiment_agent";
+  const choices: PlatformModel[] = preferred === "primary" && !keepSelectedModel ? ["primary", "backup"] : [preferred];
+  let retriedFormat = false;
   for (const choice of choices) {
     try {
-      return await requestPlatformCompletion(credentials, options, choice).catch((error: unknown) => {
-        if (choice !== "backup" || options.operation !== "tutor" || !options.backupTutorFormat
-          || !(error instanceof AICompletionFormatError)) throw error;
-        console.info("AlgoVerse SiliconFlow tutor format retry.", { model: siliconFlowModels.backup.id, reason: error.reason });
-        return requestPlatformCompletion(credentials, options, choice, true);
+      const backupTutor = choice === "backup" && !!options.backupTutorFormat;
+      return await retryCompletionFormat(!retriedFormat && (!!options.retryFormat || backupTutor), (retry) => {
+        if (retry) retriedFormat = true;
+        return requestPlatformCompletion(credentials, options, choice, retry);
       });
     } catch (error) {
       if (!(error instanceof PlatformUpstreamError) || !error.retryable) throw error;
@@ -316,8 +335,9 @@ async function requestPlatformCompletion<T>(credentials: PlatformCredentials, op
     console.warn("AlgoVerse SiliconFlow zero-price check failed.", { model: model.id, reason: price.reason, status: price.status });
     throw new AIRequestError("免费价格未确认。请联系管理员。", 503);
   }
-  const tutorFormat = retryFormat ? options.backupTutorFormat : undefined;
-  const completion = tutorFormat ? { ...options, ...tutorFormat } : options;
+  const tutorFormat = retryFormat && choice === "backup" ? options.backupTutorFormat : undefined;
+  const completion = tutorFormat ? { ...options, ...tutorFormat }
+    : retryFormat ? { ...options, instructions: repairInstructions(options.instructions) } : options;
   return requestCompletion(credentials, completion, {
     endpoint: siliconFlowEndpoint, model: model.id, output: tutorFormat ? "text" : "json-object", timeoutMs: model.timeoutMs,
     parameters: {
@@ -363,20 +383,21 @@ async function requestCompletion<T>({ apiKey, selection: { provider }, signal }:
       const code = asObject(body.error)?.code;
       if (code === 50505 || code === "50505") throw new PlatformUpstreamError(503, true);
     }
-    if (body?.error || !usage || choice?.finish_reason !== "stop" || !message || message.refusal) throw invalidResult;
+    if (body?.error || !usage || !message || message.refusal) throw invalidResult;
     if (provider === "siliconflow" && body?.model !== model) {
       console.warn("AlgoVerse SiliconFlow returned an unexpected model.", { model });
       throw new AIRequestError("免费模型异常。请联系管理员。", 503);
     }
 
+    const canRepair = options.retryFormat || (provider === "siliconflow" && model === siliconFlowModels.backup.id && options.backupTutorFormat);
+    if (choice?.finish_reason === "length" && canRepair) throw new AICompletionFormatError("truncated");
+    if (choice?.finish_reason !== "stop") throw invalidResult;
     const content = typeof message.content === "string" ? message.content.trim() : message.content;
-    if ((content === "" || content === null) && options.backupTutorFormat && provider === "siliconflow" && model === siliconFlowModels.backup.id) {
-      throw new AICompletionFormatError("empty");
-    }
-    if (typeof content !== "string") throw invalidResult;
+    if ((content === "" || content == null) && canRepair) throw new AICompletionFormatError("empty");
+    if (typeof content !== "string") throw canRepair ? new AICompletionFormatError("schema") : invalidResult;
     let value: unknown;
-    // Text completions can wrap a JSON object in a single code fence.
-    const fenced = output === "text" ? content.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i) : null;
+    // Accept a single complete JSON fence without extracting tool calls from surrounding prose.
+    const fenced = output === "text" || options.retryFormat ? content.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i) : null;
     const json = fenced?.[1] ?? content;
     try {
       value = JSON.parse(json);

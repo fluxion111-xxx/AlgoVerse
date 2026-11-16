@@ -2,9 +2,10 @@
 
 import { useSyncExternalStore } from "react";
 import { aiRequestHeaders, modelSelectionMessage, parseAISelection, type AIProvider, type AISelection, type TokenUsage } from "./aiSettings";
+import type { AgentTask } from "./experimentAgent";
 import type { PlatformModel } from "./platformAI";
 
-type Connection = { apiKey: string; selection: AISelection; usage: TokenUsage };
+type Connection = { apiKey: string; selection: AISelection; usage?: TokenUsage };
 type ActiveConnection = Connection | { platformModel: PlatformModel };
 type RetainedKey = { apiKey: string; region?: string };
 type TemporaryAI = {
@@ -55,6 +56,14 @@ export function setTemporaryAI(connection: Connection) {
   });
 }
 
+export function selectTemporaryAIModel(model: string) {
+  const connection = state.connections[state.provider];
+  if (!connection || model === connection.selection.model) return;
+  const current = connection.selection;
+  const selection = parseAISelection(current.provider, model, current.provider === "qwen" ? current.region : undefined);
+  if (selection) setTemporaryAI({ apiKey: connection.apiKey, selection });
+}
+
 export function retainTemporaryAIKey(provider: AIProvider, key?: RetainedKey) {
   const connections = { ...state.connections };
   const keys = { ...state.keys };
@@ -94,6 +103,13 @@ export async function fetchWithTemporaryAI(url: string, connection: ActiveConnec
     }
   }
   return response;
+}
+
+export async function requestAgentTask(body: object, connection?: ActiveConnection, signal?: AbortSignal): Promise<AgentTask> {
+  const response = await fetchWithTemporaryAI("/api/experiments/agent", connection, body, signal);
+  const payload = await response.json();
+  if (!response.ok || !payload.task) throw new Error(payload.message ?? "请求失败。请重试。");
+  return payload.task;
 }
 
 if (typeof window !== "undefined") {

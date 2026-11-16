@@ -9,6 +9,12 @@ export const creatorRoute = "/experiments/create";
 export const quickStartRoute = `${creatorRoute}?guide=1`;
 export const buildRoute = "/experiments/create/build";
 export const diagnosisRoute = "/experiments/diagnosis";
+export const tutorRoute = "/ai-tutor";
+export const tutorResumeCookie = "algoverse_tutor_resume";
+
+export function tutorConversationLink(agentId: string) {
+  return `${tutorRoute}?${new URLSearchParams({ agentId })}`;
+}
 
 export type ExperimentTask = { sessionId: string; runId?: string };
 export const workflowSteps = { question: "提出想法", config: "AI 生成实验", run: "运行对比", diagnosis: "诊断改进" } as const;

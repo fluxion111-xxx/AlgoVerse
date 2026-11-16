@@ -242,7 +242,7 @@ function ProviderConnectionForm({ provider }: { provider: AIProvider }) {
   return (
     <>
       <ConnectionSummary provider={aiProviders[provider].label} model={selected?.label}
-        state={testing ? "pending" : visibleError ? "error" : connected ? "connected" : "idle"} usage={connected?.usage} />
+        state={testing ? "pending" : visibleError ? "error" : connected?.usage ? "connected" : "idle"} usage={connected?.usage} />
       <form className="ai-settings-fields" onSubmit={testConnection} autoComplete="off">
         <div className="ai-settings-provider-fields">
           <div>
@@ -284,7 +284,7 @@ function ProviderConnectionForm({ provider }: { provider: AIProvider }) {
         <label htmlFor="ai-key">API Key</label>
         <input id="ai-key" ref={keyInput} type="password" value={draft} maxLength={maxApiKeyLength}
           autoComplete="off" spellCheck={false} autoCapitalize="none" disabled={!canTest} aria-describedby="ai-key-help"
-          placeholder={connected ? "已验证。可输入新 Key。" : retainedKey ? "Key 已保留，请测试。" : "粘贴你的 API Key"}
+          placeholder={connected?.usage ? "已验证。可输入新 Key。" : connected ? "已切换模型。可测试连接。" : retainedKey ? "Key 已保留，请测试。" : "粘贴你的 API Key"}
           onChange={(event) => { resetConnection(); setDraft(event.target.value); }} />
         <p className="ai-settings-help" id="ai-key-help">只在当前标签页有效。</p>
         {visibleError && <p className="ai-settings-error" role="alert">{visibleError}</p>}

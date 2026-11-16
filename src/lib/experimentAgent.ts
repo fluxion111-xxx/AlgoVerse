@@ -27,6 +27,7 @@ export type SchedulingEvidence = {
   processes: { process: number; before: number; after: number }[];
 };
 export type TutorContext = { topicId?: string; runId?: string; includeExperiment: boolean; includePractice: boolean };
+export type TutorConversationSummary = { id: string; title: string; updatedAt: string };
 export type TutorReference = { title: string; href: string };
 export type TutorTurnDetails = { codeBlocks?: TutorCodeBlock[]; sources: TutorReference[]; recommendation?: TutorReference };
 export type AgentTurn = { message: string; stopped?: boolean; tutorScope?: TutorContext; tutor?: TutorTurnDetails } & (
@@ -86,7 +87,7 @@ export function isAgentConfirmation(task: AgentTask, message: string) {
   return (task.pending.length > 0 || task.runs.length > 0) && confirmationCommands.has(command);
 }
 
-export function agentDialogueActive(task: AgentTask) {
+export function agentDialogueActive(task: Pick<AgentTask, "dialogue">) {
   return (task.dialogue?.activeUntil ?? 0) > Date.now();
 }
 

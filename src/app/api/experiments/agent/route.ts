@@ -46,7 +46,7 @@ export async function POST(request: Request) {
       if (importPlan && (run || !plan || !getExperimentEngine(plan.engineId, plan.engineVersion)?.validate(plan.config))) {
         return aiJson({ message: "找不到可运行的方案。" }, 404);
       }
-      return aiJson({ task: await createAgentTask(goal, run?.session ?? plan, run ?? undefined, importPlan) }, 201);
+      return aiJson({ task: await createAgentTask(goal, run?.session ?? plan, run ?? undefined, { importPlan }) }, 201);
     }
     const task = await getAgentTask(body.id);
     if (!task) return aiJson({ message: "找不到这项任务。" }, 404);

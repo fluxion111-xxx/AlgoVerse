@@ -20,8 +20,9 @@ const hooks = registerHooks({
   },
 });
 const { POST } = await import("../src/app/api/experiments/agent/route.ts");
+const { POST: tutorPOST } = await import("../src/app/api/ai/tutor/route.ts");
 const { agentTools, prepareToolCall } = await import("../src/lib/server/agentTools.ts");
-const { createAIExperimentSession, getActiveAgentTask, getExperimentRun, getExperimentSession, runConfirmedAgentCall, getAgentTask, saveDiagnosis } = await import("../src/lib/server/experimentRecords.ts");
+const { createAIExperimentSession, getActiveAgentTask, getExperimentRun, getExperimentSession, runConfirmedAgentCall, getAgentTask, getTutorHistory, saveDiagnosis } = await import("../src/lib/server/experimentRecords.ts");
 const { getExperimentEngine, registeredEngines } = await import("../src/lib/experimentEngines.ts");
 const { experimentEvidence } = await import("../src/lib/experiments/evidence.ts");
 const { schedulingWaitReport } = await import("../src/lib/experimentAgent.ts");
@@ -66,7 +67,8 @@ async function setup(t, ip, respond) {
     const upstream = JSON.parse(init.body);
     assert.equal(upstream.model, url.includes("deepseek") ? "deepseek-flash" : model);
     const input = JSON.parse(upstream.messages[1].content);
-    assert.equal(upstream.max_tokens, Object.hasOwn(input, "message") || input.stage === "plan" ? 1200 : 1000);
+    const expectedTokens = Object.hasOwn(input, "question") ? 1100 : Object.hasOwn(input, "message") || input.stage === "plan" ? 1200 : 1000;
+    assert.equal(upstream.max_tokens, expectedTokens);
     if (Object.hasOwn(input, "message")) {
       assert.deepEqual(upstream.messages.slice(2), [
         ...input.conversation.flatMap(({ message, reply }) => [
@@ -75,10 +77,9 @@ async function setup(t, ip, respond) {
         { role: "user", content: `Resolve the following request using the conversation. Inherit the exact subject and methods when omitted.\n${JSON.stringify({ context: { focus: input.focus, lastExchange: input.lastExchange }, message: input.message })}` },
       ]);
     }
-    const output = await respond(input, upstream.messages[0].content);
+    const output = await respond(input, upstream.messages[0].content, upstream.messages.slice(2));
     if (output instanceof Response) return output;
-    return Response.json({ model, choices: [{ finish_reason: "stop", message: { content: JSON.stringify(output) } }],
-      usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 } });
+    return modelReply(JSON.stringify(output));
   });
   async function post(action, task, extra = {}, headers = {}) {
     const response = await POST(new Request("https://algoverse.test/api/experiments/agent", {
@@ -90,11 +91,140 @@ async function setup(t, ip, respond) {
     assert.ok(!JSON.stringify(payload).includes(key));
     return { ...payload, http: response.status };
   }
-  return { post, values, upstreamFetch };
+  async function ask(question, task) {
+    const response = await tutorPOST(new Request("https://algoverse.test/api/ai/tutor", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-AI-Provider": "siliconflow", "CF-Connecting-IP": ip },
+      body: JSON.stringify({ conversation: true, question, agentId: task?.id, revision: task?.revision }),
+    }));
+    const payload = await response.json();
+    assert.ok(!JSON.stringify(payload).includes(key));
+    return { ...payload, http: response.status };
+  }
+  return { post, ask, values, upstreamFetch };
+}
+
+function modelReply(content, finishReason = "stop") {
+  return Response.json({ model, choices: [{ finish_reason: finishReason, message: { content } }],
+    usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 } });
 }
 
 const sortingPlan = { action: "run", plan: ["比较两种排序"], observation: "用同一组数比较。",
   calls: [{ tool: "sorting", parameters: { goalLabel: "比较排序", values: [5, 2, 9, 1] } }] };
+
+test("tutor history lists saved conversations for the current visitor", async (t) => {
+  const { ask, post, values } = await setup(t, "192.0.2.40", () => ({ answer: "可以继续聊。" }));
+  const first = await ask("冒泡排序如何比较？");
+  const second = await ask("B+ 树如何查范围？");
+  await post("start", null, { goal: "独立工作台任务" });
+
+  const summaries = await getTutorHistory();
+  assert.deepEqual(summaries.map(({ id, title }) => ({ id, title })), [
+    { id: second.task.id, title: second.task.goal },
+    { id: first.task.id, title: first.task.goal },
+  ]);
+  assert.ok(summaries.every(({ updatedAt }) => Number.isFinite(Date.parse(updatedAt))));
+  assert.equal((await getAgentTask(first.task.id)).dialogue.turns[0].message, first.task.goal);
+  values.set("algoverse_visitor", { value: "0".repeat(64) });
+  assert.deepEqual(await getTutorHistory(), []);
+  assert.equal(await getAgentTask(first.task.id), null);
+});
+
+test("tutor retries a truncated reply, then accepts a complete answer with only verified citations", async (t) => {
+  let calls = 0;
+  const { ask } = await setup(t, "192.0.2.37", (input, instructions) => {
+    assert.equal(input.question, "冒泡排序和快速排序谁更快？");
+    if (++calls === 1) return modelReply('{"answer":"快排', "length");
+    assert.match(instructions, /只输出一个完整的 JSON 对象/);
+    const [source] = input.knowledge;
+    assert.ok(source);
+    return modelReply("```json\n" + JSON.stringify({
+      action: "answer", observation: "快排通常更快。", citations: [source.id, "invalid-topic", source.id],
+    }) + "\n```");
+  });
+  const result = await ask("冒泡排序和快速排序谁更快？");
+  assert.equal(result.status, "shared");
+  assert.equal(calls, 2);
+  assert.equal(result.task.dialogue.turns.length, 1);
+  assert.equal(result.task.dialogue.turns[0].reply, "快排通常更快。");
+  assert.equal(result.task.dialogue.turns[0].tutor.sources.length, 1);
+});
+
+test("workbench retries an invalid proposal and accepts a fenced valid plan without running it", async (t) => {
+  let calls = 0;
+  const { post, upstreamFetch } = await setup(t, "192.0.2.38", (input, instructions) => {
+    assert.equal(input.message, "帮我比较冒泡排序和快速排序。");
+    if (++calls === 1) return { ...sortingPlan, calls: [{ tool: "unregistered-tool", parameters: {} }] };
+    assert.match(instructions, /只输出一个完整的 JSON 对象/);
+    return modelReply("```json\n" + JSON.stringify(sortingPlan) + "\n```");
+  });
+  const message = "帮我比较冒泡排序和快速排序。";
+  const draft = (await post("start", null, { goal: message })).task;
+  const planned = (await post("message", draft, { message })).task;
+  assert.equal(calls, 2);
+  assert.equal(upstreamFetch.mock.calls.filter(({ arguments: [url] }) => url === "https://www.siliconflow.cn/pricing").length, 2);
+  assert.equal(planned.phase, "confirm");
+  assert.equal(planned.dialogue.turns.length, 1);
+  assert.equal(planned.pending[0].tool, "sorting");
+  assert.equal(await getExperimentRun(planned.pending[0].id), null);
+});
+
+test("tutor reuses the sorting discussion and hands off a plan to the same workbench task", async (t) => {
+  const question = "冒泡排序是和快速排序谁更快？";
+  const followUp = "请你帮我实验";
+  const focus = { topic: "冒泡排序和快速排序", goal: "在同一组输入上比较比较和交换次数" };
+  let calls = 0;
+  const { ask, post } = await setup(t, "192.0.2.18", (input) => {
+    calls++;
+    if (input.question === question) return { answer: "快排通常更快，输入顺序也有影响。", focus };
+    assert.equal(input.stage, "plan");
+    assert.deepEqual(input.focus, focus);
+    assert.equal(input.request, followUp);
+    return sortingPlan;
+  });
+  const previous = (await post("start", null, { goal: "继续手头的实验" })).task;
+  const explained = await ask(question);
+  assert.equal(explained.status, "shared");
+  assert.equal(explained.workbench, undefined);
+  assert.equal(explained.task.dialogue.turns.at(-1).action, "answer");
+  assert.deepEqual(explained.task.dialogue.focus, focus);
+  assert.equal((await getActiveAgentTask()).id, previous.id);
+
+  const planned = await ask(followUp, explained.task);
+  assert.equal(planned.status, "shared");
+  assert.equal(planned.task.id, explained.task.id);
+  assert.equal(planned.workbench, `/experiments/create?agentId=${planned.task.id}`);
+  assert.equal(planned.task.phase, "confirm");
+  assert.equal(planned.task.pending[0].tool, "sorting");
+  assert.equal(planned.task.runs.length, 0);
+  assert.equal(await getExperimentRun(planned.task.pending[0].id), null);
+  assert.deepEqual(planned.task.dialogue.turns.map(({ message }) => message), [question, followUp]);
+  assert.equal((await getActiveAgentTask()).id, planned.task.id);
+  assert.equal(calls, 2);
+
+  const confirmed = await post("approve", planned.task);
+  assert.equal(confirmed.task.runs.length, 1);
+  assert.equal(confirmed.task.runs[0].id, planned.task.pending[0].id);
+});
+
+test("tutor supplies the prior turn to the model when the provider omitted remembered focus", async (t) => {
+  const question = "冒泡排序和快速排序谁更快？输入用 5、2、9、1。";
+  const reply = "快排通常更快，可以用这组数据比较。";
+  const followUp = "帮我把它们实际跑一遍。";
+  const { ask } = await setup(t, "192.0.2.17", (input, _instructions, dialogue) => {
+    if (input.question === question) return { answer: reply };
+    if (input.question === followUp) {
+      assert.deepEqual(dialogue, [{ role: "user", content: question }, { role: "assistant", content: reply }, { role: "user", content: followUp }]);
+      return { action: "plan", focus: { topic: "冒泡排序和快速排序", goal: "比较两种排序", constraints: "输入是 5、2、9、1" } };
+    }
+    assert.equal(input.focus.constraints, "输入是 5、2、9、1");
+    return sortingPlan;
+  });
+  const first = await ask(question);
+  const planned = await ask(followUp, first.task);
+  assert.equal(planned.task.phase, "confirm");
+  assert.deepEqual(planned.task.pending[0].config.values, [5, 2, 9, 1]);
+});
 
 test("a typed confirmation runs the saved sorting plan once without calling AI again", async (t) => {
   const { post, values, upstreamFetch } = await setup(t, "192.0.2.19", () => sortingPlan);
@@ -570,14 +700,26 @@ test("failed dialogue requests preserve history and cannot smuggle tool calls th
   task = (await post("retry-message", task)).task;
   assert.ok(task.dialogue.error);
   assert.deepEqual(task.pending, []);
-  output = { action: "explain", observation: "声称已有数据。", evidence: [{ from: 1, to: 1, metric: "waiting" }] };
-  task = (await post("retry-message", task)).task;
-  assert.ok(task.dialogue.error);
   output = { action: "answer", observation: "早呀。今天想聊点什么？" };
   task = (await post("retry-message", task)).task;
   assert.equal(task.dialogue.turns.at(-1).message, "换个说法。");
   assert.equal(task.dialogue.turns.length, 2);
   assert.equal(task.dialogue.error, undefined);
+});
+
+test("workbench rejects invented evidence even after a format retry", async (t) => {
+  let calls = 0;
+  const { post } = await setup(t, "192.0.2.39", () => {
+    calls++;
+    return { action: "explain", observation: "声称已有数据。", evidence: [{ from: 1, to: 1, metric: "waiting" }] };
+  });
+  const draft = (await post("start", null, { goal: "查看实验数据。" })).task;
+  const result = (await post("message", draft, { message: draft.goal })).task;
+  assert.equal(calls, 2);
+  assert.match(result.dialogue.error, /格式有误/);
+  assert.deepEqual(result.dialogue.turns, []);
+  assert.deepEqual(result.pending, []);
+  assert.deepEqual(result.runs, []);
 });
 
 test("a new message keeps the text of a previous unanswered turn as context", async (t) => {

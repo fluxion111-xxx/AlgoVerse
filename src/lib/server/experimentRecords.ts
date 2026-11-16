@@ -1,11 +1,11 @@
 import "server-only";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { link, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { link, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { cookies } from "next/headers";
 import { createPathfindingConfig, getExperimentEngine, pathfindingEngine, type EngineId, type ExperimentConfig, type ExperimentResults } from "@/lib/experimentEngines";
 import type { CreatorPlanIntent } from "@/lib/experimentCreator";
-import type { AgentTask } from "@/lib/experimentAgent";
+import type { AgentTask, TutorContext, TutorConversationSummary } from "@/lib/experimentAgent";
 import { experimentEvidence } from "@/lib/experiments/evidence";
 import type { PracticeAttempts } from "@/lib/knowledgePractice";
 import { quickStartQuestion, type Diagnosis, type QuickStartPlan } from "@/lib/quickStart";
@@ -427,9 +427,7 @@ function agentRevisionPath(owner: string, id: string, revision: number) {
   return recordPath(owner, `agent-tasks/${id}`, String(revision));
 }
 
-export async function getAgentTask(id: unknown): Promise<AgentTask | null> {
-  const owner = await visitor();
-  if (!owner || !isRecordId(id)) return null;
+async function latestAgentRevision(owner: string, id: string) {
   let files: string[];
   try { files = await readdir(dirname(agentRevisionPath(owner, id, 0))); }
   catch (error) {
@@ -437,7 +435,32 @@ export async function getAgentTask(id: unknown): Promise<AgentTask | null> {
     throw error;
   }
   const revision = files.reduce((latest, name) => /^\d+\.json$/.test(name) ? Math.max(latest, Number(name.slice(0, -5))) : latest, 0);
-  return readRecord<AgentTask>(agentRevisionPath(owner, id, revision));
+  return agentRevisionPath(owner, id, revision);
+}
+
+export async function getAgentTask(id: unknown): Promise<AgentTask | null> {
+  const owner = await visitor();
+  if (!owner || !isRecordId(id)) return null;
+  const path = await latestAgentRevision(owner, id);
+  return path ? readRecord<AgentTask>(path) : null;
+}
+
+export async function getTutorHistory(): Promise<TutorConversationSummary[]> {
+  const owner = await visitor();
+  if (!owner) return [];
+  const ids = (await collectionFiles(owner, "agent-tasks")).filter(isRecordId);
+  const history: TutorConversationSummary[] = [];
+  for (let offset = 0; offset < ids.length; offset += 16) {
+    const batch = await Promise.all(ids.slice(offset, offset + 16).map(async (id) => {
+      const path = await latestAgentRevision(owner, id);
+      if (!path) return null;
+      const task = await readRecord<AgentTask>(path);
+      if (!task?.tutorContext || !task.dialogue) return null;
+      return { id, title: task.goal, updatedAt: (await stat(path)).mtime.toISOString() };
+    }));
+    history.push(...batch.filter((entry) => entry !== null));
+  }
+  return history.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
 }
 
 export async function getActiveAgentTask() {
@@ -451,7 +474,8 @@ async function rememberAgentTask(task: AgentTask) {
   return task;
 }
 
-export async function createAgentTask(goal: string, reference?: ExperimentSession, run?: ExperimentRun, importPlan = false) {
+export async function createAgentTask(goal: string, reference?: ExperimentSession, run?: ExperimentRun,
+  { importPlan = false, tutorContext }: { importPlan?: boolean; tutorContext?: TutorContext } = {}) {
   const owner = await ensureVisitor();
   const id = randomUUID();
   const pending = importPlan && reference ? [{ id: randomUUID(), sessionId: randomUUID(), tool: reference.engineId,
@@ -462,8 +486,9 @@ export async function createAgentTask(goal: string, reference?: ExperimentSessio
     runs: run ? [{ id: run.id, sessionId: run.session.id, tool: run.session.engineId, version: run.session.engineVersion,
       config: run.session.config, completedAt: run.completedAt, metrics: experimentEvidence(run.results) }] : [],
     ...(reference && { referenceConfig: { tool: reference.engineId, version: reference.engineVersion, config: reference.config } }),
+    ...(tutorContext && { tutorContext }),
   });
-  return rememberAgentTask(task);
+  return tutorContext ? task : rememberAgentTask(task);
 }
 
 export async function saveAgentTask(current: AgentTask, changes: Partial<Omit<AgentTask, "id" | "revision" | "goal" | "seed">>) {
@@ -471,7 +496,8 @@ export async function saveAgentTask(current: AgentTask, changes: Partial<Omit<Ag
   if (!owner || (await getAgentTask(current.id))?.revision !== current.revision) return null;
   const next = { ...current, ...changes, revision: current.revision + 1 };
   const saved = await writeOnce(agentRevisionPath(owner, current.id, next.revision), next);
-  return saved === next ? rememberAgentTask(next) : null;
+  if (saved !== next) return null;
+  return !next.tutorContext || next.decisions.some(({ calls }) => calls?.length) ? rememberAgentTask(next) : next;
 }
 
 export async function runConfirmedAgentCall(task: AgentTask, callId: string) {

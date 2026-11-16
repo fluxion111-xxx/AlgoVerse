@@ -18,7 +18,7 @@ const hooks = registerHooks({
 });
 const { POST } = await import("../src/app/api/ai/connection/route.ts");
 const { POST: tutorPOST } = await import("../src/app/api/ai/tutor/route.ts");
-const { readAICredentials, reusePendingAI } = await import("../src/lib/server/aiProvider.ts");
+const { readAICredentials, requestAIJson, reusePendingAI } = await import("../src/lib/server/aiProvider.ts");
 const { confirmZeroSiliconFlowPrice, hasZeroSiliconFlowPrice } = await import("../src/lib/server/siliconflowPricing.ts");
 const { reservePlatformCall } = await import("../src/lib/platformQuota.ts");
 const { platformQuota } = await import("../src/lib/platformAI.ts");
@@ -1874,6 +1874,26 @@ test("timeouts use the same safe response for both providers", async (t) => {
   }
   assert.equal(timeout.mock.callCount(), 2);
   assert.deepEqual(timeout.mock.calls.map(({ arguments: args }) => args[0]), [55_000, 25_000]);
+});
+
+test("workbench with a personal key retries empty output once and keeps authorization errors separate", async (t) => {
+  const credentials = readAICredentials(request(deepseek(), "sk-agent-format-personal"));
+  const options = {
+    operation: "experiment_agent", instructions: "返回 JSON 对象。", input: {}, maxTokens: 100,
+    validate: (value) => value?.action === "answer" ? value : null,
+  };
+  let attempts = 0;
+  const upstream = t.mock.method(globalThis, "fetch", async (_url, init) => {
+    if (++attempts === 1) return completion(null);
+    assert.match(JSON.parse(init.body).messages[0].content, /请重新作答/);
+    return completion('{"action":"answer","observation":"可以。"}');
+  });
+  const repaired = await requestAIJson(credentials, options);
+  assert.equal(repaired.result.observation, "可以。");
+  assert.equal(upstream.mock.callCount(), 2);
+  upstream.mock.mockImplementation(async () => new Response(null, { status: 401 }));
+  await assert.rejects(() => requestAIJson(credentials, options), { status: 401 });
+  assert.equal(upstream.mock.callCount(), 3);
 });
 
 test("pending generation is shared only by the same selection and key", async () => {

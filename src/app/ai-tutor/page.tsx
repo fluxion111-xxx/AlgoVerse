@@ -1,26 +1,39 @@
 import type { Metadata } from "next";
+import { cookies } from "next/headers";
 import { Header } from "@/components/Header";
 import { TutorConversation } from "@/components/experiments/TutorConversation";
 import { getExperimentEngine } from "@/lib/experimentEngines";
 import { evidenceLabels, experimentEvidence } from "@/lib/experiments/evidence";
 import { getExperimentTopic, getKnowledgeTopic, knowledgeTopicRoute } from "@/lib/knowledge";
-import { getActiveExperimentTask, getExperimentRun, getRecentExperimentRuns } from "@/lib/server/experimentRecords";
-import { withExperimentTask, workflowRoute } from "@/lib/navigation";
+import { getActiveExperimentTask, getAgentTask, getExperimentRun, getRecentExperimentRuns, getTutorHistory } from "@/lib/server/experimentRecords";
+import { tutorResumeCookie, withExperimentTask, workflowRoute } from "@/lib/navigation";
 import "../home-editorial.css";
 import "../story-editorial.css";
 import "./tutor-editorial.css";
 
 export const metadata: Metadata = { title: "AI 助教｜AlgoVerse" };
 
-export default async function TutorPage({ searchParams }: { searchParams: Promise<{ runId?: string; from?: string; topic?: string }> }) {
-  const { runId, from, topic } = await searchParams;
-  const entry = getKnowledgeTopic(topic);
-  const [run, recent] = await Promise.all([
-    runId !== undefined || entry
-      ? getExperimentRun(runId)
-      : getActiveExperimentTask().then((task) => getExperimentRun(task?.runId)),
+type TutorParams = { runId?: string; from?: string; topic?: string; agentId?: string; new?: string };
+
+export default async function TutorPage({ searchParams }: { searchParams: Promise<TutorParams> }) {
+  const [{ runId, from, topic, agentId, new: fresh }, history, recent, jar] = await Promise.all([
+    searchParams,
+    getTutorHistory(),
     getRecentExperimentRuns(),
+    cookies(),
   ]);
+  const resume = jar.get(tutorResumeCookie)?.value;
+  const canResume = agentId === undefined && runId === undefined && topic === undefined && from === undefined && fresh !== "1" && resume !== "new";
+  const activeId = agentId ?? (canResume ? history.find(({ id }) => id === resume)?.id ?? history[0]?.id : undefined);
+  const saved = activeId === undefined ? null : await getAgentTask(activeId);
+  const initialTask = saved?.tutorContext
+    ? { id: saved.id, goal: saved.goal, revision: saved.revision, tutorContext: saved.tutorContext, dialogue: saved.dialogue }
+    : undefined;
+  const entry = getKnowledgeTopic(initialTask ? initialTask.tutorContext.topicId : topic);
+  const selectedRun = initialTask ? initialTask.tutorContext.runId : runId;
+  const run = initialTask || selectedRun !== undefined || entry || fresh === "1" || resume === "new"
+    ? await getExperimentRun(selectedRun)
+    : await getActiveExperimentTask().then((task) => getExperimentRun(task?.runId));
   const engine = run && getExperimentEngine(run.session.engineId, run.session.engineVersion);
   const task = run ? { sessionId: run.session.id, runId: run.id } : null;
   const aiRun = run?.session.source?.type === "creator" || run?.session.source?.type === "quick-start";
@@ -44,9 +57,11 @@ export default async function TutorPage({ searchParams }: { searchParams: Promis
     <a className="editorial-skip" href="#main-content">跳到正文</a>
     <Header action={{ href: "#tutor-question", label: "问个问题" }} />
     <main id="main-content">
-      <TutorConversation key={`${run?.id ?? "general"}:${focus?.topic.id ?? ""}`}
+      <TutorConversation key={`${initialTask?.id ?? (fresh === "1" ? "fresh" : "new")}:${run?.id ?? "general"}:${focus?.topic.id ?? ""}`}
+        initialTask={initialTask}
+        initialHistory={history}
         initial={initial} choices={choices} topicId={entry?.topic.id}
-        reference={reference} returnToDiagnosis={returnToDiagnosis} missingRun={runId !== undefined && !run} />
+        reference={reference} returnToDiagnosis={returnToDiagnosis} missingRun={selectedRun !== undefined && !run} />
     </main>
   </div>;
 }
