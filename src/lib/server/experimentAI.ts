@@ -1,6 +1,8 @@
 import "server-only";
 import { type Diagnosis, type QuickStartPlan } from "@/lib/quickStart";
 import { diagnosisChoices } from "@/lib/experiments/diagnosis";
+import { experimentEvidence } from "@/lib/experiments/evidence";
+import { experimentReport } from "@/lib/experiments/report";
 import { experimentReviewTopics } from "@/lib/knowledge";
 import { asObject, requestAIJson, type AICredentials } from "./aiProvider";
 import type { ExperimentRun } from "./experimentRecords";
@@ -27,14 +29,22 @@ export async function generateQuickStartPlan(question: string, credentials: AICr
   return { plan, model };
 }
 
+export function expandSavedDiagnosis(run: ExperimentRun, diagnosis: Diagnosis): Diagnosis {
+  if (diagnosis.promptVersion === 5) return diagnosis;
+  const report = experimentReport(run.session.config, run.results);
+  const metrics = Object.keys(experimentEvidence(run.results));
+  const evidence = [...new Set([...diagnosis.evidence.filter((key) => metrics.includes(key)), ...metrics])];
+  return { ...diagnosis, conclusion: report.conclusion, explanation: report.explanation, evidence };
+}
+
 export async function diagnoseExperimentRun(run: ExperimentRun, credentials: AICredentials): Promise<Diagnosis> {
   const { engineId, config } = run.session;
   const { observations, steps } = diagnosisChoices(engineId, config, run.results);
-  // The model selects what to investigate. Only the recorded run supplies its factual claims.
+  // The model picks an angle and a follow-up. The saved measurements supply the entire report.
   const { result, model } = await requestAIJson<Pick<Diagnosis, "conclusion" | "explanation" | "suggestion" | "evidence">>(credentials, {
     operation: "experiment_diagnosis",
     instructions: [
-      "依据本轮实测指标，选一项最能说明结果的观察。再选一个能检验它的后续实验。",
+      "依据本轮实测指标，选一个值得关注的指标。再选一个能检验它的后续实验。",
       "只输出一个 JSON 对象。metric 只能用 observations 的 id。next 只能用 steps 的 id。",
       `格式示例：${JSON.stringify({ metric: observations[0].id, next: steps[0].id })}`,
     ].join("\n"),
@@ -47,10 +57,11 @@ export async function diagnoseExperimentRun(run: ExperimentRun, credentials: AIC
       const observation = observations.find(({ id }) => id === object.metric);
       const step = steps.find(({ id }) => id === object.next);
       if (!observation || !step) return null;
-      return { conclusion: observation.conclusion, explanation: observation.explanation,
-        suggestion: step.suggestion, evidence: [observation.id] };
+      const report = experimentReport(config, run.results);
+      return { conclusion: report.conclusion, explanation: report.explanation,
+        suggestion: step.suggestion, evidence: [observation.id, ...observations.filter(({ id }) => id !== observation.id).map(({ id }) => id)] };
     },
   });
-  return { runId: run.id, model, promptVersion: 3, createdAt: new Date().toISOString(), ...result };
+  return { runId: run.id, model, promptVersion: 5, createdAt: new Date().toISOString(), ...result };
 }
 

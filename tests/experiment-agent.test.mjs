@@ -20,10 +20,12 @@ registerHooks({
   },
 });
 const { POST } = await import("../src/app/api/experiments/agent/route.ts");
+const { POST: diagnosisPOST } = await import("../src/app/api/experiments/runs/[runId]/diagnosis/route.ts");
 const { POST: tutorPOST } = await import("../src/app/api/ai/tutor/route.ts");
 const { POST: learningPOST } = await import("../src/app/api/ai/learning/route.ts");
 const { agentTools, prepareToolCall } = await import("../src/lib/server/agentTools.ts");
-const { createAIExperimentSession, getActiveAgentTask, getExperimentRun, getExperimentSession, runConfirmedAgentCall, getAgentTask, getTutorHistory, saveDiagnosis,
+const { createAIExperimentSession, createWorkbenchSession, confirmExperimentSession, runExperimentSession, getComparableExperimentRuns,
+  getActiveAgentTask, getExperimentRun, getExperimentSession, runConfirmedAgentCall, getAgentTask, getTutorHistory, saveDiagnosis,
   getLearningProgress, submitKnowledgeExercise } = await import("../src/lib/server/experimentRecords.ts");
 const { learningSuggestion } = await import("../src/lib/learningPath.ts");
 const { getExperimentEngine, registeredEngines } = await import("../src/lib/experimentEngines.ts");
@@ -362,6 +364,43 @@ test("all 18 advertised tools execute their real engine and expose verified metr
   const revised = prepareToolCall({ tool: network, parameters: { packets: 15 } }, 5678, { base: networkBase });
   assert.deepEqual(revised?.config, { ...networkBase.config, packets: 15 });
   assert.equal(prepareToolCall({ tool: network, parameters: { seed: 123 } }, 1234, { base: networkBase }), null);
+});
+
+test("manual reports compare saved rounds in scope and expand a cached diagnosis locally", async (t) => {
+  const { values, upstreamFetch } = await setup(t, "192.0.2.49", () => assert.fail("Diagnosis should reuse the saved result"));
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-01-01T00:00:00Z") });
+  const pages = getExperimentEngine("page-replacement");
+  const runConfigured = async (session, topic) => {
+    t.mock.timers.tick(1000);
+    await confirmExperimentSession(session.id);
+    return runExperimentSession(session.id, randomUUID(), undefined, topic);
+  };
+  const manual = async (frameCount, topic) => runConfigured(await createWorkbenchSession("比较页框数", pages.id, pages.version,
+    { ...pages.preset(), frameCount }), topic);
+  const first = await manual(3);
+  await manual(3, "page-replacement-topic");
+  const creator = await createAIExperimentSession("比较页框数", pages.id, pages.version, pages.preset(), model, "create");
+  await runConfigured(creator);
+  const second = await manual(4);
+  const third = await manual(2);
+  const history = await getComparableExperimentRuns(second);
+  assert.deepEqual(history.map(({ id, round }) => [id, round]), [[first.id, 1], [second.id, 2], [third.id, 3]]);
+  assert.deepEqual(history.map(({ config }) => config.frameCount), [3, 4, 2]);
+
+  await saveDiagnosis({ runId: second.id, model, promptVersion: 3, createdAt: second.completedAt,
+    conclusion: "简短结论", explanation: "简短解释", suggestion: "保留原有建议。", evidence: ["pageHits"] });
+  const response = await diagnosisPOST(new Request("https://algoverse.test", { method: "POST", headers: { "content-type": "application/json" } }),
+    { params: Promise.resolve({ runId: second.id }) });
+  assert.equal(response.status, 200);
+  const { diagnosis } = await response.json();
+  assert.match(diagnosis.conclusion, /缺页最少/);
+  assert.match(diagnosis.explanation, /OPT 会查看未来访问/);
+  assert.equal(diagnosis.suggestion, "保留原有建议。");
+  assert.deepEqual(diagnosis.evidence, ["pageHits", "pageFaults"]);
+  assert.equal(upstreamFetch.mock.callCount(), 0);
+
+  values.delete("algoverse_visitor");
+  assert.deepEqual(await getComparableExperimentRuns(second), []);
 });
 
 test("FCFS and RR run only after approval, then adaptive RR uses real observations and saves an evidence report", async (t) => {

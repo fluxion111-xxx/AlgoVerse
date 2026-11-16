@@ -7,11 +7,12 @@ import { aiSettingsRoute, canUseAITransport } from "@/lib/aiSettings";
 import type { QuickStartResponse } from "@/lib/quickStart";
 import { fetchWithTemporaryAI, useActiveAI } from "@/lib/temporaryAI";
 
-export function QuickStartRequest({ operation, id, auto, className, settingsHref = aiSettingsRoute }: {
+export function QuickStartRequest({ operation, id, auto, className, requestLabel, settingsHref = aiSettingsRoute }: {
   operation: "start" | "generate" | "diagnose";
   id?: string;
   auto: boolean;
   className: string;
+  requestLabel?: string;
   settingsHref?: string;
 }) {
   const router = useRouter();
@@ -58,7 +59,7 @@ export function QuickStartRequest({ operation, id, auto, className, settingsHref
     return () => window.clearTimeout(timer);
   }, [auto, needsKey, operation, request]);
 
-  const label = operation === "start" ? "继续" : operation === "generate" ? "生成配置" : "生成诊断";
+  const label = requestLabel ?? (operation === "start" ? "继续" : operation === "generate" ? "生成配置" : "生成诊断");
   const pending = operation === "start" ? "正在准备…" : operation === "generate" ? "AI 正在生成配置…" : "AI 正在分析本轮…";
   if (needsKey) {
     return <div className="quick-start-request">

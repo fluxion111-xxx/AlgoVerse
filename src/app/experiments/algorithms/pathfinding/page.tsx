@@ -4,6 +4,7 @@ import { notFound, redirect } from "next/navigation";
 import { PathfindingWorkbench } from "@/components/PathfindingWorkbench";
 import { LabWorkspace } from "@/components/experiments/LabWorkspace";
 import { ExperimentBench } from "@/components/experiments/ExperimentBench";
+import { ExperimentRunReports } from "@/components/experiments/ExperimentRunReports";
 import { pathfindingEngine } from "@/lib/experimentEngines";
 import { getExperimentTopic, knowledgeTopicRoute } from "@/lib/knowledge";
 import { quickStartRoute, workflowRoute } from "@/lib/navigation";
@@ -38,6 +39,7 @@ export default async function PathfindingPage({ searchParams }: {
       </header>
       <ExperimentBench engine={context.engine ?? pathfindingEngine} context={context}
         action={entry ? runKnowledgeExperiment.bind(null, entry.topic.id) : runLabExperiment} />
+      {context.run && <ExperimentRunReports run={context.run} />}
     </div>
   </LabWorkspace>;
 

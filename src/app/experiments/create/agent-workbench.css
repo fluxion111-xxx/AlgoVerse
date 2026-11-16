@@ -86,10 +86,6 @@
 .agent-stream > button { justify-self: start; }
 .agent-tail { scroll-margin-bottom: 145px; }
 .agent-analysis-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-block: 10px 18px; }
-.agent-analysis-table { overflow-x: auto; }
-.agent-analysis-table table { width: 100%; border-collapse: collapse; }
-.agent-analysis-table :is(td, th) { padding: 7px; border-bottom: 1px solid var(--work-line); text-align: start; vertical-align: top; }
-.agent-analysis-config { max-width: 100%; overflow-x: auto; }
 
 @keyframes agent-loading-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {

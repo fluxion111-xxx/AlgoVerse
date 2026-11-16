@@ -1,6 +1,6 @@
 import type { Diagnosis } from "@/lib/quickStart";
 import { aiErrorResponse, aiJson, readAICredentials, reusePendingAI, type PendingAIRequest } from "@/lib/server/aiProvider";
-import { diagnoseExperimentRun } from "@/lib/server/experimentAI";
+import { diagnoseExperimentRun, expandSavedDiagnosis } from "@/lib/server/experimentAI";
 import { getDiagnosis, getExperimentRun, saveDiagnosis } from "@/lib/server/experimentRecords";
 
 const pending = new Map<string, PendingAIRequest<Diagnosis>>();
@@ -25,7 +25,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ run
         return saved;
       });
     }
-    return aiJson({ status: "ready", diagnosis });
+    return aiJson({ status: "ready", diagnosis: expandSavedDiagnosis(run, diagnosis) });
   } catch (error) {
     return aiErrorResponse(error);
   }

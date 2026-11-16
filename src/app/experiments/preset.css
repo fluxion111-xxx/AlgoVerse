@@ -16,3 +16,22 @@
 .quick-start-diagnosis td, .quick-start-diagnosis th { text-align: start; padding: 3px 7px 3px 0; font-size: 13px; }
 .quick-start-diagnosis table { margin-block-start: 8px; }
 .quick-start-run-config { margin-block-start: 12px; font-size: 14px; }
+.experiment-report-label { margin-block: 14px 4px; font-size: .87rem; font-weight: 750; }
+.experiment-report-lead { max-width: 46rem; padding: 9px 12px; border-inline-start: 3px solid var(--work-accent); color: var(--work-ink); background: linear-gradient(95deg, #e9ddbe, transparent); font-weight: 740; line-height: 1.55; overflow-wrap: anywhere; }
+.experiment-report-copy { max-width: 48rem; line-height: 1.75; overflow-wrap: anywhere; }
+.experiment-report-meta { margin-block: 14px 5px; font-size: .86rem; color: var(--work-muted); }
+.experiment-report-changes { margin: 0 0 12px; padding: 0; list-style: none; }
+.experiment-report-changes > li { padding-block: 8px; border-bottom: 1px solid var(--work-line); }
+.experiment-run-report :is(h2, #creator-diagnosis), .experiment-run-report[id] { scroll-margin-top: 16px; }
+.experiment-report-metrics > div { grid-template-columns: minmax(5em, min(30%, 11rem)) minmax(0, 1fr); max-width: 56rem; }
+.experiment-report-metrics small { display: block; margin-top: 2px; color: var(--work-muted); }
+.experiment-report-change-word { padding-inline: 2px; color: var(--work-muted); font-size: .82em; }
+.experiment-report-config, .experiment-report-table { max-width: 100%; overflow-x: auto; }
+.experiment-report-table:focus-visible { outline: 2px solid var(--work-accent); outline-offset: 3px; }
+.experiment-report-table table { width: 100%; min-width: 36rem; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.experiment-report-table :is(td, th) { padding: 7px; border-bottom: 1px solid var(--work-line); text-align: start; vertical-align: top; overflow-wrap: anywhere; }
+.experiment-report-table th[scope="row"] { white-space: nowrap; }
+.experiment-report-table tr:has([aria-current="page"]) { background: linear-gradient(90deg, #e9ddbe, transparent); }
+.experiment-report-table th a { text-decoration: underline; text-underline-offset: 3px; }
+.experiment-path-report { margin-block: 12px; padding-block-start: 12px; border-top: 1px solid var(--work-line); }
+.experiment-path-report > h3 { font-weight: 750; }

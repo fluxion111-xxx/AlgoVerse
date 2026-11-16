@@ -3,13 +3,11 @@
 import { useMemo, useState } from "react";
 import { useFormStatus } from "react-dom";
 import { Icon } from "@iconify/react";
-import Link from "next/link";
 import { SimulationWorkbench } from "./SimulationParameters";
 import { PathfindingMapEditor, ResultSheet, SavedPathfindingReplay } from "@/components/PathfindingWorkbench";
 import { createPathfindingConfig, getExperimentEngine, pathfindingEngine, type EngineId, type ExperimentConfig, type PathfindingConfig } from "@/lib/experimentEngines";
 import { COLS, ROWS, type Difficulty } from "@/lib/pathfinding";
 import type { ExperimentRun } from "@/lib/server/experimentRecords";
-import { experimentTaskLinks } from "@/lib/navigation";
 
 type Draft = { id: string; revision: number; config: ExperimentConfig; generated: boolean };
 const difficulties = [{ id: "easy", label: "低" }, { id: "normal", label: "中" }, { id: "hard", label: "高" }] as const;
@@ -115,7 +113,10 @@ export function CreatorStudio({ draft, engineId, run, nextRunId, defaultSeed, ac
           action={action} sessionId={draft?.id} revision={draft?.revision} nextRunId={nextRunId} runButton={(hasRun) => <RunButton hasRun={hasRun} />}
           onEdited={setEdited} presentation={presentation} />}
 
-        {showRun && <Link className="creator-record" href={readOnly ? "#creator-diagnosis" : experimentTaskLinks({ sessionId: run.session.id, runId: run.id }).diagnosis}>诊断本轮结果<Icon icon="lucide:arrow-up-right" width={15} aria-hidden="true" /></Link>}
+        {showRun && <div className="creator-canvas-actions">
+          <a className="creator-record" href="#run-report-title">查看实验报告<Icon icon="lucide:arrow-down" width={15} aria-hidden="true" /></a>
+          <a className="creator-record" href="#creator-diagnosis">诊断本轮结果<Icon icon="lucide:arrow-down" width={15} aria-hidden="true" /></a>
+        </div>}
       </section>
   );
 }

@@ -5,16 +5,16 @@ import { LabWorkspace } from "@/components/experiments/LabWorkspace";
 import { AgentWorkbench } from "@/components/experiments/AgentWorkbench";
 import { ExperimentBench } from "@/components/experiments/ExperimentBench";
 import { ExperimentCreator } from "@/components/experiments/ExperimentCreator";
+import { ExperimentRunReports } from "@/components/experiments/ExperimentRunReports";
 import { ExperimentSteps } from "@/components/experiments/ExperimentSteps";
-import { QuickStartDiagnosis } from "@/components/experiments/QuickStartDiagnosis";
 import { creatorObservations } from "@/lib/creatorCapabilities";
 import { experimentReviewTopics, knowledgeTopicRoute } from "@/lib/knowledge";
 import { getExperimentEngine, registeredEngines } from "@/lib/experimentEngines";
 import { experimentDomains } from "@/lib/experiments/engine";
-import { evidenceLabels, experimentEvidence } from "@/lib/experiments/evidence";
 import { experimentTaskLinks, quickStartRoute, runAnalysisLink, withExperimentTask, workflowAISettingsRoute, workflowRoute, workflowSteps, type WorkflowStep } from "@/lib/navigation";
+import { expandSavedDiagnosis } from "@/lib/server/experimentAI";
 import { getExperimentContext, type ExperimentSearch } from "@/lib/server/experimentContext";
-import { getActiveAIWorkflow, getActiveAgentTask, getActiveExperimentTask, getAgentTask, getDiagnosis, getQuickStart, getRecentExperimentRuns } from "@/lib/server/experimentRecords";
+import { getActiveAIWorkflow, getActiveAgentTask, getActiveExperimentTask, getAgentTask, getDiagnosis, getExperimentRun, getQuickStart, getRecentExperimentRuns } from "@/lib/server/experimentRecords";
 import type { Diagnosis } from "@/lib/quickStart";
 import { runCreatorExperiment } from "../actions";
 import "./creator-flow.css";
@@ -121,7 +121,11 @@ export default async function CreatorPage({ searchParams }: { searchParams: Prom
       if (runId) redirect(runAnalysisLink(runId, true));
     }
     if (intent === "run" && currentRun && !task?.pending.length && task?.phase !== "running") redirect(runAnalysisLink(currentRun));
-    const pairs = await Promise.all((task?.runs ?? []).map(async ({ id }) => [id, await getDiagnosis(id)] as const));
+    const pairs = await Promise.all((task?.runs ?? []).map(async ({ id }) => {
+      const diagnosis = await getDiagnosis(id);
+      const saved = diagnosis && diagnosis.promptVersion < 5 ? await getExperimentRun(id) : null;
+      return [id, diagnosis && saved ? expandSavedDiagnosis(saved, diagnosis) : diagnosis] as const;
+    }));
     const diagnoses = Object.fromEntries(pairs.filter((pair): pair is readonly [string, Diagnosis] => pair[1] !== null));
     return <LabWorkspace className="catalog-page creator-studio creator-workflow theme-algorithms agent-page">
       <div className="creator-spread"><AgentWorkbench key={`${task?.id ?? reference?.task?.sessionId ?? "new"}:${intent ?? "default"}`}
@@ -144,19 +148,8 @@ export default async function CreatorPage({ searchParams }: { searchParams: Prom
 
   const reviewing = step === "run" || step === "diagnosis";
   if (reviewing && run?.session.source?.type === "agent") redirect(runAnalysisLink(run.id, step === "diagnosis"));
-  const selectedDiagnosis = reviewing && run ? await getDiagnosis(run.id) : null;
   const diagnosisPanel = reviewing && run && engine ? (
-    <section className="creator-diagnosis-split" id="creator-diagnosis" aria-label="结果诊断">
-      <section className="workflow-note workflow-metrics" aria-labelledby="diagnosis-metrics-title">
-        <h2 id="diagnosis-metrics-title">本轮实测指标</h2>
-        <p>{engine.creator.title}</p>
-        <dl className="preset-details">{Object.entries(experimentEvidence(run.results)).map(([metric, value]) => <div key={metric}>
-          <dt>{evidenceLabels[metric]}</dt><dd>{value}</dd>
-        </div>)}</dl>
-      </section>
-      <section className="workflow-note workflow-diagnosis-report" aria-label="AI 诊断报告">
-        <QuickStartDiagnosis diagnosis={selectedDiagnosis} runId={run.id} auto={false} results={run.results} studio
-          settingsHref={workflowAISettingsRoute(workflowRoute("diagnosis", task))} />
+    <ExperimentRunReports run={run} settingsHref={workflowAISettingsRoute(workflowRoute("diagnosis", task))}>
         <div className="preset-actions" aria-label="相关知识点">
           {experimentReviewTopics(engine.id, run.topicId).map((entry) =>
             <Link key={entry.topic.id} className="catalog-direct" href={knowledgeTopicRoute(entry, entry.topic.id === run.topicId ? run.id : undefined)}>
@@ -164,8 +157,7 @@ export default async function CreatorPage({ searchParams }: { searchParams: Prom
             </Link>)}
         </div>
         <Link className="catalog-direct" href={`/ai-tutor?${new URLSearchParams({ runId: run.id, from: "diagnosis" })}`}>问 AI 助教</Link>
-      </section>
-    </section>
+    </ExperimentRunReports>
   ) : null;
   return <LabWorkspace className={`catalog-page creator-studio creator-workflow theme-${engine?.domain ?? "algorithms"}`}>
     <div className="creator-spread">

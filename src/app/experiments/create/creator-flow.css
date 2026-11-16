@@ -123,16 +123,12 @@
 .creator-run-strip { margin-bottom: 11px; border-block: 1px solid var(--work-line); font-size: 14px; }
 .creator-run-strip strong { color: #38553b; padding-block: 5px; }
 .creator-result-body { display: grid; gap: clamp(16px, 2.6vw, 34px); }
-.creator-diagnosis-split {
-  display: grid; grid-template-columns: minmax(0, .8fr) minmax(0, 1.4fr);
-  gap: clamp(12px, 2vw, 24px); align-items: start; scroll-margin-top: 12px;
-}
 .creator-workflow .workflow-note { margin-top: 0; }
 .creator-workflow .workflow-note .preset-details dd { overflow-wrap: anywhere; }
-.creator-workflow .workflow-diagnosis-report .preset-actions a { min-height: 38px; display: inline-flex; align-items: center; }
+.creator-workflow #run-diagnosis .preset-actions a { min-height: 38px; display: inline-flex; align-items: center; }
 
 @media (max-width: 760px) {
-  .creator-question-stage, .creator-diagnosis-split { grid-template-columns: minmax(0, 1fr); }
+  .creator-question-stage { grid-template-columns: minmax(0, 1fr); }
   .creator-question-stage { gap: 14px; }
   .creator-plan-summary { grid-template-columns: minmax(0, 1.15fr) minmax(0, .9fr); }
   .creator-plan-summary > div:first-child { grid-column: 1 / -1; border-bottom: 1px solid var(--work-line); }

@@ -16,7 +16,7 @@ export type QuickStartPlan = {
 export type Diagnosis = {
   runId: string;
   model: string;
-  promptVersion: 1 | 2 | 3;
+  promptVersion: 1 | 2 | 3 | 4 | 5;
   createdAt: string;
   conclusion: string;
   explanation: string;

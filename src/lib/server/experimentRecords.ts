@@ -7,6 +7,7 @@ import { createPathfindingConfig, getExperimentEngine, pathfindingEngine, type E
 import type { CreatorPlanIntent } from "@/lib/experimentCreator";
 import type { AgentTask, TutorContext, TutorConversationSummary } from "@/lib/experimentAgent";
 import { experimentEvidence } from "@/lib/experiments/evidence";
+import type { ComparisonRun } from "@/lib/experiments/runComparison";
 import type { PracticeAttempts, PracticeDetail, PracticeDetails } from "@/lib/knowledgePractice";
 import { quickStartQuestion, type Diagnosis, type QuickStartPlan } from "@/lib/quickStart";
 
@@ -269,12 +270,17 @@ function countRun(previous: Completion | undefined, run: RunSummary): Completion
   return { count: (previous?.count ?? 0) + 1, latest };
 }
 
-async function collectRecentRuns(owner: string, onRun?: (run: RunSummary, topicId?: string) => void) {
+async function* readRunBatches(owner: string) {
   const files = await collectionFiles(owner, "runs");
   const ids = files.filter((file) => file.endsWith(".json")).map((file) => file.slice(0, -5)).filter(isRecordId);
-  const recent: RunSummary[] = [];
   for (let offset = 0; offset < ids.length; offset += 16) {
-    const runs = await Promise.all(ids.slice(offset, offset + 16).map((id) => readRecord<ExperimentRun>(recordPath(owner, "runs", id))));
+    yield await Promise.all(ids.slice(offset, offset + 16).map((id) => readRecord<ExperimentRun>(recordPath(owner, "runs", id))));
+  }
+}
+
+async function collectRecentRuns(owner: string, onRun?: (run: RunSummary, topicId?: string) => void) {
+  const recent: RunSummary[] = [];
+  for await (const runs of readRunBatches(owner)) {
     for (const saved of runs) {
       if (!saved || !getExperimentEngine(saved.session.engineId, saved.session.engineVersion)) continue;
       const summary = { id: saved.id, completedAt: saved.completedAt, engineId: saved.session.engineId };
@@ -290,6 +296,33 @@ async function collectRecentRuns(owner: string, onRun?: (run: RunSummary, topicI
 export async function getRecentExperimentRuns() {
   const owner = await visitor();
   return owner ? collectRecentRuns(owner) : [];
+}
+
+export async function getComparableExperimentRuns(run: ExperimentRun): Promise<ComparisonRun[]> {
+  const { session, topicId } = run;
+  if (session.source?.type === "agent") {
+    const task = await getAgentTask(session.source.taskId);
+    return task?.runs.some(({ id }) => id === run.id) ? task.runs : [];
+  }
+  const owner = await visitor();
+  if (!owner) return [];
+  const rounds: (ComparisonRun & { completedAt: string })[] = [];
+  for await (const runs of readRunBatches(owner)) {
+    for (const saved of runs) {
+      if (!saved || saved.topicId !== topicId || saved.session.engineId !== session.engineId || saved.session.engineVersion !== session.engineVersion) continue;
+      const sameScope = session.source?.type === "workbench"
+        ? saved.session.source?.type === "workbench" : saved.session.id === session.id;
+      if (!sameScope) continue;
+      rounds.push({ id: saved.id, tool: saved.session.engineId, version: saved.session.engineVersion,
+        config: saved.session.config, metrics: experimentEvidence(saved.results), completedAt: saved.completedAt });
+    }
+  }
+  rounds.sort((a, b) => a.completedAt.localeCompare(b.completedAt) || a.id.localeCompare(b.id));
+  const current = rounds.findIndex(({ id }) => id === run.id);
+  if (current < 0) return [];
+  const limit = 5;
+  const start = Math.max(0, current - limit + 1);
+  return rounds.slice(start, start + limit).map((round, index) => ({ ...round, round: start + index + 1 }));
 }
 
 export async function getLearningProgress(): Promise<LearningProgress> {

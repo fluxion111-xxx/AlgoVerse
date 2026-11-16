@@ -5,6 +5,7 @@ import { Icon } from "@iconify/react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { COLS, ROWS, START, GOAL, initialWalls, search, shortestStepCount, type Algorithm, type SearchResult } from "@/lib/pathfinding";
+import { pathfindingReport } from "@/lib/experiments/report";
 import { PresetSubmit } from "@/components/experiments/PresetSubmit";
 
 const tools = [
@@ -238,6 +239,8 @@ export function PathfindingWorkbench({ save }: { save?: (form: FormData) => Prom
   const algorithms: Algorithm[] = choice === "both" ? ["dijkstra", "astar"] : [choice];
   const canAdvance = !!replay && replay.frame < replay.maxFrame;
   const playing = replay?.playing ?? false;
+  const report = replay && !canAdvance ? pathfindingReport(map.walls.length,
+    Object.fromEntries(replay.runs.map(({ algorithm, result }) => [algorithm, result]))) : null;
 
   useEffect(() => {
     if (!playing) return;
@@ -341,6 +344,15 @@ export function PathfindingWorkbench({ save }: { save?: (form: FormData) => Prom
           ))}
         </div>
         <p className="experiment-footnote">本地计算。耗时不含播放。</p>
+        {report && <section className="experiment-path-report" aria-labelledby="path-report-title">
+          <h3 id="path-report-title">本轮实验报告</h3>
+          <h4 className="experiment-report-label">最终结论</h4>
+          <p className="experiment-report-lead">{report.conclusion}</p>
+          <h4 className="experiment-report-label">详细报告</h4>
+          <p className="experiment-report-copy">{report.detail}</p>
+          <h4 className="experiment-report-label">本地诊断</h4>
+          <p className="experiment-report-copy">{report.explanation}</p>
+        </section>}
         {save && replay && shortestStepCount(map) !== null && <form className="preset-actions" action={save}>
           <input type="hidden" name="parameters" value={JSON.stringify({ goalLabel: "对比两种搜索过程。", map: { kind: "custom", ...map } })} />
           <PresetSubmit className="experiment-run" pending="正在保存…">用此图运行并保存对比</PresetSubmit>

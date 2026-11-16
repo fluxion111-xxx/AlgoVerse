@@ -3,7 +3,7 @@ import { evidenceLabels, experimentEvidence } from "./evidence";
 
 const followUps: Record<EngineId, Record<string, string>> = {
   pathfinding: { obstacles: "调整障碍密度，比较访问节点数。", endpoints: "移动起点或终点，再比路径长度。" },
-  sorting: { order: "保持数值不变，改输入顺序。再比次数。", duplicates: "加入重复值，再比比较和交换次数。" },
+  sorting: { order: "保持数值不变。只改输入顺序。各试升序和倒序。再比比较与交换。", duplicates: "固定序列长度。用重复值替换几项。再比比较与交换。" },
   "cpu-scheduling": { policy: "保持进程不变，切换调度策略。再看等待时间。", arrivals: "只改到达时刻，再看响应时间。" },
   "network-transmission": { delay: "调整一条链路的延迟，再看选路。", loss: "只改一条链路的丢包率，比较送达数。" },
   "memory-visualization": { depth: "换个阶乘输入，再看栈深和调用次数。" },

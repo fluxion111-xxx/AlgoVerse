@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { LabWorkspace } from "@/components/experiments/LabWorkspace";
 import { ExperimentBench } from "@/components/experiments/ExperimentBench";
+import { ExperimentRunReports } from "@/components/experiments/ExperimentRunReports";
 import { courseRoute, getCourse } from "@/lib/courses";
 import { registeredEngines } from "@/lib/experimentEngines";
 import { getExperimentTopic, knowledgeTopicRoute } from "@/lib/knowledge";
@@ -54,6 +55,7 @@ export default async function ExperimentPage({ params, searchParams }: Experimen
           {context.run && context.workflow?.isAI && <Link className="catalog-direct" href={workflowRoute("run", context.task)}>返回本轮对比</Link>}
         </header>
         <ExperimentBench engine={context.engine ?? engine} context={context} action={action} />
+        {context.run && <ExperimentRunReports run={context.run} />}
       </div>
     </LabWorkspace>;
   }

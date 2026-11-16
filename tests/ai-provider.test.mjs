@@ -27,6 +27,8 @@ const { interpretCreatorRequest } = await import("../src/lib/server/creatorAI.ts
 const { diagnoseExperimentRun } = await import("../src/lib/server/experimentAI.ts");
 const { getExperimentEngine, registeredEngines } = await import("../src/lib/experimentEngines.ts");
 const { diagnosisChoices } = await import("../src/lib/experiments/diagnosis.ts");
+const { experimentReport, pathfindingReport } = await import("../src/lib/experiments/report.ts");
+const { experimentRunComparison } = await import("../src/lib/experiments/runComparison.ts");
 const { experimentEvidence } = await import("../src/lib/experiments/evidence.ts");
 const { courses } = await import("../src/lib/courses.ts");
 const { experimentReviewTopics, getDefaultKnowledgeTopic, getExperimentTopic, getKnowledgeTopic, hasCompleteTeaching, knowledgeDomains, knowledgeEntries, knowledgeTopicRoute } = await import("../src/lib/knowledge.ts");
@@ -1245,6 +1247,53 @@ test("every registered engine offers only observations backed by its recorded re
   }
 });
 
+test("all runnable labs explain a domain-specific observation and a controlled retest", () => {
+  const diagnosticEvidence = {
+    pathfinding: /剩余路程。.*耗时/, sorting: /首个基准.*两侧又比较/, "cpu-scheduling": /P1 等待.*P3 等待/,
+    "network-transmission": /经 B 总延迟 25 ms。经 C 总延迟 35 ms/, "memory-visualization": /0! 先返回 1/, "b-plus-tree": /节点最多存 2 个键/,
+    "knn-classification": /用欧氏距离。.*各投一票/, "page-replacement": /第 \d+ 次访问出现分歧/, "hash-collisions": /第 \d+ 项检查数先分开/,
+    "k-means": /用组内均值更新中心/, "gradient-descent": /第一步走到 2。.*末步梯度/, "tree-traversal": /层序最后访问 9/,
+    "graph-traversal": /BFS 一层层取队列。DFS 沿一条分支向下/, "deadlock-avoidance": /试算先完成 P1/,
+    "tcp-congestion": /第 8 步首次快重传。.*第 11 步首次超时/, "dynamic-routing": /调整链路 1↔4。.*重算后下一跳为 2/,
+    "memory-allocation": /第 7 步先出现差异。首次碎片失败 1 次。最佳碎片失败 0 次/, "transaction-concurrency": /冲突出现在第 0 号行/,
+  };
+  assert.deepEqual(Object.keys(diagnosticEvidence), registeredEngines.map(({ id }) => id));
+  for (const engine of registeredEngines) {
+    const config = engine.preset(101);
+    const { conclusion, detail, explanation, suggestion } = experimentReport(config, engine.run(config));
+    assert.match(explanation, diagnosticEvidence[engine.id], engine.id);
+    assert.ok(conclusion.length > 0 && detail.split("。").length >= 4 && suggestion.length > 0, engine.id);
+    assert.doesNotMatch(conclusion + detail + explanation, /undefined|NaN/, engine.id);
+  }
+});
+
+test("lab reports handle failed, tied and worsening outcomes", () => {
+  const noPath = { pathLength: null, elapsedMs: 0, visited: [0], path: [] };
+  assert.match(pathfindingReport(2, { dijkstra: noPath, astar: noPath }).conclusion, /两种算法都未找到路/);
+  assert.match(pathfindingReport(2, { astar: noPath }).conclusion, /A\* 未找到路/);
+
+  const network = getExperimentEngine("network-transmission");
+  const net = network.preset(101);
+  net.links.AB.loss = 100;
+  const networkReport = experimentReport(net, network.run(net));
+  assert.match(networkReport.conclusion, /送达 0 个，丢包 10 个/);
+  assert.match(networkReport.detail, /没有包送达。AB 丢包 10 个。BD 丢包 0 个/);
+
+  const pageReplacement = getExperimentEngine("page-replacement");
+  const pages = { ...pageReplacement.preset(), references: [1, 1] };
+  assert.match(experimentReport(pages, pageReplacement.run(pages)).conclusion, /三种策略均缺页 1 次/);
+
+  const banker = getExperimentEngine("deadlock-avoidance");
+  const unsafe = { ...banker.preset(), process: 4, request: [3, 3, 0] };
+  const unsafeReport = experimentReport(unsafe, banker.run(unsafe));
+  assert.match(unsafeReport.conclusion, /撤回试分配/);
+  assert.match(unsafeReport.detail, /原状态存在安全序列/);
+
+  const gradient = getExperimentEngine("gradient-descent");
+  const tooLarge = { ...gradient.preset(), learningRate: 2 };
+  assert.match(experimentReport(tooLarge, gradient.run(tooLarge)).conclusion, /损失上升。达到步数上限/);
+});
+
 test("CPU diagnosis uses the edited quantum and actual waits, including equal burst length", () => {
   const engine = getExperimentEngine("cpu-scheduling");
   const config = { ...engine.preset(), quantum: 3 };
@@ -1260,6 +1309,46 @@ test("CPU diagnosis uses the edited quantum and actual waits, including equal bu
   assert.ok(other.steps.every(({ id }) => id !== "quantum"));
 });
 
+test("sorting reports use measured differences and retain the actual round numbers", () => {
+  const engine = getExperimentEngine("sorting");
+  const saved = (values) => {
+    const config = { ...engine.preset(), values };
+    const results = engine.run(config);
+    return { tool: engine.id, version: engine.version, config, results, metrics: experimentEvidence(results) };
+  };
+  const first = saved([7, 2, 9, 4, 3, 8, 1]);
+  const second = saved([9, 8, 3, 7, 2, 6]);
+  const report = experimentReport(second.config, second.results);
+  assert.equal(report.conclusion, "快排少比较 6 次。快排少交换 8 次。");
+  assert.match(report.detail, /冒泡比较 15 次。快排比较 9 次。.*两种升序结果一致/);
+  assert.match(report.explanation, /首个基准是 6。.*左侧有 2 项。右侧有 3 项/);
+  const comparison = experimentRunComparison([first, { ...first, version: 2 }, second], engine.id, engine.version);
+  assert.equal(comparison.conclusion, "各轮快排比较都更少。各轮快排交换都更少。");
+  assert.deepEqual(comparison.rounds.map(({ round }) => round), [1, 3]);
+  assert.match(comparison.changes[0].detail, /7 项变为 6 项。输入规模和内容都变了/);
+  assert.match(comparison.changes[0].detail, /冒泡比较少 6 次。快排比较少 5 次。冒泡交换少 1 次。快排交换少 1 次/);
+
+  const ascending = saved([1, 2, 3, 4]);
+  const descending = saved([4, 3, 2, 1]);
+  const reordered = experimentRunComparison([ascending, descending], engine.id, engine.version);
+  assert.match(reordered.changes[0].detail, /只调整了输入顺序/);
+  assert.match(reordered.conclusion, /冒泡较少 1 轮。打平 1 轮/);
+  assert.equal(experimentReport(ascending.config, ascending.results).conclusion, "冒泡少比较 3 次。交换次数相同。");
+});
+
+test("round comparison shows edited parameters and labeled numeric differences", () => {
+  const engine = getExperimentEngine("page-replacement");
+  const first = engine.preset();
+  const after = { ...first, goalLabel: "另一段说明", frameCount: 4 };
+  const rounds = [first, after].map((config) => ({ tool: engine.id, version: engine.version, config,
+    metrics: experimentEvidence(engine.run(config)) }));
+  const comparison = experimentRunComparison(rounds, engine.id, engine.version);
+  const [change] = comparison.changes;
+  assert.deepEqual(change.parameters, [{ label: "页框数", previous: 3, value: 4 }]);
+  assert.deepEqual(change.metrics.find(({ key }) => key === "pageFaults").deltas, ["FIFO +1", "LRU −2", "OPT −1"]);
+  assert.match(comparison.conclusion, /缺页次数有变化/);
+});
+
 test("diagnosis accepts a model's selection and rejects injected claims or unsupported IDs", async (t) => {
   const engine = getExperimentEngine("sorting");
   const config = { ...engine.preset(), values: [9, 7, 5, 3, 1] };
@@ -1273,8 +1362,9 @@ test("diagnosis accepts a model's selection and rejects injected claims or unsup
     return completion(JSON.stringify(reply), payload.model);
   });
   const report = await diagnoseExperimentRun(run, credentials);
-  assert.deepEqual(report.evidence, ["comparisons"]);
-  assert.match(report.conclusion, /比较次数相同。.*10 \/ 10/);
+  assert.deepEqual(report.evidence, ["comparisons", "swaps", "sorted"]);
+  assert.match(report.conclusion, /比较次数相同。快排少交换/);
+  assert.match(report.explanation, /首个基准是 1。首轮划分比较 4 次。.*两侧又比较 6 次/);
   assert.match(report.suggestion, /改输入顺序/);
   reply = { metric: "comparisons", next: "order", conclusion: "快排比较更少" };
   await assert.rejects(diagnoseExperimentRun(run, credentials), /返回格式有误/);
