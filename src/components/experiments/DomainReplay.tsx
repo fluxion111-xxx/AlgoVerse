@@ -113,11 +113,11 @@ export function KnnReplay({ config, results }: {
       <div>
         <h3>最近邻</h3>
         <p>同距按输入顺序。平票看最近邻。</p>
-        {neighbors.length > 0 && <table className="simulation-table">
+        {neighbors.length > 0 && <table className="simulation-table" data-evidence-result="neighbors">
           <thead><tr><th>样本</th><th>类别</th><th>距离</th></tr></thead>
           <tbody>{neighbors.map(({ index, label, distance }) => <tr key={index}><th>{index + 1} 号</th><td>{label}</td><td>{distance.toFixed(2)}</td></tr>)}</tbody>
         </table>}
-        {finished && <p className="domain-result">预测 {results.prediction} 类 · A {results.votes.A} 票 · B {results.votes.B} 票</p>}
+        {finished && <p className="domain-result" data-evidence-result="votes">预测 {results.prediction} 类 · A {results.votes.A} 票 · B {results.votes.B} 票</p>}
       </div>
     </section>
   </div>;

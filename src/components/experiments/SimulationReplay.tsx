@@ -1,12 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 import { networkLinks, type NetworkConfig, type networkEngine } from "@/lib/experiments/network";
 import type { SchedulingConfig, schedulingEngine } from "@/lib/experiments/scheduling";
 import type { SortingConfig, sortingEngine } from "@/lib/experiments/sorting";
 
+export const EvidenceReplayStep = createContext<number | undefined>(undefined);
+
 export function useReplay(length: number, interval: number) {
-  const [step, setStep] = useState(0);
+  const initialStep = useContext(EvidenceReplayStep);
+  const [step, setStep] = useState(initialStep !== undefined && initialStep >= 1 && initialStep <= length ? initialStep : 0);
   const [playing, setPlaying] = useState(false);
   useEffect(() => {
     if (!playing || step >= length) return;

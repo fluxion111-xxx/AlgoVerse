@@ -38,6 +38,9 @@ const { maxQuestionLength } = await import("../src/lib/experimentCreator.ts");
 const { courses } = await import("../src/lib/courses.ts");
 const { experimentDomains } = await import("../src/lib/experiments/engine.ts");
 const { experimentEvidence } = await import("../src/lib/experiments/evidence.ts");
+const { adaptEvidenceRun, citedRunEvidence, compareEvidenceRuns, precedingEvidenceRound, referenceFor, resolveEvidence, verifyRunEvidence } =
+  await import("../src/lib/experiments/runEvidence.ts");
+const { evidencePositionToken, parseEvidencePosition } = await import("../src/lib/experiments/evidencePosition.ts");
 const { schedulingWaitReport } = await import("../src/lib/experimentAgent.ts");
 const model = "Qwen/Qwen3.5-4B";
 const key = "sk-agent-fixture-secret-key";
@@ -634,6 +637,151 @@ test("all 162 advertised tools execute their real engine and expose verified met
   const revised = prepareToolCall({ tool: network, parameters: { packets: 15 } }, 5678, { base: networkBase });
   assert.deepEqual(revised?.config, { ...networkBase.config, packets: 15 });
   assert.equal(prepareToolCall({ tool: network, parameters: { seed: 123 } }, 1234, { base: networkBase }), null);
+});
+
+function evidenceMetadata(run) {
+  return {
+    id: run.id, sessionId: run.session.id, tool: run.session.engineId, version: run.session.engineVersion,
+    config: run.session.config, results: run.results,
+  };
+}
+
+async function saveEvidenceTrial(engine, config = engine.preset(1234)) {
+  const session = await createWorkbenchSession(config.goalLabel, engine.id, engine.version, config);
+  assert.ok(await confirmExperimentSession(session.id), engine.id);
+  const run = await runExperimentSession(session.id, randomUUID());
+  assert.ok(run, engine.id);
+  return run;
+}
+
+test("every registered engine persists a readable Run, verifiable metrics and real evidence positions", async (t) => {
+  await setup(t, "192.0.2.93", () => assert.fail("Evidence should be computed locally"));
+  const scope = randomUUID();
+  const matrix = [];
+  for (const engine of registeredEngines) {
+    const saved = await saveEvidenceTrial(engine);
+    const response = await replayGET(new Request(`https://algoverse.test/api/experiments/runs/${saved.id}/replay`),
+      { params: Promise.resolve({ runId: saved.id }) });
+    assert.equal(response.status, 200, engine.id);
+    const data = await response.json();
+    assert.deepEqual(data, evidenceMetadata(saved), engine.id);
+    const adapted = adaptEvidenceRun(scope, { ...data, metrics: { fake: "99999" } }, data);
+    assert.ok(adapted, engine.id);
+    assert.deepEqual(adapted.metrics, experimentEvidence(saved.results), engine.id);
+    const check = verifyRunEvidence(adapted);
+    assert.ok(check.facts.length && check.supported.length && check.limitations.length && check.conditions.length, engine.id);
+    assert.ok(!check.facts.some(({ text }) => text.includes("99999")), engine.id);
+    for (const key of Object.keys(adapted.metrics)) assert.ok(resolveEvidence(adapted, referenceFor(adapted, { kind: "metric", key })), engine.id);
+    for (const { key, items, offset = 0 } of adapted.traces) {
+      assert.ok(items.length, engine.id);
+      assert.equal(resolveEvidence(adapted, referenceFor(adapted, { kind: "step", key, step: items.length }))?.replayStep, items.length + offset, engine.id);
+      assert.equal(resolveEvidence(adapted, referenceFor(adapted, { kind: "step", key, step: items.length + 1 })), null, engine.id);
+    }
+    assert.equal(resolveEvidence(adapted, referenceFor(adapted, { kind: "metric", key: "fake" })), null, engine.id);
+    const track = adapted.traces.map(({ label }) => label).join("、");
+    matrix.push(`| ${engine.creator.title.replaceAll("|", "\\|")} (${engine.id}) | 是 | ${engine.id === "knn-classification" || engine.id === "sorting" ||
+      engine.id === "cpu-scheduling" || engine.id === "pointer-write" ? "通用 + 专用规则" : "通用"} | 指标${adapted.results.length ? "、结果" : ""}${track ? "、播放器步骤" : ""} | ${track || "该预设无可定位轨迹"} | 通过 | ${check.limitations.slice(0, -2).join(" ") || "仅限本轮指标与已有轨迹。"} |`);
+  }
+  assert.equal(matrix.length, registeredEngines.length);
+  if (process.env.ALGOVERSE_EVIDENCE_COMPAT_REPORT) await writeFile(process.env.ALGOVERSE_EVIDENCE_COMPAT_REPORT, [
+    "# 实验诊断兼容性清单",
+    "",
+    `共 ${matrix.length} 个注册引擎。每项均用真实引擎执行默认配置，保存 Run，再由回放接口读回。自动化测试核对指标、证据位置和轨迹边界。浏览器验证范围见交付报告。`,
+    "",
+    "通用规则核对同一研究里的引擎版本、输入参数和共同指标。通用判断仅描述已测现象。轨迹列指默认配置生成的数据。分支未发生或数据缺失时，只定位实际存在的指标或结果。",
+    "",
+    "| 实验类型 | 真实 Run 可读取 | 可信度检查 | 定位粒度 | 默认配置的真实轨迹 | 实际测试 | 限制 |",
+    "| --- | --- | --- | --- | --- | --- | --- |",
+    ...matrix,
+    "",
+  ].join("\n"), "utf8");
+});
+
+test("KNN, sorting, CPU and pointer checks reference the correct runs and refuse unsupported claims", async (t) => {
+  await setup(t, "192.0.2.94", () => assert.fail("Evidence should be computed locally"));
+  const scope = randomUUID();
+  const adapt = (stored, id = scope) => {
+    const data = evidenceMetadata(stored);
+    return adaptEvidenceRun(id, data, data);
+  };
+  const knn = getExperimentEngine("knn-classification");
+  const k1 = adapt(await saveEvidenceTrial(knn, { ...knn.preset(), k: 1 }));
+  const k3 = adapt(await saveEvidenceTrial(knn, { ...knn.preset(), k: 3 }));
+  const knnCheck = verifyRunEvidence(k3, k1, ["fake"]);
+  assert.equal(k1.metrics.prediction, "B");
+  assert.equal(k3.metrics.prediction, "A");
+  assert.deepEqual(compareEvidenceRuns(k1, k3).changed, ["k"]);
+  assert.match(knnCheck.supported[0].text, /B → A/);
+  assert.match(knnCheck.limitations.join(" "), /真实标签.*无法判断准确率/);
+  const votes = knnCheck.supported[0].links.find(({ reference }) => reference.position.kind === "result").reference;
+  assert.equal(votes.runId, k1.data.id);
+  assert.equal(votes.sessionId, k1.data.sessionId);
+  assert.equal(resolveEvidence(k1, votes).replayStep, 1);
+  assert.equal(resolveEvidence(k3, votes), null);
+  assert.equal(resolveEvidence({ ...k1, researchId: randomUUID() }, votes), null);
+  assert.equal(compareEvidenceRuns({ ...k1, researchId: randomUUID() }, k3), null);
+  assert.equal(adaptEvidenceRun(scope, k1.data, null), null);
+  assert.equal(adaptEvidenceRun(scope, k1.data, { ...k1.data, results: {} }), null);
+  assert.deepEqual(citedRunEvidence([{ from: 1, to: 2, metric: "accuracy" }], [k1, k3]), []);
+
+  const sort = getExperimentEngine("sorting");
+  const sorted = adapt(await saveEvidenceTrial(sort, { ...sort.preset(), values: [1, 2, 3, 4] }));
+  const reversed = adapt(await saveEvidenceTrial(sort, { ...sort.preset(), values: [4, 3, 2, 1] }));
+  const sortCheck = verifyRunEvidence(reversed, sorted);
+  assert.ok(sortCheck.supported.some(({ links }) => links.some(({ reference }) => reference.position.key === "comparisons")));
+  assert.match(sortCheck.limitations.join(" "), /快慢需要实际计时/);
+  assert.ok(sortCheck.scope.includes("只调整了输入顺序。"));
+  assert.equal(compareEvidenceRuns(sorted, k3), null);
+  const comparisonRounds = [k1.data, sorted.data, k3.data];
+  assert.equal(precedingEvidenceRound(comparisonRounds, 2, 0), k1.data);
+  assert.equal(precedingEvidenceRound(comparisonRounds, 2, 1), undefined);
+
+  const cpu = getExperimentEngine("cpu-scheduling");
+  const rr = adapt(await saveEvidenceTrial(cpu, { ...cpu.preset(), policy: "rr", quantum: 2 }));
+  const differentJobs = adapt(await saveEvidenceTrial(cpu, { ...cpu.preset(), policy: "rr", quantum: 3,
+    processes: [{ arrival: 0, burst: 1 }, { arrival: 1, burst: 2 }] }));
+  assert.deepEqual(compareEvidenceRuns(rr, differentJobs).controlsChanged, ["processes"]);
+  const cpuCheck = verifyRunEvidence(differentJobs, rr);
+  assert.match(cpuCheck.limitations.join(" "), /无法分离影响/);
+  assert.equal(resolveEvidence(differentJobs, cpuCheck.locations[0].reference).replayStep, differentJobs.data.results.timeline.length);
+
+  const pointer = getExperimentEngine("pointer-write");
+  const write = adapt(await saveEvidenceTrial(pointer));
+  const step = verifyRunEvidence(write).locations[0].reference;
+  const selected = resolveEvidence(write, step);
+  assert.equal(selected.replayStep, 3);
+  assert.deepEqual(write.traces[0].items[selected.replayStep - 1], ["成功写入", 2, 42, write.metrics.pointerArray]);
+  assert.deepEqual(parseEvidencePosition(evidencePositionToken(step.position)), step.position);
+  assert.equal(parseEvidencePosition("step:steps:0"), undefined);
+});
+
+test("a saved evidence link restores inside the same research only", async (t) => {
+  const { post, values } = await setup(t, "192.0.2.95", () => sortingPlan);
+  const draft = (await post("start", null, { goal: "比较排序" })).task;
+  const plan = (await post("message", draft, { message: "设计排序实验" })).task;
+  const task = (await post("approve", plan)).task;
+  const [run] = task.runs;
+  const key = "metric:comparisons";
+  const body = { id: task.id, focus: "run", runId: run.id, evidence: key };
+  assert.equal((await historyRequest("PUT", { ...body, evidence: "metric:fake" })).status, 404);
+  assert.equal((await historyRequest("PUT", { ...body, evidence: "step:bubble:99999" })).status, 404);
+  assert.equal((await historyRequest("PUT", body)).status, 200);
+  assert.equal((await getWorkbenchView(task.id)).evidence, key);
+  const { items } = await (await historyRequest("GET")).json();
+  const url = new URL(items.find(({ id }) => id === task.id).href, "https://algoverse.test");
+  assert.equal(url.searchParams.get("runId"), run.id);
+  assert.equal(url.searchParams.get("evidence"), key);
+  const other = (await post("start", null, { goal: "另一个实验" })).task;
+  assert.equal((await historyRequest("PUT", { ...body, id: other.id })).status, 404);
+  const read = (id) => replayGET(new Request(`https://algoverse.test/api/experiments/runs/${run.id}/replay?agentId=${id}`),
+    { params: Promise.resolve({ runId: run.id }) });
+  assert.equal((await read(other.id)).status, 404);
+  const response = await read(task.id);
+  const data = await response.json();
+  const adapted = adaptEvidenceRun(task.id, run, data);
+  assert.ok(resolveEvidence(adapted, referenceFor(adapted, parseEvidencePosition(url.searchParams.get("evidence")))));
+  values.clear();
+  assert.equal((await read(task.id)).status, 404);
 });
 
 test("manual reports compare saved rounds in scope and expand a cached diagnosis locally", async (t) => {

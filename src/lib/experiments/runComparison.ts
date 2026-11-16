@@ -27,7 +27,7 @@ function quickSummary(metrics: Record<string, string>[], key: "comparisons" | "s
   return `${action}次数各轮各有输赢。快排较少 ${quick} 轮。冒泡较少 ${differences.length - quick - tied} 轮。打平 ${tied} 轮。`;
 }
 
-function sortingChange(before: number[], after: number[]) {
+export function sortingChange(before: number[], after: number[]) {
   if (before.length !== after.length) return `样本从 ${before.length} 项变为 ${after.length} 项。输入规模和内容都变了。两项影响要分开测。`;
   if (before.every((value, index) => value === after[index])) return "输入序列相同。";
   const sortedAfter = [...after].sort((a, b) => a - b);
@@ -84,7 +84,7 @@ function numericChange(previous: string, value: string, unit = "") {
   return delta === 0 ? null : `${delta > 0 ? "+" : "−"}${Math.abs(delta)}${suffix ? ` ${suffix}` : ""}`;
 }
 
-function metricDeltas(key: string, previous: string, value: string) {
+export function metricDeltas(key: string, previous: string, value: string) {
   const labels = seriesLabels[key];
   if (!labels) {
     const delta = numericChange(previous, value);

@@ -1,7 +1,7 @@
 import { workbenchFocus, type WorkbenchFocus } from "./navigation";
 import type { AgentTask } from "./experimentAgent";
 
-export type WorkbenchView = { focus: WorkbenchFocus; runId?: string; hypothesis?: string; draftQuestion?: string };
+export type WorkbenchView = { focus: WorkbenchFocus; runId?: string; evidence?: string; hypothesis?: string; draftQuestion?: string };
 export type WorkbenchHistoryItem = {
   id: string;
   href: string;

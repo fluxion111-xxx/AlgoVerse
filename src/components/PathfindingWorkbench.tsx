@@ -167,15 +167,16 @@ export function ResultSheet({ algorithm, map, result, frame }: {
   );
 }
 
-export function SavedPathfindingReplay({ map, results, guide, studio = false }: {
+export function SavedPathfindingReplay({ map, results, guide, studio = false, evidenceFrame }: {
   map: MapState;
   results: Record<Algorithm, SearchResult>;
   guide?: { next: string; auto: boolean };
   studio?: boolean;
+  evidenceFrame?: number;
 }) {
   const router = useRouter();
   const maxFrame = Math.max(results.dijkstra.visited.length, results.astar.visited.length);
-  const [frame, setFrame] = useState(guide || studio ? 0 : maxFrame);
+  const [frame, setFrame] = useState(evidenceFrame ?? (guide || studio ? 0 : maxFrame));
   const [playing, setPlaying] = useState(guide?.auto ?? false);
   useEffect(() => {
     if (studio && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) setPlaying(true);

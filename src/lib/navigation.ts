@@ -22,8 +22,8 @@ export type WorkflowStep = keyof typeof workflowSteps;
 export const workbenchFocus = { question: "idea", config: "plan", run: "run", diagnosis: "analysis" } as const satisfies Record<WorkflowStep, string>;
 export type WorkbenchFocus = typeof workbenchFocus[WorkflowStep];
 
-export function agentWorkbenchLink({ agentId, focus, intent, fresh, sessionId, runId }: {
-  agentId?: string; focus?: WorkbenchFocus; intent?: WorkflowStep; fresh?: boolean; sessionId?: string; runId?: string;
+export function agentWorkbenchLink({ agentId, focus, intent, fresh, sessionId, runId, evidence }: {
+  agentId?: string; focus?: WorkbenchFocus; intent?: WorkflowStep; fresh?: boolean; sessionId?: string; runId?: string; evidence?: string;
 } = {}) {
   const query = new URLSearchParams();
   if (agentId) query.set("agentId", agentId);
@@ -32,6 +32,7 @@ export function agentWorkbenchLink({ agentId, focus, intent, fresh, sessionId, r
   if (fresh) query.set("new", "1");
   if (sessionId) query.set("sessionId", sessionId);
   if (runId) query.set("runId", runId);
+  if (focus === "run" && runId && evidence) query.set("evidence", evidence);
   return query.size ? `${creatorRoute}?${query}` : creatorRoute;
 }
 

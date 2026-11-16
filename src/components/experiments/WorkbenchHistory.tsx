@@ -19,7 +19,7 @@ export async function workbenchHistoryRequest<T>(method: "GET" | "POST" | "PUT",
   return data as T;
 }
 
-export function useWorkbenchView(id: string | undefined, { focus, runId, hypothesis, draftQuestion }: WorkbenchView) {
+export function useWorkbenchView(id: string | undefined, { focus, runId, evidence, hypothesis, draftQuestion }: WorkbenchView) {
   const queued = useRef(Promise.resolve());
   const pending = useRef<() => void>(undefined);
   const [saved, setSaved] = useState(false);
@@ -41,7 +41,7 @@ export function useWorkbenchView(id: string | undefined, { focus, runId, hypothe
       }
       queued.current = queued.current.then(async () => {
         try {
-          await workbenchHistoryRequest("PUT", { id, focus, runId, hypothesis, draftQuestion });
+          await workbenchHistoryRequest("PUT", { id, focus, runId, evidence, hypothesis, draftQuestion });
           if (current) setSaved(true);
         } catch (failure) {
           if (current) setError(failure instanceof Error ? failure.message : "保存失败。请重试。");
@@ -57,7 +57,7 @@ export function useWorkbenchView(id: string | undefined, { focus, runId, hypothe
       window.removeEventListener("pagehide", save);
       if (pending.current === save) pending.current = undefined;
     };
-  }, [id, focus, runId, hypothesis, draftQuestion, attempt]);
+  }, [id, focus, runId, evidence, hypothesis, draftQuestion, attempt]);
 
   return {
     saved, error, retry: () => setAttempt((value) => value + 1),

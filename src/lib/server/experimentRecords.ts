@@ -12,6 +12,8 @@ import type { PracticeAttempts, PracticeDetail, PracticeDetails } from "@/lib/kn
 import { quickStartQuestion, type Diagnosis, type QuickStartPlan } from "@/lib/quickStart";
 import { agentWorkbenchLink } from "@/lib/navigation";
 import { isWorkbenchFocus, type WorkbenchHistoryItem, type WorkbenchView } from "@/lib/workbenchHistory";
+import { parseEvidencePosition } from "@/lib/experiments/evidencePosition";
+import { adaptEvidenceRun, referenceFor, resolveEvidence } from "@/lib/experiments/runEvidence";
 
 const visitorCookie = "algoverse_visitor";
 const taskCookie = "algoverse_task";
@@ -599,6 +601,7 @@ async function replaceWorkbenchRecord(path: string, value: object) {
 async function readWorkbenchView(owner: string, id: string) {
   const view = await readRecord<WorkbenchView>(recordPath(owner, "workbench-views", id));
   if (view && (!isWorkbenchFocus(view.focus) || (view.runId !== undefined && !isRecordId(view.runId))
+    || (view.evidence !== undefined && (view.focus !== "run" || !view.runId || !parseEvidencePosition(view.evidence)))
     || (view.hypothesis !== undefined && typeof view.hypothesis !== "string")
     || (view.draftQuestion !== undefined && typeof view.draftQuestion !== "string"))) throw new Error("Invalid workbench view");
   return view;
@@ -621,7 +624,17 @@ export async function saveWorkbenchView(id: unknown, view: WorkbenchView) {
   const workflow = task ? null : await getExperimentWorkflow(id);
   if (!task && !workflow) return "missing";
   const runId = view.runId;
-  if (runId && !(task ? task.runs.some(({ id }) => id === runId) : (await getExperimentRun(runId))?.session.id === id)) return "missing";
+  const selected = task?.runs.find(({ id }) => id === runId);
+  const savedRun = runId && (!task || view.evidence) ? await getExperimentRun(runId) : null;
+  if (runId && !(task ? selected : savedRun?.session.id === id)) return "missing";
+  if (view.evidence) {
+    const position = parseEvidencePosition(view.evidence);
+    if (!savedRun || !position || view.focus !== "run") return "missing";
+    const data = { id: savedRun.id, sessionId: savedRun.session.id, tool: savedRun.session.engineId,
+      version: savedRun.session.engineVersion, config: savedRun.session.config, results: savedRun.results };
+    const adapted = adaptEvidenceRun(id, selected ?? { ...data, metrics: {}, completedAt: savedRun.completedAt }, data);
+    if (!adapted || !resolveEvidence(adapted, referenceFor(adapted, position))) return "missing";
+  }
   await replaceWorkbenchRecord(recordPath(owner, "workbench-views", id), {
     ...view, draftQuestion: task ? undefined : view.draftQuestion,
   });
@@ -638,7 +651,8 @@ function workbenchHistoryEntry(id: string, task: AgentTask | null, view: Workben
   return {
     id, title, question, updatedAt, rounds: task?.runs.length ?? runs.length,
     phase: task?.phase ?? (last ? "observe" : workflow?.plan ? "confirm" : "draft"),
-    href: agentWorkbenchLink({ agentId: task?.id, sessionId: task ? undefined : id, focus: view?.focus, runId }),
+    href: agentWorkbenchLink({ agentId: task?.id, sessionId: task ? undefined : id, focus: view?.focus, runId,
+      evidence: runId === view?.runId ? view?.evidence : undefined }),
   };
 }
 

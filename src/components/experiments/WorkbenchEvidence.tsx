@@ -3,7 +3,53 @@
 import { schedulingWaitReport, type AgentDecision, type AgentRun, type SchedulingEvidence } from "@/lib/experimentAgent";
 import { evidenceLabels } from "@/lib/experiments/evidence";
 import { experimentRunComparison } from "@/lib/experiments/runComparison";
+import { evidencePositionToken, type RunEvidenceReference } from "@/lib/experiments/evidencePosition";
+import { type EvidenceFinding, verifyRunEvidence } from "@/lib/experiments/runEvidence";
 import { LazyTutorReply } from "./LazyTutorReply";
+
+type EvidenceLinksList = EvidenceFinding["links"];
+
+export function EvidenceLinks({ links, openEvidence }: { links: EvidenceLinksList; openEvidence: (reference: RunEvidenceReference) => void }) {
+  if (!links.length) return null;
+  return <div className="wb-evidence-links">{links.map(({ label, reference }) => (
+    <button type="button" className="wb-button wb-link" key={`${reference.runId}:${evidencePositionToken(reference.position)}`}
+      title={`Run ${reference.runId} · Session ${reference.sessionId}`}
+      onClick={() => openEvidence(reference)}>查看证据<span> · {label}</span></button>
+  ))}</div>;
+}
+
+export function ConfidenceCheck({ result, openEvidence, waiting }: {
+  result: ReturnType<typeof verifyRunEvidence> | null;
+  openEvidence: (reference: RunEvidenceReference) => void;
+  waiting: boolean;
+}) {
+  const findings = (rows: EvidenceFinding[]) => <ul className="wb-evidence-findings">{rows.map(({ text, links }) => (
+    <li key={text}><p>{text}</p><EvidenceLinks links={links} openEvidence={openEvidence} /></li>
+  ))}</ul>;
+  return <section className="wb-confidence" aria-labelledby="wb-confidence-title">
+    <h3 id="wb-confidence-title">实验结论可信度</h3>
+    {!result || !result.facts.length ? <p className="wb-muted" role="status">{waiting ? "正在读取实测证据。" : "暂无可验证证据"}</p> : <>
+      <details className="wb-details" open>
+        <summary>实测事实</summary>
+        {findings(result.facts)}
+        <EvidenceLinks links={result.locations} openEvidence={openEvidence} />
+      </details>
+      <details className="wb-details" open>
+        <summary>证据支持的结论</summary>
+        {findings(result.supported)}
+      </details>
+      <details className="wb-details" open>
+        <summary>证据不足与适用范围</summary>
+        <p>{result.limitations.join(" ")}</p>
+        <p>{result.scope.join(" ")}</p>
+        {result.conditions.length > 0 && <details className="wb-evidence-conditions">
+          <summary>本轮参数</summary>
+          <dl className="wb-list">{result.conditions.map(({ label, value }) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl>
+        </details>}
+      </details>
+    </>}
+  </section>;
+}
 
 export function DecisionDetails({ decision, runs, report = false }: { decision: Pick<AgentDecision, "observation" | "evidence">; runs: AgentRun[]; report?: boolean }) {
   const scheduling = report && decision.evidence.some(({ metric }) => metric === "waiting") ? schedulingWaitReport(runs) : null;

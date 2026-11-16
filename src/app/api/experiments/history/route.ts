@@ -1,5 +1,6 @@
 import { maxQuestionLength } from "@/lib/experimentCreator";
 import { isWorkbenchFocus } from "@/lib/workbenchHistory";
+import { parseEvidencePosition } from "@/lib/experiments/evidencePosition";
 import { containsSavedAIKey } from "@/lib/server/aiCredentialSession";
 import { createWorkflowDraft, getWorkbenchHistory, saveWorkbenchView } from "@/lib/server/experimentRecords";
 
@@ -39,14 +40,15 @@ export async function PUT(request: Request) {
   const body = await request.json().catch(() => null);
   if (!isWorkbenchFocus(body?.focus)
     || (body.runId !== undefined && typeof body.runId !== "string")
+    || (body.evidence !== undefined && (body.focus !== "run" || !body.runId || !parseEvidencePosition(body.evidence)))
     || (body.hypothesis !== undefined && (typeof body.hypothesis !== "string" || body.hypothesis.length > 120))
     || (body.draftQuestion !== undefined && (typeof body.draftQuestion !== "string" || body.draftQuestion.length > maxQuestionLength))) {
     return json({ message: "会话内容有误。" }, 400);
   }
-  const { id, focus, runId, hypothesis, draftQuestion } = body;
+  const { id, focus, runId, evidence, hypothesis, draftQuestion } = body;
   if (containsKey(request, hypothesis ?? "") || containsKey(request, draftQuestion ?? "")) return json({ message: "请先移除草稿里的 Key。" }, 400);
   try {
-    const saved = await saveWorkbenchView(id, { focus, runId, hypothesis, draftQuestion });
+    const saved = await saveWorkbenchView(id, { focus, runId, evidence, hypothesis, draftQuestion });
     if (saved === "cookie") return json({ message: "无法保存。请允许本站 Cookie。" }, 401);
     if (saved === "missing") return json({ message: "找不到这项研究。" }, 404);
     return json({ saved: true });

@@ -5,15 +5,17 @@ import Link from "next/link";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { AgentCall, AgentRun, AgentTask, AgentTurn } from "@/lib/experimentAgent";
 import { creatorObservations } from "@/lib/creatorCapabilities";
-import { getExperimentEngine, type ExperimentResults } from "@/lib/experimentEngines";
+import { getExperimentEngine } from "@/lib/experimentEngines";
 import { evidenceLabels } from "@/lib/experiments/evidence";
+import { parseEvidencePosition, type RunEvidenceReference } from "@/lib/experiments/evidencePosition";
 import { experimentReport } from "@/lib/experiments/report";
+import { adaptEvidenceRun, citedRunEvidence, precedingEvidenceRound, referenceFor, resolveEvidence, verifyRunEvidence, type EvidenceRunData } from "@/lib/experiments/runEvidence";
 import { parameterLabels } from "@/lib/experiments/runComparison";
 import { runAnalysisLink } from "@/lib/navigation";
 import type { Diagnosis } from "@/lib/quickStart";
 import { WorkbenchIcon, type WorkbenchIconName } from "./WorkbenchIcon";
 import { DiagnosisSummary } from "./QuickStartDiagnosis";
-import { DecisionDetails, RoundDifferences, SchedulingDetails } from "./WorkbenchEvidence";
+import { ConfidenceCheck, DecisionDetails, EvidenceLinks, RoundDifferences, SchedulingDetails } from "./WorkbenchEvidence";
 
 const Replay = dynamic(() => import("./WorkbenchReplay").then((module) => module.WorkbenchReplay), {
   loading: () => <p role="status">正在载入播放器。</p>,
@@ -218,7 +220,7 @@ export function PlanStage({ task, savedPlan, lastRun, hasResearch, blocked, mode
   </section>;
 }
 
-export type RunDetails = { results: ExperimentResults } | null | undefined;
+export type RunDetails = EvidenceRunData | null | undefined;
 
 export function RoundPicker({ runs, run, select }: { runs: AgentRun[]; run?: AgentRun; select: (id: string) => void }) {
   if (runs.length < 2) return null;
@@ -237,7 +239,7 @@ const pairedRunMetrics: Partial<Record<AgentRun["tool"], { columns: [string, str
   pathfinding: { columns: ["Dijkstra", "A*"], metrics: ["visited", "pathLength", "elapsedMs"] },
 };
 
-function RunMetrics({ run }: { run: AgentRun }) {
+function RunMetrics({ run, highlight }: { run: AgentRun; highlight?: string }) {
   const group = pairedRunMetrics[run.tool];
   const metrics = Object.entries(run.metrics);
   const pairs = group ? metrics.flatMap(([metric, value]) => {
@@ -252,23 +254,38 @@ function RunMetrics({ run }: { run: AgentRun }) {
   return <div className="wb-run-metric-data">
     {group && pairs.length > 0 && <table className="wb-run-comparison" aria-label="本轮算法对比">
       <thead><tr><th scope="col">指标</th>{group.columns.map((name) => <th key={name} scope="col">{name}</th>)}</tr></thead>
-      <tbody>{pairs.map(({ metric, label, left, right }) => <tr key={metric}>
+      <tbody>{pairs.map(({ metric, label, left, right }) => <tr key={metric} data-evidence-target={`metric:${metric}`}
+        data-evidence-highlight={highlight === metric || undefined} tabIndex={highlight === metric ? -1 : undefined}>
         <th scope="row">{label}</th><td>{left}</td><td>{right}</td>
       </tr>)}</tbody>
     </table>}
-    {remaining.length > 0 && <dl className="wb-metrics">{remaining.map(([metric, value]) => <div key={metric}>
+    {remaining.length > 0 && <dl className="wb-metrics">{remaining.map(([metric, value]) => <div key={metric} data-evidence-target={`metric:${metric}`}
+      data-evidence-highlight={highlight === metric || undefined} tabIndex={highlight === metric ? -1 : undefined}>
       <dt>{evidenceLabels[metric]}</dt><dd>{value}</dd>
     </div>)}</dl>}
   </div>;
 }
 
-export function RunStage({ run, runs, details, number, selectRound, retry, showAnalysis }: {
+export function RunStage({ run, runs, details, number, researchId, evidence, selectRound, retry, showAnalysis }: {
   run: AgentRun; runs: AgentRun[]; details: RunDetails; number: number; selectRound: (id: string) => void;
-  retry: () => void; showAnalysis: () => void;
+  researchId?: string; evidence?: string; retry: () => void; showAnalysis: () => void;
 }) {
   const engine = getExperimentEngine(run.tool, run.version);
   const metrics = useRef<HTMLElement>(null);
-  return <div className="wb-run" id={`agent-run-${run.id}`}>
+  const stage = useRef<HTMLDivElement>(null);
+  const position = parseEvidencePosition(evidence);
+  const data = researchId ? adaptEvidenceRun(researchId, run, details) : null;
+  const target = data && position ? resolveEvidence(data, referenceFor(data, position)) : null;
+  const token = target?.token;
+  const playbackTarget = token && position?.kind !== "metric" ? token : undefined;
+  useEffect(() => {
+    if (!token) return;
+    const element = Array.from(stage.current?.querySelectorAll<HTMLElement>("[data-evidence-target]") ?? [])
+      .find((node) => node.dataset.evidenceTarget === token);
+    element?.focus({ preventScroll: true });
+    element?.scrollIntoView({ block: "nearest", behavior: "instant" });
+  }, [run.id, token]);
+  return <div className="wb-run" id={`agent-run-${run.id}`} ref={stage}>
     <header className="wb-panel-head wb-run-title">
       <div>
         {runs.length < 2 && <p className="wb-field-name">第 {number} 轮 · 实测</p>}
@@ -282,19 +299,25 @@ export function RunStage({ run, runs, details, number, selectRound, retry, showA
         }}>实测指标 <WorkbenchIcon icon="chevron-down" width={15} /></button>
       </div>
     </header>
+    {evidence && <p className={target ? "wb-evidence-status" : "wb-muted"} role="status">
+      {target ? `第 ${number} 轮 · ${target.label}` : details === undefined && position ? "正在定位证据。" : "找不到这条证据。"}
+    </p>}
     <div className="wb-run-grid">
-      <section className="wb-run-playback" aria-labelledby="wb-run-playback-title">
+      <section className="wb-run-playback" aria-labelledby="wb-run-playback-title" data-evidence-target={playbackTarget}
+        data-evidence-highlight={!!playbackTarget || undefined} data-evidence-position={position?.kind === "result" && target ? position.key : undefined}
+        tabIndex={playbackTarget ? -1 : undefined}>
         <h3 className="sr-only" id="wb-run-playback-title">运行回放</h3>
         <div className="wb-replay">
-          {details ? <Replay key={run.id} run={run} results={details.results} />
-            : details === null ? <p role="alert">回放加载失败。 <button className="wb-button" type="button" onClick={retry}>重试</button></p>
+          {data ? <Replay key={`${run.id}:${playbackTarget ?? ""}`} run={{ ...run, config: data.data.config }} results={data.data.results} evidenceStep={target?.replayStep} />
+            : details !== undefined ? <p role="alert">回放加载失败。 <button className="wb-button" type="button" onClick={retry}>重试</button></p>
             : <p role="status">正在读取运行记录。</p>}
         </div>
         <p className="wb-panel-copy wb-muted">AI 关键帧讲解尚未开放。</p>
       </section>
       <section className="wb-run-summary" ref={metrics} tabIndex={-1} aria-labelledby="wb-run-metrics-title">
         <h3 id="wb-run-metrics-title">实测指标</h3>
-        <RunMetrics key={run.id} run={run} />
+        <RunMetrics key={run.id} run={data ? { ...run, metrics: data.metrics } : run}
+          highlight={token && position?.kind === "metric" ? position.key : undefined} />
         <div className="wb-run-links">
           <button type="button" className="wb-button" onClick={showAnalysis}>查看诊断 <WorkbenchIcon icon="arrow-right" width={16} /></button>
           <Link className="wb-button wb-link" href={runAnalysisLink(run.id)}>打开详情 <WorkbenchIcon icon="arrow-up-right" width={15} /></Link>
@@ -304,8 +327,10 @@ export function RunStage({ run, runs, details, number, selectRound, retry, showA
   </div>;
 }
 
-export function AnalysisStage({ run, runs, details, diagnosis, task, diagnosing, diagnosisError, blocked, modelBlocked, canDiagnose, canAdopt, diagnose, stopDiagnosis, discuss, adopt, retry }: {
+export function AnalysisStage({ run, runs, details, diagnosis, task, researchId, runDetails, evidenceError, showEvidence, diagnosing, diagnosisError, blocked, modelBlocked, canDiagnose, canAdopt, diagnose, stopDiagnosis, discuss, adopt, retry }: {
   run: AgentRun; runs: AgentRun[]; details: RunDetails; diagnosis?: Diagnosis; task: AgentTask | null; diagnosing: boolean;
+  researchId?: string; runDetails: Record<string, RunDetails>; evidenceError: string;
+  showEvidence: (reference: RunEvidenceReference) => void;
   diagnosisError: string; blocked: boolean; modelBlocked: boolean; canDiagnose: boolean; canAdopt: boolean; diagnose: () => void; stopDiagnosis: () => void;
   discuss: (message: string) => void; adopt: (message: string) => void; retry: () => void;
 }) {
@@ -316,8 +341,15 @@ export function AnalysisStage({ run, runs, details, diagnosis, task, diagnosing,
   const finalDecision = task?.phase === "finished" ? task.decisions.at(-1) : undefined;
   const final = finalDecision?.evidence.some(({ from, to }) => from === number || to === number) ? finalDecision : undefined;
   const hypothesis = proposalHypothesis(task, run);
-  const report = details ? experimentReport(run.config, details.results) : undefined;
-  const suggestion = diagnosis?.suggestion ?? report?.suggestion;
+  const evidenceRuns = runs.map((round) => researchId ? adaptEvidenceRun(researchId, round, runDetails[round.id]) : null);
+  const current = evidenceRuns[number - 1];
+  const firstRound = task?.dialogue?.focus?.firstRun ?? 0;
+  const previous = precedingEvidenceRound(runs, number - 1, firstRound);
+  const previousEvidence = previous ? evidenceRuns[runs.indexOf(previous)] : null;
+  const verifiedRounds = runs.map((round, index) => ({ ...round, metrics: evidenceRuns[index]?.metrics ?? {} }));
+  const result = current ? verifyRunEvidence(current, previousEvidence, diagnosis?.evidence) : null;
+  const report = current ? experimentReport(current.data.config, current.data.results) : undefined;
+  const suggestion = current ? diagnosis?.suggestion ?? report?.suggestion : undefined;
   const compareHypothesis = `用第 ${number} 轮的实测检验我当时的猜想。`;
   return <div className="wb-content-stack wb-analysis">
     <section className="wb-panel wb-analysis-report">
@@ -327,19 +359,29 @@ export function AnalysisStage({ run, runs, details, diagnosis, task, diagnosing,
       <div className="wb-panel-body">
         {report && <div className="wb-report" key={`report-${run.id}`}><strong>{report.conclusion}</strong><p>{report.explanation}</p></div>}
         {details === undefined && !diagnosis && <p role="status">正在读取运行记录。</p>}
-        {details === null && <p role="alert">读取结果失败。 <button className="wb-button" type="button" onClick={retry}>重试</button></p>}
-        {explanation && <details className="wb-details" open>
+        {details !== undefined && !current && <p role="alert">读取结果失败。 <button className="wb-button" type="button" onClick={retry}>重试</button></p>}
+        <ConfidenceCheck result={result} openEvidence={showEvidence} waiting={details === undefined} />
+        {evidenceError && <p className="wb-alert" role="alert">{evidenceError}</p>}
+        {current && explanation && <details className="wb-details" open>
           <summary>Agent 实测解读</summary>
-          <DecisionDetails decision={{ observation: explanation.reply ?? "", evidence: explanation.evidence ?? [] }} runs={runs} />
+          <p className="wb-muted">AI 解读。请对照实测证据。</p>
+          <DecisionDetails decision={{ observation: explanation.reply ?? "", evidence: explanation.evidence ?? [] }} runs={verifiedRounds} />
           {explanation.scheduling && <SchedulingDetails evidence={explanation.scheduling} />}
+          <EvidenceLinks links={citedRunEvidence(explanation.evidence ?? [], evidenceRuns)} openEvidence={showEvidence} />
         </details>}
-        {final && <details className="wb-details" open><summary>Agent 任务报告</summary><DecisionDetails decision={final} runs={runs} report /></details>}
-        {diagnosis && <details className="wb-details wb-diagnosis-result" key={`diagnosis-${run.id}`} open><summary>本轮 AI 诊断</summary><DiagnosisSummary diagnosis={diagnosis} evidence={run.metrics} /></details>}
+        {current && final && <details className="wb-details" open><summary>Agent 任务报告</summary>
+          <DecisionDetails decision={final} runs={verifiedRounds} report />
+          <EvidenceLinks links={citedRunEvidence(final.evidence, evidenceRuns)} openEvidence={showEvidence} />
+        </details>}
+        {current && diagnosis && <details className="wb-details wb-diagnosis-result" key={`diagnosis-${run.id}`} open>
+          <summary>本轮 AI 诊断</summary><DiagnosisSummary diagnosis={diagnosis} evidence={current.metrics} />
+          <EvidenceLinks links={citedRunEvidence(diagnosis.evidence.map((metric) => ({ from: number, to: number, metric })), evidenceRuns)} openEvidence={showEvidence} />
+        </details>}
         {diagnosisError && <p className="wb-alert" role="alert">{diagnosisError}</p>}
       </div>
       <footer className="wb-panel-foot">
         {diagnosing ? <button type="button" className="wb-button" onClick={stopDiagnosis}>停止诊断</button>
-          : !diagnosis && <button type="button" className="wb-button" onClick={diagnose} disabled={modelBlocked || !canDiagnose}>生成 AI 诊断</button>}
+          : !diagnosis && <button type="button" className="wb-button" onClick={diagnose} disabled={modelBlocked || !canDiagnose || !current}>生成 AI 诊断</button>}
         <button type="button" className="wb-button" disabled={blocked} onClick={() => discuss(`请分析第 ${number} 轮的实测结果。`)}>问 Agent</button>
       </footer>
     </section>
@@ -349,7 +391,8 @@ export function AnalysisStage({ run, runs, details, diagnosis, task, diagnosing,
         {hypothesis ? <div className="wb-hypothesis-result"><p>{hypothesis}</p>
           <button type="button" className="wb-button" disabled={blocked} onClick={() => discuss(compareHypothesis)}>用实测检验猜想</button>
         </div> : <p className="wb-muted">本轮未记录猜想。</p>}
-        <RoundDifferences run={run} rounds={runs} firstRun={task?.dialogue?.focus?.firstRun ?? 0} />
+        {current ? <RoundDifferences run={verifiedRounds[number - 1]} rounds={verifiedRounds} firstRun={firstRound} />
+          : <p className="wb-muted">暂无可验证证据</p>}
       </div>
     </section>
     <section className="wb-panel">

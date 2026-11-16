@@ -55,7 +55,7 @@ export function CurriculumReplay({ lab, results, description }: { lab: Lab; resu
   const previousStep = useRef(0);
   useEffect(() => {
     if (table.current && replay.step === 0) table.current.scrollTop = 0;
-    if (table.current && replay.step === previousStep.current + 1) table.current.scrollTop = table.current.scrollHeight;
+    if (table.current && replay.step > previousStep.current) table.current.scrollTop = table.current.scrollHeight;
     previousStep.current = replay.step;
   }, [replay.step]);
   return <div className="simulation-view">

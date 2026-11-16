@@ -16,6 +16,8 @@ import { WorkbenchIcon } from "./WorkbenchIcon";
 import { WorkbenchActivity, agentPhases } from "./WorkbenchActivity";
 import { useWorkbenchView, WorkbenchHistory, workbenchHistoryRequest } from "./WorkbenchHistory";
 import { AnalysisStage, PlanStage, ResearchStage, RoundPicker, RunStage, StageEmpty, proposalHypothesis, type Plan, type RunDetails } from "./WorkbenchStages";
+import { adaptEvidenceRun, resolveEvidence } from "@/lib/experiments/runEvidence";
+import { evidencePositionToken, parseEvidencePosition, type RunEvidenceReference } from "@/lib/experiments/evidencePosition";
 
 const steps = Object.keys(workflowSteps) as WorkflowStep[];
 const stageDetails = {
@@ -30,7 +32,7 @@ type ActiveRequest = { controller: AbortController; operationId: string; taskId?
 
 const statusReadError = "读取状态失败。请刷新状态。";
 
-export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, initialGuess, reference, referenceRun, savedPlan, fresh, selectedRunId, diagnoses = {}, restoreError }: {
+export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, initialGuess, reference, referenceRun, savedPlan, fresh, selectedRunId, initialEvidence, diagnoses = {}, restoreError }: {
   initial: AgentTask | null;
   initialQuestion?: string;
   initialFocus?: WorkbenchFocus;
@@ -41,6 +43,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
   savedPlan?: Plan;
   fresh?: boolean;
   selectedRunId?: string;
+  initialEvidence?: string;
   diagnoses?: Record<string, Diagnosis>;
 }) {
   const router = useRouter();
@@ -50,6 +53,8 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
   const [message, setMessage] = useState(initialQuestion);
   const [guess, setGuess] = useState(initialGuess);
   const [selectedRun, setSelectedRun] = useState(selectedRunId);
+  const [evidence, setEvidence] = useState(initialEvidence);
+  const [evidenceError, setEvidenceError] = useState("");
   const [collapsed, setCollapsed] = useState(false);
   const [drawer, setDrawer] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -128,7 +133,13 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
       || !!task?.dialogue?.turns.some((turn) => turn.action === "explain" && turn.evidence.some(({ from, to }) => from === runs.length || to === runs.length))),
   };
   const researchId = task?.id ?? reference?.sessionId;
-  const storage = useWorkbenchView(researchId, { focus, runId: explicitRun?.id, hypothesis: guess,
+  const position = focus === "run" ? parseEvidencePosition(evidence) : undefined;
+  const evidenceData = position && explicitRun ? runDetails[explicitRun.id] : null;
+  const currentEvidence = researchId && position && explicitRun && evidenceData
+    ? resolveEvidence(adaptEvidenceRun(researchId, explicitRun, evidenceData),
+      { researchId, sessionId: explicitRun.sessionId, runId: explicitRun.id, position }) : null;
+  const storage = useWorkbenchView(evidenceData === undefined ? undefined : researchId, { focus, runId: explicitRun?.id,
+    evidence: currentEvidence?.token, hypothesis: guess,
     draftQuestion: task || referenceRun || savedPlan ? undefined : message });
 
   async function leave(href: string) {
@@ -160,24 +171,27 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
     requestAnimationFrame(() => historyToggle.current?.focus());
   }
 
-  function workbenchHref(nextFocus: WorkbenchFocus, id?: string, picked?: AgentRun) {
+  function workbenchHref(nextFocus: WorkbenchFocus, id?: string, picked?: AgentRun, position?: string) {
     return agentWorkbenchLink({
       agentId: id, focus: nextFocus, fresh: !id && fresh,
       ...(!id && reference),
       ...(picked && { sessionId: picked.sessionId, runId: picked.id }),
+      evidence: position,
     });
   }
-  const settingsHref = workflowAISettingsRoute(workbenchHref(focus, task?.id, explicitRun));
+  const settingsHref = workflowAISettingsRoute(workbenchHref(focus, task?.id, explicitRun, evidence));
 
-  function show(nextFocus: WorkbenchFocus, pickedId = view.current.selectedRun, current = task, manual = true) {
+  function show(nextFocus: WorkbenchFocus, pickedId = view.current.selectedRun, current = task, manual = true, position?: string) {
     if (manual) navigation.current++;
     if (nextFocus !== view.current.focus || pickedId !== view.current.selectedRun) canvas.current?.scrollTo({ top: 0, behavior: "instant" });
     view.current = { focus: nextFocus, selectedRun: pickedId };
     setFocus(nextFocus);
     setSelectedRun(pickedId);
+    setEvidence(position);
+    setEvidenceError("");
     const picked = (current?.runs ?? runs).find(({ id }) => id === pickedId);
     // Keep the router's current state. This view already owns the navigation change.
-    window.history.replaceState(window.history.state, "", workbenchHref(nextFocus, current?.id, picked));
+    window.history.replaceState(window.history.state, "", workbenchHref(nextFocus, current?.id, picked, position));
   }
 
   function prefill(text: string) {
@@ -386,19 +400,32 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
 
   const visibleRunId = focus === "run" || focus === "analysis" ? run?.id : undefined;
   const details = visibleRunId ? runDetails[visibleRunId] : undefined;
+  const detailIds = focus === "analysis" && run ? runs.map(({ id }) => id).join(",") : visibleRunId ?? "";
   useEffect(() => {
-    if (!visibleRunId || details !== undefined) return;
+    const missing = detailIds ? detailIds.split(",").filter((id) => runDetails[id] === undefined) : [];
+    if (!missing.length) return;
     const controller = new AbortController();
     const query = taskId ? `?${new URLSearchParams({ agentId: taskId })}` : "";
-    const path = `/api/experiments/runs/${encodeURIComponent(visibleRunId)}/replay${query}`;
-    void fetch(path, { cache: "no-store", signal: controller.signal })
-      .then((response) => response.ok ? response.json() : null)
-      .catch(() => null)
-      .then((payload: RunDetails) => {
-        if (!controller.signal.aborted) setRunDetails((current) => ({ ...current, [visibleRunId]: payload }));
-      });
+    void Promise.all(missing.map(async (id) => {
+      const path = `/api/experiments/runs/${encodeURIComponent(id)}/replay${query}`;
+      const payload: RunDetails = await fetch(path, { cache: "no-store", signal: controller.signal })
+        .then((response) => response.ok ? response.json() : null).catch(() => null);
+      return [id, payload] as const;
+    })).then((pairs) => {
+      if (!controller.signal.aborted) setRunDetails((current) => ({ ...current, ...Object.fromEntries(pairs) }));
+    });
     return () => controller.abort();
-  }, [details, taskId, visibleRunId]);
+  }, [detailIds, runDetails, taskId]);
+
+  function showEvidence(reference: RunEvidenceReference) {
+    const target = runs.find(({ id, sessionId }) => id === reference.runId && sessionId === reference.sessionId);
+    const adapted = researchId && target ? adaptEvidenceRun(researchId, target, runDetails[target.id]) : null;
+    if (!target || !resolveEvidence(adapted, reference)) {
+      setEvidenceError("找不到这条证据。");
+      return;
+    }
+    show("run", target.id, task, true, evidencePositionToken(reference.position));
+  }
 
   useEffect(() => () => {
     active.current?.controller.abort();
@@ -552,17 +579,19 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
               retry={retryRun} approve={() => void send("approve")} edit={() => prefill("把实验参数改为：")} importPlan={() => void send("import")}
               showRun={() => show("run", latest?.id)} ask={hasResearch ? planResearch : promptForQuestion} />}
             {focus === "run" && (run ? <RunStage run={run} runs={runs} details={details} number={number} selectRound={selectRound}
+              researchId={researchId} evidence={evidence}
               retry={retryDetails} showAnalysis={() => show("analysis")} />
               : <StageEmpty icon="chart-no-axes-column" title={runningNow ? "正在运行实验" : "这里还没有实测"}
                 description={runningNow ? "结果就绪后会显示在这里。" : activePlan ? "先确认方案，再运行。" : "先设计方案，再确认运行。"}>
                 <button type="button" className="wb-button" onClick={() => show("plan")}>查看实验方案 <WorkbenchIcon icon="arrow-right" width={16} /></button>
               </StageEmpty>)}
             {focus === "analysis" && (run ? <AnalysisStage run={run} runs={runs} task={task} details={details} diagnosis={reports[run.id]}
+              researchId={researchId} runDetails={runDetails} showEvidence={showEvidence} evidenceError={evidenceError}
               diagnosing={diagnosing === run.id} diagnosisError={diagnosisError?.id === run.id ? diagnosisError.message : ""}
               blocked={blocked} modelBlocked={modelBlocked} canDiagnose={!!connection} canAdopt={run.id === latest?.id && !activePlan}
               retry={retryDetails} diagnose={() => void diagnose(run.id)} stopDiagnosis={() => diagnosisRequest.current?.abort()}
               discuss={prefill} adopt={(text) => void send("message", text)} />
-              : <StageEmpty icon="scan-search" title="还没有可诊断的结果" description="跑完一轮，再来看证据。">
+              : <StageEmpty icon="scan-search" title="暂无可验证证据" description="跑完一轮，再来看证据。">
                 <button type="button" className="wb-button" onClick={() => show("run")}>查看运行区 <WorkbenchIcon icon="arrow-right" width={16} /></button>
               </StageEmpty>)}
           </div>
