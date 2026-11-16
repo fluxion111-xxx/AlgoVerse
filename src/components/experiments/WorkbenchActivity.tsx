@@ -47,7 +47,7 @@ export function WorkbenchActivity({ task, status, error, blocked, modelBlocked, 
   const decisions = task?.decisions.filter(({ calls }) => calls?.length && calls.every(({ id }) => !linkedCalls.has(id))) ?? [];
   const importedCalls = task?.pending.filter(({ id }) => !task.decisions.some(({ calls }) => calls?.some((call) => call.id === id))) ?? [];
   return <div className="wb-activity-body">
-    {status && <p className="wb-live" role="status"><WorkbenchIcon icon={inFlight ? "loader-circle" : "circle-dot"} width={15} />{status}</p>}
+    {status && <p className="wb-live" data-live={inFlight} role="status"><i aria-hidden="true" />{status}</p>}
     {error && <div className="wb-alert">{error}</div>}
     {recover && <button type="button" className="wb-button" disabled={blocked} onClick={recover}>刷新状态</button>}
     {retryAnalysis && <button type="button" className="wb-button" disabled={modelBlocked} onClick={retryAnalysis}>继续分析</button>}

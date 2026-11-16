@@ -431,7 +431,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, re
             aria-disabled={blocked || undefined} onClick={(event) => { if (blocked) event.preventDefault(); }}><WorkbenchIcon icon="plus" width={16} /><span>新建</span></Link>}
         </div>
       </div>
-      <nav className="wb-steps" aria-label="实验阶段" inert={drawer}>
+      <nav className="wb-steps" data-focus={focus} aria-label="实验阶段" inert={drawer}>
         {steps.map((step, index) => {
           const value = workbenchFocus[step];
           return <button key={step} type="button" aria-current={focus === value ? "step" : undefined} data-complete={completed[value]}
@@ -490,7 +490,8 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, re
           </header>
           <div className="wb-activity-content" id="wb-activity-content">
             <WorkbenchActivity task={task} status={diagnosing ? "AI 正在诊断" : activityStatus} error={visibleError} blocked={blocked} modelBlocked={modelBlocked}
-              inFlight={blocked || !!diagnosing} retryReply={() => void send("retry-message")} retryAnalysis={canContinue ? () => void send("decide") : undefined}
+              inFlight={busy === "deciding" || busy === "running" || dialogueBusy || workBusy || !!diagnosing}
+              retryReply={() => void send("retry-message")} retryAnalysis={canContinue ? () => void send("decide") : undefined}
               recover={task && error ? () => void send("status") : undefined} openRun={openRun} />
           </div>
         </aside>

@@ -62,14 +62,13 @@ export function ResearchStage({ question, target, hypothesis, onHypothesis, bloc
   question: string; target: string; hypothesis: string; onHypothesis: (value: string) => void;
   blocked: boolean; prefill: (text: string) => void; submit: () => void; canSubmit: boolean; hasPlan: boolean; showPlan: () => void;
 }) {
-  return <>
-    <div className="wb-research">
-      <section className="wb-research-question">
-        <span className="wb-section-icon"><WorkbenchIcon icon="notebook-pen" width={25} /></span>
+  return <div className="wb-research">
+    <div className="wb-research-main">
+      <section className="wb-research-question" aria-labelledby="wb-question-title">
         <p className="wb-field-name">研究问题</p>
-        <h2>{question || "你想验证什么？"}</h2>
+        <h2 id="wb-question-title">{question || "你想验证什么？"}</h2>
         {target && target !== question ? <div className="wb-research-target"><span>研究目标</span><p>{target}</p></div>
-          : !question && <p>从一个问题开始。</p>}
+          : !question && <p>在下方输入问题，或选个示例。</p>}
         <div className="wb-actions">
           {hasPlan && <button type="button" className="wb-button wb-primary" onClick={showPlan}>
             查看方案 <WorkbenchIcon icon="arrow-right" width={16} />
@@ -80,21 +79,21 @@ export function ResearchStage({ question, target, hypothesis, onHypothesis, bloc
           </button>}
         </div>
       </section>
-      <section className="wb-hypothesis">
-        <label htmlFor="wb-hypothesis"><WorkbenchIcon icon="lightbulb" width={17} /> 写个猜想 <small>可选</small></label>
-        <textarea id="wb-hypothesis" placeholder="你猜会发生什么？为什么？" value={hypothesis}
-          onChange={(event) => onHypothesis(event.target.value)} rows={4} maxLength={120} />
-        <p>规划时，带上你的猜想。</p>
-      </section>
+      {!question && <section className="wb-examples" aria-labelledby="wb-examples-title">
+        <h2 id="wb-examples-title">选个问题试试</h2>
+        {researchExamples.map(({ title, prompt, icon }) => <button key={title} type="button" disabled={blocked} onClick={() => prefill(prompt)}>
+          <WorkbenchIcon icon={icon} width={17} /><span>{title}</span>
+          <WorkbenchIcon icon="arrow-up-right" width={15} />
+        </button>)}
+      </section>}
     </div>
-    {!question && <section className="wb-examples" aria-labelledby="wb-examples-title">
-      <h2 id="wb-examples-title">选个问题试试</h2>
-      {researchExamples.map(({ title, prompt, icon }) => <button key={title} type="button" disabled={blocked} onClick={() => prefill(prompt)}>
-        <WorkbenchIcon icon={icon} width={17} /><span>{title}</span>
-        <WorkbenchIcon icon="arrow-up-right" width={15} />
-      </button>)}
-    </section>}
-  </>;
+    <section className="wb-hypothesis">
+      <label htmlFor="wb-hypothesis"><WorkbenchIcon icon="lightbulb" width={17} /> 写个猜想 <small>可选</small></label>
+      <textarea id="wb-hypothesis" aria-describedby="wb-hypothesis-hint" placeholder="你猜会发生什么？" value={hypothesis}
+        onChange={(event) => onHypothesis(event.target.value)} rows={4} maxLength={120} />
+      <p id="wb-hypothesis-hint">规划时，带上你的猜想。</p>
+    </section>
+  </div>;
 }
 
 export type Plan = Pick<AgentCall, "tool" | "version" | "config">;
@@ -180,27 +179,28 @@ export function RunStage({ run, details, number, retry, showAnalysis }: {
   run: AgentRun; details: RunDetails; number: number; retry: () => void; showAnalysis: () => void;
 }) {
   const engine = getExperimentEngine(run.tool, run.version);
-  return <div className="wb-content-stack" id={`agent-run-${run.id}`}>
-    <section className="wb-panel">
-      <header className="wb-panel-head">
-        <div><p className="wb-field-name">第 {number} 轮 · 实测</p><h2>{engine?.creator.title ?? run.tool}</h2></div>
-        <button type="button" className="wb-button" onClick={showAnalysis}>查看诊断 <WorkbenchIcon icon="arrow-right" width={16} /></button>
-      </header>
-      <dl className="wb-metrics">{Object.entries(run.metrics).map(([metric, value]) => <div key={metric}>
-        <dt>{evidenceLabels[metric]}</dt><dd>{value}</dd>
-      </div>)}</dl>
-      {run.tool === "sorting" && <p className="wb-panel-copy wb-muted">指标顺序 · 冒泡 / 快排</p>}
-    </section>
-    <section className="wb-panel">
-      <header className="wb-panel-head"><h2>运行回放</h2>
+  return <div className="wb-content-stack wb-run" id={`agent-run-${run.id}`}>
+    <header className="wb-panel-head wb-run-title">
+      <div><p className="wb-field-name">第 {number} 轮 · 实测</p><h2>{engine?.creator.title ?? run.tool}</h2></div>
+      <div className="wb-run-links">
         <Link className="wb-button wb-link" href={runAnalysisLink(run.id)}>打开详情 <WorkbenchIcon icon="arrow-up-right" width={15} /></Link>
-      </header>
+        <button type="button" className="wb-button" onClick={showAnalysis}>查看诊断 <WorkbenchIcon icon="arrow-right" width={16} /></button>
+      </div>
+    </header>
+    <section className="wb-panel" aria-labelledby="wb-run-playback-title">
+      <h3 className="sr-only" id="wb-run-playback-title">运行回放</h3>
       <div className="wb-replay">
         {details ? <Replay run={run} results={details.results} />
           : details === null ? <p role="alert">回放加载失败。 <button className="wb-button" type="button" onClick={retry}>重试</button></p>
           : <p role="status">正在读取运行记录。</p>}
       </div>
       <p className="wb-panel-copy wb-muted">AI 关键帧讲解尚未开放。</p>
+    </section>
+    <section className="wb-panel wb-run-summary" aria-label="实测指标">
+      <dl className="wb-metrics">{Object.entries(run.metrics).map(([metric, value]) => <div key={metric}>
+        <dt>{evidenceLabels[metric]}</dt><dd>{value}</dd>
+      </div>)}</dl>
+      {run.tool === "sorting" && <p className="wb-panel-copy wb-muted">指标顺序 · 冒泡 / 快排</p>}
     </section>
   </div>;
 }
@@ -220,13 +220,13 @@ export function AnalysisStage({ run, runs, details, diagnosis, task, diagnosing,
   const report = details ? experimentReport(run.config, details.results) : undefined;
   const suggestion = diagnosis?.suggestion ?? report?.suggestion;
   const compareHypothesis = `用第 ${number} 轮的实测检验我当时的猜想。`;
-  return <div className="wb-content-stack">
-    <section className="wb-panel">
+  return <div className="wb-content-stack wb-analysis">
+    <section className="wb-panel wb-analysis-report">
       <header className="wb-panel-head"><div><p className="wb-field-name">第 {number} 轮 · 证据</p><h2>结果诊断</h2></div>
         <Link className="wb-button wb-link" href={runAnalysisLink(run.id, true)}>打开详情 <WorkbenchIcon icon="arrow-up-right" width={15} /></Link>
       </header>
       <div className="wb-panel-body">
-        {report && <div className="wb-report"><strong>{report.conclusion}</strong><p>{report.explanation}</p></div>}
+        {report && <div className="wb-report" key={`report-${run.id}`}><strong>{report.conclusion}</strong><p>{report.explanation}</p></div>}
         {details === undefined && !diagnosis && <p role="status">正在读取运行记录。</p>}
         {details === null && <p role="alert">读取结果失败。 <button className="wb-button" type="button" onClick={retry}>重试</button></p>}
         {explanation && <details className="wb-details" open>
@@ -235,7 +235,7 @@ export function AnalysisStage({ run, runs, details, diagnosis, task, diagnosing,
           {explanation.scheduling && <SchedulingDetails evidence={explanation.scheduling} />}
         </details>}
         {final && <details className="wb-details" open><summary>Agent 任务报告</summary><DecisionDetails decision={final} runs={runs} report /></details>}
-        {diagnosis && <details className="wb-details" open><summary>本轮 AI 诊断</summary><DiagnosisSummary diagnosis={diagnosis} evidence={run.metrics} /></details>}
+        {diagnosis && <details className="wb-details wb-diagnosis-result" key={`diagnosis-${run.id}`} open><summary>本轮 AI 诊断</summary><DiagnosisSummary diagnosis={diagnosis} evidence={run.metrics} /></details>}
         {diagnosisError && <p className="wb-alert" role="alert">{diagnosisError}</p>}
       </div>
       <footer className="wb-panel-foot">
