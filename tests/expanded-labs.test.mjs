@@ -17,6 +17,153 @@ const { getCourse } = await import("../src/lib/courses.ts");
 const { getExperimentTopic, knowledgeTopicRoute } = await import("../src/lib/knowledge.ts");
 const { experimentEvidence, evidenceLabels } = await import("../src/lib/experiments/evidence.ts");
 
+test("lazy segment tree keeps nested and overlapping updates correct for a non-power-of-two length", () => {
+  const lab = getExperimentEngine("lazy-segment-tree");
+  const { steps, metrics } = lab.execute({ ...lab.preset(), lazySegmentValues: [2, -1, 4, 0, 7],
+    lazySegmentOperations: [[0, 0, 5, 2], [1, 1, 4, 0], [0, 2, 5, -3], [1, 1, 5, 0], [1, 0, 2, 0], [1, 2, 3, 0]] });
+  assert.deepEqual(steps.filter(([operation]) => operation === "求和").map((step) => step.slice(2, 4)), [[9, 9], [9, 9], [5, 5], [3, 3]]);
+  assert.ok(Number(metrics.lazySegmentPushes) > 0);
+});
+
+test("wait-for reachability detects self-cycles and counts upstream dependents only once", () => {
+  const lab = getExperimentEngine("wait-cycle");
+  const { metrics, steps } = lab.execute({ ...lab.preset(), waitGraphEdges: [[0, 0], [1, 2], [2, 1], [3, 2], [4, 3], [4, 3]] });
+  assert.deepEqual(metrics, { waitCycleCount: "3", waitCycleMembers: "0、1、2", waitCycleDependent: "2", waitCycleEdges: "5" });
+  assert.equal(steps[4][3], "受环牵连");
+  assert.equal(steps[5][3], "未发现环相关等待");
+});
+
+test("conditional GET revalidates only the cached entity tag and checks version consistency", () => {
+  const lab = getExperimentEngine("etag-request");
+  const config = { ...lab.preset(), etagServerVersions: [[1, 20], [2, 30], [1, 20], [1, 20]] };
+  const { metrics, steps } = lab.execute(config);
+  assert.deepEqual(steps.map((step) => step.slice(3, 5)), [[200, 20], [200, 30], [200, 20], [304, 0]]);
+  assert.equal(metrics.etagConditionalBytes, "70");
+  assert.equal(lab.execute({ ...config, etagServerVersions: [[1, 20], [1, 25]] }), null);
+});
+
+test("bounded output queue retains unsent bytes and never exceeds the configured high-water mark", () => {
+  const lab = getExperimentEngine("output-backpressure");
+  const { metrics, steps } = lab.execute({ ...lab.preset(), backpressureSchedule: [[5, 0], [2, 1]], backpressureCeiling: 3 });
+  assert.equal(metrics.backpressureLimitedPeak, "3");
+  assert.equal(metrics.backpressureLimitedSent, "1");
+  assert.equal(metrics.backpressureLimitedPending, "6");
+  assert.deepEqual(steps.at(-1), [2, 1, 6, 1, 2, 4]);
+});
+
+test("Promise aggregate observes the first rejection and keeps later completions visible", () => {
+  const lab = getExperimentEngine("promise-rejection");
+  const { metrics, steps } = lab.execute({ ...lab.preset(), promiseFinishTimes: [[4, 0], [2, 1], [2, 1], [1, 0]] });
+  assert.equal(metrics.promiseAggregateAt, "2");
+  assert.equal(metrics.promiseCanceled, "2");
+  assert.deepEqual(steps.map((step) => step.slice(0, 4)), [
+    [1, 4, "成功", "成功"], [2, 2, "拒绝", "拒绝"], [2, 3, "拒绝", "收到通知 · 取消"], [4, 1, "成功", "收到通知 · 取消"],
+  ]);
+});
+
+test("a watermark exactly on a window boundary closes only the preceding window", () => {
+  const lab = getExperimentEngine("watermark-windows");
+  const { steps, metrics } = lab.execute({ ...lab.preset(), watermarkAllowedLag: 3, watermarkEvents: [[8, 1], [4, 3], [5, 5]] });
+  assert.equal(metrics.watermarkFinalMark, "5");
+  assert.equal(metrics.watermarkTotal, "6");
+  assert.deepEqual(steps.slice(1).map((step) => step.slice(1, 5)), [
+    ["[0, 5)", 5, 5, "窗口已关 · 丢弃"], ["[5, 10)", 5, 5, "加入"],
+  ]);
+});
+
+test("top-p stops at an exact cutoff and samples reproducibly only from selected tokens", () => {
+  const lab = getExperimentEngine("top-p-draw");
+  const config = { ...lab.preset(), topPTokenWeights: [2, 2, 1], topPCutoffPct: 40, topPDrawTimes: 12 };
+  const first = lab.execute(config);
+  assert.equal(first.metrics.topPChosenIds, "1");
+  assert.equal(first.metrics.topPCoverage, "40");
+  assert.deepEqual(first.steps.filter(([phase]) => phase === "采样").map((step) => step[3]), Array(12).fill(1));
+  assert.deepEqual(lab.execute(config), first);
+});
+
+test("binary log loss reports bounded values for predictions at zero and one", () => {
+  const lab = getExperimentEngine("binary-confidence");
+  const { steps, metrics } = lab.execute({ ...lab.preset(), binaryConfidenceRows: [[100, 0], [0, 0]] });
+  assert.equal(metrics.binaryConfidenceErrors, "1");
+  assert.equal(metrics.binaryConfidenceMeanLoss, "4.6052");
+  assert.deepEqual(steps.map((step) => step.slice(4)), [[0, 9.2103], [1, 0]]);
+});
+
+test("stable merge preserves all equal-key records across an uneven final merge", () => {
+  const lab = getExperimentEngine("stable-merge");
+  const { metrics } = lab.execute({ ...lab.preset(), stableMergeKeys: [4, 4, 4, 4, 4] });
+  assert.equal(metrics.mergeStableIds, "1、2、3、4、5");
+  assert.equal(metrics.mergeStableReversed, "0");
+  assert.equal(metrics.mergeRightReversed, "10");
+});
+
+test("matrix-chain plans every split in a four-matrix chain", () => {
+  const lab = getExperimentEngine("matrix-chain");
+  const { metrics, steps } = lab.execute({ ...lab.preset(), chainDimensions: [5, 10, 3, 12, 5] });
+  assert.equal(metrics.chainCandidates, "10");
+  assert.equal(metrics.chainOptimalCost, "405");
+  assert.equal(metrics.chainLeftCost, "630");
+  assert.equal(metrics.chainParentheses, "((A1×A2)×(A3×A4))");
+  assert.equal(steps.filter(([range]) => range === "1–4").length, 3);
+});
+
+test("journal replay applies committed after-images twice without reviving an uncommitted update", () => {
+  const lab = getExperimentEngine("journal-replay");
+  const { metrics, steps } = lab.execute({ ...lab.preset(), journalBlockValues: [7], journalOperations: [[0, 3], [0, -1], [0, 20]] });
+  assert.equal(metrics.journalImageResult, "9");
+  assert.equal(metrics.journalDeltaResult, "11");
+  assert.deepEqual(steps.map((step) => step[3]), ["10", "9", "10", "9", "9"]);
+  assert.match(steps.at(-1)[2], /1 条未提交/);
+});
+
+test("CORS checks both headers in credentials mode and accepts a same-origin response without them", () => {
+  const lab = getExperimentEngine("cors-read");
+  const base = { ...lab.preset(), corsOriginRule: 1, corsCredentialsHeader: 0 };
+  assert.equal(lab.execute(base).metrics.corsReadable, "否");
+  assert.equal(lab.execute({ ...base, corsCredentialsHeader: 1 }).metrics.corsReadable, "是");
+  const same = lab.execute({ ...base, corsSourcePort: 443, corsTargetPort: 443, corsOriginRule: 0 });
+  assert.equal(same.metrics.corsReadable, "是");
+  assert.equal(same.steps[0][1], "https://lab.test → https://lab.test");
+});
+
+test("streamed UTF-8 preserves a four-byte character across single-byte reads", () => {
+  const lab = getExperimentEngine("utf8-stream");
+  const { metrics, steps } = lab.execute({ ...lab.preset(), textStreamSource: "🙂", textStreamChunkSize: 1 });
+  assert.equal(metrics.textStreamBytes, "4");
+  assert.equal(metrics.textStreamReplacement, "4");
+  assert.equal(metrics.textStreamMatched, "是");
+  assert.deepEqual(steps.map((step) => JSON.parse(step[3])), ["", "", "", "🙂"]);
+  assert.equal(lab.execute({ ...lab.preset(), textStreamSource: "\ud800" }), null);
+});
+
+test("merge join multiplies duplicates independently for each matching key", () => {
+  const lab = getExperimentEngine("merge-join");
+  const left = [4, 4, 2, 2, 2, 7];
+  const right = [2, 2, 4, 4, 4, 5, 8];
+  const { metrics, steps } = lab.execute({ ...lab.preset(), mergeJoinLeft: left, mergeJoinRight: right });
+  assert.equal(metrics.mergeJoinPairs, "12");
+  assert.deepEqual(steps.filter((step) => step[2] === "同键成组").map((step) => step.slice(-3)), [[3, 2, 6], [2, 3, 6]]);
+});
+
+test("convolution has no complete window if the kernel is wider than the padded input", () => {
+  const lab = getExperimentEngine("convolution-window");
+  const config = { ...lab.preset(), convolutionSamples: [2], convolutionPadding: 0 };
+  const blank = lab.execute(config);
+  assert.equal(blank.metrics.convolutionOutputSize, "0");
+  assert.equal(blank.metrics.convolutionOperations, "0");
+  assert.equal(blank.steps[0][0], "无输出");
+  const padded = lab.execute({ ...config, convolutionPadding: 1 });
+  assert.equal(padded.metrics.convolutionOutputSize, "1");
+  assert.deepEqual(padded.steps[0], [0, "[-1, 2)", "0、2、0", "0、0、0", 0]);
+});
+
+test("gradient clipping leaves a zero vector unchanged", () => {
+  const lab = getExperimentEngine("gradient-clip");
+  const { metrics, steps } = lab.execute({ ...lab.preset(), clipGradientVector: [0, 0, 0], clipGradientLimit: 1 });
+  assert.deepEqual(metrics, { clipGradientRawNorm: "0", clipGradientNorm: "0", clipGradientScale: "1", clipGradientChanged: "0" });
+  assert.deepEqual(steps[2], [3, 0, 1, 0]);
+});
+
 test("zero-one knapsack matches an exhaustive subset search even with an overweight item", () => {
   const lab = getExperimentEngine("zero-one-knapsack");
   const items = [[8, 60], [3, 4], [2, 5], [4, 8], [2, 2]];
@@ -445,8 +592,8 @@ test("expanded engines resolve through their catalog, knowledge links and diagno
     "deadlock-avoidance": "banker-safe-sequence", "tcp-congestion": "tcp-cwnd-rwnd",
     "dynamic-routing": "link-state-routing", "memory-allocation": "heap-fit-fragmentation", "transaction-concurrency": "mvcc-row-versions",
   };
-  assert.equal(new Set(registeredEngines.map(({ id }) => id)).size, 114);
-  assert.equal(new Set(registeredEngines.map(({ route }) => route)).size, 114);
+  assert.equal(new Set(registeredEngines.map(({ id }) => id)).size, 162);
+  assert.equal(new Set(registeredEngines.map(({ route }) => route)).size, 162);
   for (const [id, topic] of Object.entries(topics)) {
     const engine = getExperimentEngine(id, 1);
     assert.ok(getCourse(engine.domain).experiments.some(({ href }) => href === engine.route));

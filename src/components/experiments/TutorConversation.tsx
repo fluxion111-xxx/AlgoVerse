@@ -290,7 +290,7 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
           aria-controls="tutor-history" aria-expanded={historyOpen} onClick={() => { setPanelOpen(false); setHistoryOpen(true); }}>
           <CatalogIcon icon="lucide:panel-left" width={19} /><span className="sr-only">对话历史</span>
         </button>
-        <h1>AI 助教</h1>
+        <h1>阿洛</h1>
       </div>
       <div className="tutor-tools">
         <Link className="tutor-tool-link" href={settingsHref} aria-label="AI 服务设置" title="AI 服务设置">
@@ -329,27 +329,30 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
             <ol className="tutor-turns">{history.map((turn, index) => <li key={index} id={`tutor-turn-${index}`}>
               <div className="tutor-user-message"><span className="sr-only">你说</span><p className="tutor-question">{turn.message}</p></div>
               {(turn.reply !== undefined || turn.stopped) && <div className="tutor-assistant-message">
-                <p className="tutor-turn-label"><span className="tutor-avatar"><CatalogIcon icon="lucide:triangle" width={15} /></span>助教</p>
+                <p className="tutor-turn-label">阿洛</p>
                 {turn.reply !== undefined && <LazyTutorReply answer={turn.reply} codeBlocks={turn.tutor?.codeBlocks}
                   reveal={task?.revision === revealedRevision && index === history.length - 1} />}
-                {!!turn.tutor?.sources.length && <div className="tutor-sources">
-                  <strong>知识引用</strong>{turn.tutor.sources.map((source) => <ReferenceLink key={source.href} reference={source} />)}
-                </div>}
-                {turn.tutor?.recommendation && <ReferenceLink reference={turn.tutor.recommendation} />}
-                {turn.action === "run" && task && <NavigationLink className="tutor-reference-link" href={agentWorkbenchLink({ agentId: task.id })}>
-                  打开实验工作台 <CatalogIcon icon="lucide:arrow-up-right" width={14} />
-                </NavigationLink>}
+                {!!(turn.tutor?.sources.length || turn.tutor?.recommendation || (turn.action === "run" && task)) &&
+                  <div className="tutor-reply-actions">
+                    {!!turn.tutor?.sources.length && <div className="tutor-sources">
+                      <strong>知识引用</strong>{turn.tutor.sources.map((source) => <ReferenceLink key={source.href} reference={source} />)}
+                    </div>}
+                    {turn.tutor?.recommendation && <ReferenceLink reference={turn.tutor.recommendation} />}
+                    {turn.action === "run" && task && <NavigationLink className="tutor-reference-link" href={agentWorkbenchLink({ agentId: task.id })}>
+                      打开实验工作台 <CatalogIcon icon="lucide:arrow-up-right" width={14} />
+                    </NavigationLink>}
+                  </div>}
                 {turn.stopped && <p className="tutor-pending">已停止。</p>}
               </div>}
             </li>)}</ol>
             {activeText && <div className="tutor-pending-turn">
               <div className="tutor-user-message"><span className="sr-only">你说</span><p className="tutor-question">{activeText}</p></div>
               <div className="tutor-assistant-message">
-                <p className="tutor-turn-label"><span className="tutor-avatar"><CatalogIcon icon="lucide:triangle" width={15} /></span>助教</p>
+                <p className="tutor-turn-label">阿洛</p>
                 <p className="tutor-pending" role="status"><span aria-hidden="true" />正在回答…</p>
               </div>
             </div>}
-            <p className="sr-only" role="status">{!busy && history.length ? `助教已回复。共 ${history.length} 轮。` : ""}</p>
+            <p className="sr-only" role="status">{!busy && history.length ? `阿洛已回复。共 ${history.length} 轮。` : ""}</p>
           </div>
         </div>
 
@@ -394,7 +397,7 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
               {busy ? <button key="stop" className="tutor-send" type="button" disabled={stopping} onClick={() => void stop()} aria-label="停止接收" title="停止接收">
                 <CatalogIcon icon="lucide:square" width={15} /><span>停止</span>
               </button> : <button key="send" className="tutor-send" type="submit" disabled={!ready || confirmClear || !question.trim()}
-                aria-label="发送给助教" title="发送给助教"><CatalogIcon icon="lucide:arrow-up" width={17} /><span>发送</span></button>}
+                aria-label="发送给阿洛" title="发送给阿洛"><CatalogIcon icon="lucide:arrow-up" width={17} /><span>发送</span></button>}
             </div>
           </div>
         </div>
@@ -428,7 +431,7 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
               <ReferenceLink reference={context}>查看所选实验</ReferenceLink>
               <label className="tutor-consent"><input type="checkbox" checked={include} disabled={busy} onChange={(event) => {
                 setInclude(event.target.checked); clearDialogue();
-              }} />允许助教读取参数和结果</label>
+              }} />允许阿洛读取参数和结果</label>
             </>}
             <p>更换实验或授权会开新对话。</p>
             {returnToDiagnosis && <Link className="tutor-reference-link" href={returnToDiagnosis}>返回本轮诊断</Link>}

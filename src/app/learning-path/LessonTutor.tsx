@@ -67,8 +67,8 @@ export function LessonTutor({ topicId, returnTo, platformConfigured, attempts, h
     }
   }
   return <section className="lesson-tutor lesson-section" id="lesson-tutor" aria-labelledby="lesson-tutor-title">
-    <h6 id="lesson-tutor-title">问本节助教</h6>
-    <p>助教会参考本节内容。</p>
+    <h6 id="lesson-tutor-title">问阿洛</h6>
+    <p>阿洛会参考本节内容。</p>
     {!available && <p role="status">请先配置 AI 服务。</p>}
     <Link className="catalog-direct" href={workflowAISettingsRoute(returnTo)}>AI 服务设置</Link>
     <div className="lesson-prompts">{prompts.filter(([label]) => hasCode || label !== "读代码").map(([label, text]) => <button key={label} type="button" disabled={!ready || busy || !available}

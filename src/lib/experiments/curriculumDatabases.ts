@@ -1,5 +1,364 @@
 import { defineCurriculumLab, sequenceText } from "./curriculumLab";
 
+export const partitionPruningLab = defineCurriculumLab({
+  id: "partition-pruning", domain: "databases", title: "范围与哈希分区裁剪",
+  description: "同一批键和查询。比较读取哪些分区。",
+  comparison: "等宽范围分区 / 取模哈希分区",
+  topics: ["range-hash-partition-tradeoff"],
+  input: {
+    partitionExampleKeys: { kind: "list", min: 0, max: 99, minItems: 1, maxItems: 24, label: "记录键", hint: "每项一条记录，允许重复键。" },
+    partitionShardCount: { kind: "integer", min: 2, max: 8, label: "分区数量", hint: "范围把 0–99 等宽切开；哈希按数量取模。" },
+    partitionQueryBounds: { kind: "list", min: 0, max: 99, minItems: 2, maxItems: 2, label: "查询上下界", hint: "包含两端；相同表示点查询。" },
+  },
+  defaults: { goalLabel: "核对区间查询可以跳过哪些分区", partitionExampleKeys: [2, 3, 4, 5, 6, 8, 26, 55, 90],
+    partitionShardCount: 4, partitionQueryBounds: [0, 24] },
+  check: ({ partitionQueryBounds: [lo, hi] }) => lo <= hi,
+  columns: ["分区", "范围组记录", "范围组读取", "哈希组记录", "哈希组读取"],
+  metricLabels: { partitionRangeReads: "范围组读取分区数", partitionHashReads: "哈希组读取分区数",
+    partitionRangePeak: "范围组最大分区记录数", partitionHashPeak: "哈希组最大分区记录数", partitionMatchCount: "查询匹配记录数" },
+  focusMetric: "partitionRangeReads", alternateTrial: "把查询上界改为 55。",
+  run({ partitionExampleKeys, partitionShardCount, partitionQueryBounds: [lo, hi] }) {
+    const split = (key: number) => Math.floor(key * partitionShardCount / 100);
+    const range = Array.from({ length: partitionShardCount }, () => [] as number[]);
+    const hashed = Array.from({ length: partitionShardCount }, () => [] as number[]);
+    for (const key of partitionExampleKeys) { range[split(key)].push(key); hashed[key % partitionShardCount].push(key); }
+    let rangeReads = 0;
+    let hashReads = 0;
+    let matches = 0;
+    const result = (keys: number[], read: boolean) => read ? `读 · 命中 ${sequenceText(keys.filter((key) => key >= lo && key <= hi))}` : "跳过";
+    const steps = range.map((keys, id) => {
+      const readRange = id >= split(lo) && id <= split(hi);
+      const readHash = lo !== hi || id === lo % partitionShardCount;
+      rangeReads += Number(readRange);
+      hashReads += Number(readHash);
+      if (readRange) matches += keys.filter((key) => key >= lo && key <= hi).length;
+      return [id, sequenceText(keys), result(keys, readRange), sequenceText(hashed[id]), result(hashed[id], readHash)] as const;
+    });
+    const peak = (groups: number[][]) => Math.max(...groups.map((keys) => keys.length));
+    return { steps, metrics: { partitionRangeReads: rangeReads, partitionHashReads: hashReads, partitionRangePeak: peak(range),
+      partitionHashPeak: peak(hashed), partitionMatchCount: matches }, report: {
+      conclusion: `范围组读 ${rangeReads} 个分区。哈希组读 ${hashReads} 个。`,
+      detail: `有 ${partitionExampleKeys.length} 条记录。查询区间为 [${lo}, ${hi}]。匹配 ${matches} 条。最大分区分别有 ${peak(range)} 和 ${peak(hashed)} 条。`,
+      explanation: "范围分区保留键的顺序。区间只访问重叠分区。点查可算出哈希分区。模型遇范围不枚举键。实际路由还取决于数据库。",
+      suggestion: "只扩大查询范围。比较读取分区数。再让上下界相同。",
+    } };
+  },
+});
+
+export const watermarkWindowsLab = defineCurriculumLab({
+  id: "watermark-windows", domain: "databases", title: "事件时间、水位线与迟到数据",
+  description: "按到达次序处理。核对迟到事件去留。",
+  topics: ["event-time-watermark"],
+  input: {
+    watermarkEvents: { kind: "rows", columns: [[0, 40], [1, 30]], minItems: 1, maxItems: 18, label: "事件时刻与数值",
+      hint: "按到达顺序填。事件时刻允许更小。" },
+    watermarkWidth: { kind: "integer", min: 1, max: 12, label: "滚动窗口宽度", hint: "从时间 0 划左闭右开窗口。" },
+    watermarkAllowedLag: { kind: "integer", min: 0, max: 16, label: "水位线滞后量", hint: "已见最大时间减去滞后量。" },
+  },
+  defaults: { goalLabel: "核对允许滞后量怎样影响窗口关闭", watermarkEvents: [[1, 5], [8, 3], [2, 4], [12, 2], [7, 8]], watermarkWidth: 5, watermarkAllowedLag: 2 },
+  columns: ["事件时刻", "目标窗口", "处理前水位", "处理后水位", "结果", "窗口累计"],
+  metricLabels: { watermarkAccepted: "入窗事件数", watermarkDropped: "迟到被丢弃", watermarkTotal: "入窗数值合计",
+    watermarkFinalMark: "最终水位线", watermarkFinalized: "已有数据且关闭的窗口数" },
+  focusMetric: "watermarkDropped", alternateTrial: "把滞后量改为 4。",
+  run({ watermarkEvents, watermarkWidth, watermarkAllowedLag }) {
+    let newest = -1;
+    let dropped = 0;
+    let accepted = 0;
+    let sum = 0;
+    const windows = new Map<number, number>();
+    const steps = watermarkEvents.map(([time, value]) => {
+      const start = Math.floor(time / watermarkWidth) * watermarkWidth;
+      const end = start + watermarkWidth;
+      const before = newest - watermarkAllowedLag;
+      const late = end <= before;
+      if (late) dropped++;
+      else { accepted++; sum += value; windows.set(start, (windows.get(start) ?? 0) + value); }
+      newest = Math.max(newest, time);
+      return [time, `[${start}, ${end})`, before, newest - watermarkAllowedLag, late ? "窗口已关 · 丢弃" : "加入", windows.get(start) ?? 0] as const;
+    });
+    const current = newest - watermarkAllowedLag;
+    const finalized = [...windows.keys()].filter((start) => start + watermarkWidth <= current).length;
+    return { steps, metrics: { watermarkAccepted: accepted, watermarkDropped: dropped, watermarkTotal: sum,
+      watermarkFinalMark: current, watermarkFinalized: finalized }, report: {
+      conclusion: `加入 ${accepted} 个事件。因窗口关闭丢弃 ${dropped} 个。`,
+      detail: `共收到 ${steps.length} 个事件。窗口宽 ${watermarkWidth}。入窗数值合计 ${sum}。结束水位 ${current}。有数据的关闭窗口为 ${finalized} 个。`,
+      explanation: "先按事件时刻选窗口。接收前用旧水位判断。窗口右端不大于水位就拒绝。再用已见最大值推进水位。题设选择直接丢弃。",
+      suggestion: "只增加允许滞后。查哪些事件能进窗。再交换两个到达次序。",
+    } };
+  },
+});
+
+export const skewSaltingLab = defineCurriculumLab({
+  id: "skew-salting", domain: "databases", title: "Shuffle 热键与加盐聚合",
+  description: "把选定热键拆开。看分区峰值和总和。",
+  comparison: "直接取模 / 热键加盐后二次聚合",
+  topics: ["shuffle-skew-salting"],
+  input: {
+    skewRows: { kind: "rows", columns: [[0, 30], [-20, 99]], minItems: 1, maxItems: 24, label: "分组键与聚合值", hint: "每行是一次输入。聚合方式为求和。" },
+    skewPartitions: { kind: "integer", min: 2, max: 8, label: "执行分区数", hint: "两组分区数相同。" },
+    skewSaltTarget: { kind: "integer", min: 0, max: 30, label: "要加盐的键", hint: "只对该键轮换附加值。" },
+  },
+  defaults: { goalLabel: "加盐后对照最大分区负载和还原结果", skewRows: [[1, 2], [1, 3], [1, 4], [1, 5], [1, 6], [1, 7], [2, 1], [3, 1]],
+    skewPartitions: 4, skewSaltTarget: 1 },
+  columns: ["键", "数值", "添加的盐", "直接分区", "加盐分区"],
+  metricLabels: { skewPlainPeak: "直接组最大分区输入", skewSaltingPeak: "加盐组最大分区输入", skewPlainLoads: "直接组分区负载",
+    skewSaltingLoads: "加盐组分区负载", skewResultMatched: "二次聚合是否一致" },
+  focusMetric: "skewSaltingPeak", alternateTrial: "把加盐目标改成不存在的键 0。",
+  run({ skewRows, skewPartitions, skewSaltTarget }) {
+    const plain = Array<number>(skewPartitions).fill(0);
+    const salted = [...plain];
+    const totals = new Map<number, number>();
+    const partial = Array.from({ length: skewPartitions }, () => new Map<number, number>());
+    let hotSeen = 0;
+    const steps = skewRows.map(([key, value]) => {
+      const salt = key === skewSaltTarget ? hotSeen++ % skewPartitions : 0;
+      const direct = key % skewPartitions;
+      const distributed = (key + salt) % skewPartitions;
+      plain[direct]++;
+      salted[distributed]++;
+      totals.set(key, (totals.get(key) ?? 0) + value);
+      const part = partial[distributed];
+      part.set(key, (part.get(key) ?? 0) + value);
+      return [key, value, salt, direct, distributed] as const;
+    });
+    const combined = new Map<number, number>();
+    for (const shard of partial) for (const [key, sum] of shard) combined.set(key, (combined.get(key) ?? 0) + sum);
+    const equal = [...totals].every(([key, value]) => combined.get(key) === value);
+    return { steps, metrics: { skewPlainPeak: Math.max(...plain), skewSaltingPeak: Math.max(...salted), skewPlainLoads: sequenceText(plain),
+      skewSaltingLoads: sequenceText(salted), skewResultMatched: equal ? "是" : "否" }, report: {
+      conclusion: `直接组峰值 ${Math.max(...plain)} 条。加盐组为 ${Math.max(...salted)} 条。`,
+      detail: `输入 ${steps.length} 条。目标键出现 ${hotSeen} 次。直接负载为 ${sequenceText(plain)}。加盐后为 ${sequenceText(salted)}。二次聚合结果${equal ? "一致" : "不一致"}。`,
+      explanation: "同一键会落到同一分区。加盐把热键暂时拆开。先算各分区的部分和。再按原键加总。负载用输入行数衡量。",
+      suggestion: "只更换加盐对象。检查峰值和聚合。再减少热键输入。",
+    } };
+  },
+});
+
+export const transactionOutboxLab = defineCurriculumLab({
+  id: "transaction-outbox", domain: "databases", title: "事务发件箱与事件发布",
+  description: "模拟中途崩溃。核对储存和通知是否配套。",
+  comparison: "提交后直接发布 / 原子写入发件箱",
+  topics: ["outbox-atomic-event-publish"],
+  input: {
+    outboxTransactions: { kind: "rows", columns: [[1, 30], [1, 30], [0, 2]], minItems: 1, maxItems: 14, label: "事件号、增量、崩溃点",
+      hint: "事件号唯一。0 不崩溃；1 提交后、发布前崩溃；2 提交前崩溃。" },
+    outboxRelayEnabled: { kind: "integer", min: 0, max: 1, label: "最终启用转发器", hint: "1 转发全部待发送；0 留待恢复后继续。" },
+  },
+  defaults: { goalLabel: "对照业务已提交但通知未发布的情况", outboxTransactions: [[1, 5, 1], [2, 3, 0], [3, 6, 2]], outboxRelayEnabled: 1 },
+  check: ({ outboxTransactions }) => new Set(outboxTransactions.map(([id]) => id)).size === outboxTransactions.length,
+  columns: ["事件", "业务状态", "直接组", "发件箱组", "业务值"],
+  metricLabels: { outboxCommitted: "提交事务数", outboxDirectPublished: "直接组发布数", outboxRelayPublished: "发件箱已发布数",
+    outboxPending: "发件箱待发数", outboxBusinessValue: "最终业务值" },
+  focusMetric: "outboxRelayPublished", alternateTrial: "只关闭最终转发器。",
+  run({ outboxTransactions, outboxRelayEnabled }) {
+    let value = 0;
+    let direct = 0;
+    const pending: number[] = [];
+    const steps: [string | number, string, string, string, number][] = outboxTransactions.map(([event, delta, crash]) => {
+      if (crash === 2) return [event, "提交前回滚", "无事件", "无记录", value];
+      value += delta;
+      pending.push(event);
+      if (crash === 0) direct++;
+      return [event, "已提交", crash === 1 ? "崩溃 · 未发布" : "已发布", "与业务一同落库", value];
+    });
+    const committed = pending.length;
+    let relayed = 0;
+    if (outboxRelayEnabled) {
+      for (const event of pending.splice(0)) {
+        relayed++;
+        steps.push([event, "读取已提交记录", "—", "转发成功", value]);
+      }
+    }
+    return { steps, metrics: { outboxCommitted: committed, outboxDirectPublished: direct, outboxRelayPublished: relayed,
+      outboxPending: pending.length, outboxBusinessValue: value }, report: {
+      conclusion: `业务提交 ${committed} 次。直接发布 ${direct} 条，发件箱已发 ${relayed} 条。`,
+      detail: `共模拟 ${outboxTransactions.length} 个事务。最终业务值 ${value}。直接组缺 ${committed - direct} 条。发件箱还有 ${pending.length} 条待发。回放区分提交和发布。`,
+      explanation: "直接发布有两步间隙。提交后崩溃会漏通知。发件箱与业务一起提交。转发器稍后读取。模型假设转发成功，不模拟重复。",
+      suggestion: "只关闭转发器。比较待发数。再移动崩溃点，核对提交数。",
+    } };
+  },
+});
+
+export const partialIndexLab = defineCurriculumLab({
+  id: "partial-index", domain: "databases", title: "部分索引与谓词蕴含",
+  description: "部分索引少存行。检查何时能完整回答查询。",
+  comparison: "逐行检查 / 按条件选择索引候选",
+  topics: ["partial-index-predicate"],
+  input: {
+    partialTableRows: { kind: "rows", columns: [[0, 50], [0, 1]], minItems: 1, maxItems: 18, label: "金额与处理状态", hint: "每行金额和状态，编号从 1 起。" },
+    partialIndexStatus: { kind: "integer", min: 0, max: 1, label: "索引中保留的状态", hint: "索引只保留等于此状态的行。" },
+    partialQueryStatus: { kind: "integer", min: 0, max: 2, label: "查询的状态条件", hint: "0 不限制；1 状态为 0；2 状态为 1。" },
+    partialMinimum: { kind: "integer", min: 0, max: 50, label: "金额下限", hint: "查询金额大于等于此值。" },
+  },
+  defaults: { goalLabel: "检验查询条件能否推出索引条件", partialTableRows: [[5, 0], [20, 0], [30, 1], [40, 1], [15, 0]],
+    partialIndexStatus: 0, partialQueryStatus: 1, partialMinimum: 15 },
+  columns: ["行号", "金额", "状态", "索引是否包含", "实际读取候选", "符合查询"],
+  metricLabels: { partialIndexEntries: "索引收录行数", partialIndexUsable: "谓词允许使用索引", partialRowsScanned: "计划检查行数",
+    partialMatches: "结果行数", partialWouldMiss: "强用部分索引会漏行" },
+  focusMetric: "partialRowsScanned", alternateTrial: "去掉查询的状态条件（设为 0）。",
+  run({ partialTableRows, partialIndexStatus, partialQueryStatus, partialMinimum }) {
+    const implies = partialQueryStatus === partialIndexStatus + 1;
+    let entries = 0;
+    let scanned = 0;
+    let matched = 0;
+    let missed = 0;
+    const steps = partialTableRows.map(([amount, status], index) => {
+      const indexed = status === partialIndexStatus;
+      const candidate = !implies || indexed;
+      const keep = amount >= partialMinimum && (!partialQueryStatus || status === partialQueryStatus - 1);
+      entries += Number(indexed);
+      scanned += Number(candidate);
+      matched += Number(keep);
+      missed += Number(keep && !indexed);
+      return [index + 1, amount, status, indexed ? "是" : "否", candidate ? "检查" : "跳过", keep ? "是" : "否"] as const;
+    });
+    return { steps, metrics: { partialIndexEntries: entries, partialIndexUsable: implies ? "是" : "否", partialRowsScanned: scanned,
+      partialMatches: matched, partialWouldMiss: missed }, report: {
+      conclusion: `本轮${implies ? "可用" : "不能单独用"}部分索引。检查 ${scanned} 行，匹配 ${matched} 行。`,
+      detail: `表有 ${steps.length} 行。索引存 ${entries} 行。金额下限 ${partialMinimum}。强用部分索引会漏 ${missed} 行。回放逐项核对。`,
+      explanation: "部分索引只存一部分行。查询必须推出索引条件。只看本次碰巧命中不够。题设对候选逐行核验。未模拟查询优化器估价。",
+      suggestion: "只去掉状态限制。检查候选和漏行。再换成相反状态。",
+    } };
+  },
+});
+
+export const bitmapFiltersLab = defineCurriculumLab({
+  id: "bitmap-filters", domain: "databases", title: "位图扫描合并索引条件",
+  description: "按行号对齐索引结果。比较交集、并集。",
+  comparison: "位图合并 / 全表过滤",
+  topics: ["bitmap-index-combine"],
+  input: {
+    bitmapFilterRows: { kind: "rows", columns: [[0, 50], [0, 50]], minItems: 1, maxItems: 26, label: "两列属性", hint: "每行两列，按输入顺序编号。" },
+    bitmapAThreshold: { kind: "integer", min: 0, max: 50, label: "A 列下界", hint: "包含边界。" },
+    bitmapBThreshold: { kind: "integer", min: 0, max: 50, label: "B 列下界", hint: "包含边界。" },
+    bitmapUnion: { kind: "integer", min: 0, max: 1, label: "是否使用 OR", hint: "0 交集 AND；1 并集 OR。" },
+  },
+  defaults: { goalLabel: "核对合并位图后实际读取哪些行", bitmapFilterRows: [[1, 9], [7, 1], [7, 8], [0, 0], [6, 6]],
+    bitmapAThreshold: 5, bitmapBThreshold: 5, bitmapUnion: 0 },
+  columns: ["行号", "A 条件位", "B 条件位", "合并位", "全表判断"],
+  metricLabels: { bitmapMatchedA: "A 索引命中", bitmapMatchedB: "B 索引命中", bitmapHeapRows: "合并后读取行",
+    bitmapSavedRows: "少读取的行", bitmapOutputIds: "结果行号" },
+  focusMetric: "bitmapHeapRows", alternateTrial: "把组合方式改成 OR。",
+  run({ bitmapFilterRows, bitmapAThreshold, bitmapBThreshold, bitmapUnion }) {
+    let maskA = 0;
+    let maskB = 0;
+    let countA = 0;
+    let countB = 0;
+    bitmapFilterRows.forEach(([a, b], index) => {
+      if (a >= bitmapAThreshold) { maskA |= 1 << index; countA++; }
+      if (b >= bitmapBThreshold) { maskB |= 1 << index; countB++; }
+    });
+    const combined = bitmapUnion ? maskA | maskB : maskA & maskB;
+    const ids: number[] = [];
+    const bit = (mask: number, index: number) => (mask >>> index) & 1;
+    const steps = bitmapFilterRows.map(([a, b], index) => {
+      const matches = bitmapUnion ? a >= bitmapAThreshold || b >= bitmapBThreshold : a >= bitmapAThreshold && b >= bitmapBThreshold;
+      if (bit(combined, index)) ids.push(index + 1);
+      return [index + 1, bit(maskA, index), bit(maskB, index), bit(combined, index), matches ? "保留" : "过滤"] as const;
+    });
+    return { steps, metrics: { bitmapMatchedA: countA, bitmapMatchedB: countB, bitmapHeapRows: ids.length,
+      bitmapSavedRows: steps.length - ids.length, bitmapOutputIds: sequenceText(ids) }, report: {
+      conclusion: `用 ${bitmapUnion ? "OR" : "AND"} 合并后，读取 ${ids.length} 行。`,
+      detail: `表有 ${steps.length} 行。A 命中 ${countA} 行。B 命中 ${countB} 行。读取行号为 ${sequenceText(ids)}。计数只看回表行。`,
+      explanation: "每个位对应一个行号。AND 只留两边都有的行。OR 保留任一边命中。同一行并集后只读一次。模型假设位图精确。",
+      suggestion: "只切换 AND 和 OR。对照回表行号。再提高一个列的下界。",
+    } };
+  },
+});
+
+export const mergeJoinLab = defineCurriculumLab({
+  id: "merge-join", domain: "databases", title: "归并连接与重复键组",
+  description: "按排序后的键推进。核对组内配对数。",
+  topics: ["sort-merge-join-duplicate-group"],
+  input: {
+    mergeJoinLeft: { kind: "list", min: 0, max: 30, minItems: 1, maxItems: 18, label: "左表键", hint: "可重复，模型会先排序。" },
+    mergeJoinRight: { kind: "list", min: 0, max: 30, minItems: 1, maxItems: 18, label: "右表键", hint: "可重复，模型会先排序。" },
+  },
+  defaults: { goalLabel: "验证重复键形成所有成对组合", mergeJoinLeft: [1, 2, 2, 4], mergeJoinRight: [2, 2, 2, 3] },
+  columns: ["左键", "右键", "动作", "左组数", "右组数", "本步配对"],
+  metricLabels: { mergeJoinPairs: "输出配对数", mergeJoinGroups: "相等的键组数", mergeJoinHeadChecks: "归并头键比较数",
+    mergeJoinNestedCandidates: "逐对扫描候选数" },
+  focusMetric: "mergeJoinPairs", alternateTrial: "把右表改为 2、3。",
+  run({ mergeJoinLeft, mergeJoinRight }) {
+    const left = [...mergeJoinLeft].sort((a, b) => a - b);
+    const right = [...mergeJoinRight].sort((a, b) => a - b);
+    let i = 0;
+    let j = 0;
+    let pairs = 0;
+    let groups = 0;
+    const steps: [number, number, string, number, number, number][] = [];
+    while (i < left.length && j < right.length) {
+      const a = left[i];
+      const b = right[j];
+      if (a < b) { i++; steps.push([a, b, "左侧前进", 0, 0, 0]); continue; }
+      if (a > b) { j++; steps.push([a, b, "右侧前进", 0, 0, 0]); continue; }
+      const startI = i;
+      const startJ = j;
+      while (left[i] === a) i++;
+      while (right[j] === b) j++;
+      const count = (i - startI) * (j - startJ);
+      groups++;
+      pairs += count;
+      steps.push([a, b, "同键成组", i - startI, j - startJ, count]);
+    }
+    return { steps, metrics: { mergeJoinPairs: pairs, mergeJoinGroups: groups, mergeJoinHeadChecks: steps.length,
+      mergeJoinNestedCandidates: left.length * right.length }, report: {
+      conclusion: `匹配 ${groups} 个键组，共输出 ${pairs} 对。`,
+      detail: `左表 ${left.length} 行。右表 ${right.length} 行。头键比较 ${steps.length} 次。逐对扫描需检查 ${left.length * right.length} 对。回放可见组大小。`,
+      explanation: "先把两边按键排序。跳过较小的键。相同就找出两边完整组。组内每行都能互配。比较数不含排序及组内移动。",
+      suggestion: "只增减右表的同键行。核对配对如何成倍变化。再试两表键完全不重合。",
+    } };
+  },
+});
+
+export const twoPhaseLockLab = defineCurriculumLab({
+  id: "two-phase-lock", domain: "databases", title: "两阶段锁的增长与收缩",
+  description: "逐次申请、释放。检查阶段规则。",
+  comparison: "允许随时加锁 / 遵守两阶段锁",
+  topics: ["two-phase-locking-growing-shrinking"],
+  input: {
+    phaseLockOperations: { kind: "rows", columns: [[0, 1], [0, 9]], minItems: 1, maxItems: 18, label: "动作与锁编号",
+      hint: "0 申请，1 释放。单个事务，场景内无另一事务竞争。" },
+  },
+  defaults: { goalLabel: "找出第一次释放后被拒绝的新锁", phaseLockOperations: [[0, 0], [0, 1], [1, 0], [0, 2], [1, 1]] },
+  columns: ["操作", "自由加锁结果", "两阶段结果", "两阶段当前阶段", "两阶段已持有"],
+  metricLabels: { phaseLockFreeAcquired: "自由组新取得锁数", phaseLockStrictAcquired: "两阶段新取得锁数",
+    phaseLockDenied: "收缩阶段驳回次数", phaseLockFinal: "末步仍持有的锁" },
+  focusMetric: "phaseLockDenied", alternateTrial: "把申请锁 2 移到首次释放之前。",
+  run({ phaseLockOperations }) {
+    const freely = new Set<number>();
+    const phased = new Set<number>();
+    let shrinking = false;
+    let refused = 0;
+    let freeGranted = 0;
+    let phaseGranted = 0;
+    const steps = phaseLockOperations.map(([release, id]) => {
+      let a: string;
+      let b: string;
+      if (release) {
+        a = freely.delete(id) ? "已释放" : "未持有";
+        const removed = phased.delete(id);
+        shrinking ||= removed;
+        b = removed ? "已释放" : "未持有";
+      } else {
+        a = freely.has(id) ? "已持有" : "取得新锁";
+        if (!freely.has(id)) { freely.add(id); freeGranted++; }
+        if (phased.has(id)) b = "已持有";
+        else if (shrinking) { b = "拒绝新锁"; refused++; }
+        else { phased.add(id); phaseGranted++; b = "取得新锁"; }
+      }
+      return [`${release ? "释放" : "申请"} ${id}`, a, b, shrinking ? "收缩" : "增长", sequenceText([...phased])] as const;
+    });
+    return { steps, metrics: { phaseLockFreeAcquired: freeGranted, phaseLockStrictAcquired: phaseGranted, phaseLockDenied: refused,
+      phaseLockFinal: sequenceText([...phased]) }, report: {
+      conclusion: `两阶段组驳回 ${refused} 次新锁申请。`,
+      detail: `执行 ${steps.length} 项操作。自由组新获 ${freeGranted} 把锁。两阶段组新获 ${phaseGranted} 把。末步持有 ${sequenceText([...phased])}。回放标出首次释放。`,
+      explanation: "增长阶段可以取得新锁。成功释放一把后进入收缩。收缩阶段只能释放。已有锁再次请求不算新锁。模型只检查阶段顺序。",
+      suggestion: "把被拒请求移到首次释放前。再对照两组。试无效释放，核对是否换阶段。",
+    } };
+  },
+});
+
 export const outerJoinFilterLab = defineCurriculumLab({
   id: "outer-join-filter", domain: "databases", title: "左连接中的 ON 与 WHERE",
   description: "只挪过滤条件。检查哪些左表行消失。",

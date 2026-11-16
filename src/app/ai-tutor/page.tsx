@@ -11,7 +11,7 @@ import "../home-editorial.css";
 import "../story-editorial.css";
 import "./tutor-editorial.css";
 
-export const metadata: Metadata = { title: "AI 助教｜AlgoVerse" };
+export const metadata: Metadata = { title: "阿洛（Arlo）｜AlgoVerse" };
 
 type TutorParams = { runId?: string; from?: string; topic?: string; agentId?: string; new?: string };
 

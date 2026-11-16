@@ -1,5 +1,373 @@
 import { defineCurriculumLab, sequenceText } from "./curriculumLab";
 
+export const etagRequestLab = defineCurriculumLab({
+  id: "etag-request", domain: "networks", title: "HTTP 条件请求与 ETag",
+  description: "连续请求同一资源。区分 200 和 304。",
+  comparison: "总取正文 / 带 If-None-Match 验证",
+  topics: ["http-cache-validation"],
+  input: {
+    etagServerVersions: { kind: "rows", columns: [[1, 99], [1, 500]], minItems: 1, maxItems: 16, label: "服务端版本与正文大小",
+      hint: "每行一次访问。相同版本表示同一 ETag 和正文大小。" },
+  },
+  defaults: { goalLabel: "核对条件请求何时免传正文", etagServerVersions: [[1, 80], [1, 80], [2, 96], [2, 96]] },
+  check: ({ etagServerVersions }) => {
+    const sizes = new Map(etagServerVersions.map(([version, size]) => [version, size]));
+    return etagServerVersions.every(([version, size]) => sizes.get(version) === size);
+  },
+  columns: ["请求", "服务端版本", "本地条件", "条件组状态", "条件组正文大小", "对照组正文大小"],
+  metricLabels: { etagConditionalBytes: "条件组正文总字节", etagFullBytes: "对照组正文总字节", etagSavedBytes: "少传的字节",
+    etagNotModified: "304 次数", etagFinalVersion: "最终本地版本" },
+  focusMetric: "etagSavedBytes", alternateTrial: "把四次请求都设为 1、80。",
+  run({ etagServerVersions }) {
+    let cached = 0;
+    let conditional = 0;
+    let full = 0;
+    let unchanged = 0;
+    const steps = etagServerVersions.map(([version, size], index) => {
+      const sent = cached ? `"${cached}"` : "未携带";
+      const matched = cached === version;
+      unchanged += Number(matched);
+      full += size;
+      conditional += matched ? 0 : size;
+      cached = version;
+      return [index + 1, version, sent, matched ? 304 : 200, matched ? 0 : size, size] as const;
+    });
+    return { steps, metrics: { etagConditionalBytes: conditional, etagFullBytes: full, etagSavedBytes: full - conditional,
+      etagNotModified: unchanged, etagFinalVersion: cached }, report: {
+      conclusion: `条件组收到 ${unchanged} 次 304。正文少传 ${full - conditional} 字节。`,
+      detail: `共请求 ${steps.length} 次。条件组传正文 ${conditional} 字节。普通组传 ${full} 字节。最终本地版本 ${cached}。计数不含响应头。`,
+      explanation: "先用 200 建立本地副本。下次附上旧 ETag。匹配时返回 304 并复用正文。不同则返回新正文。模型每次都发请求验证。",
+      suggestion: "只减少版本变化。对比 304 次数。再调正文大小，核对节省字节。",
+    } };
+  },
+});
+
+export const retryKeyLab = defineCurriculumLab({
+  id: "retry-key", domain: "networks", title: "请求重试与幂等键",
+  description: "模拟写入应答丢失。看重试会不会重复加值。",
+  comparison: "直接重试 / 保存幂等结果",
+  topics: ["retry-idempotency", "http-method-idempotency"],
+  input: {
+    retryWriteAttempts: { kind: "rows", columns: [[1, 30], [1, 30], [0, 1]], minItems: 1, maxItems: 18, label: "请求键、增量、应答送达",
+      hint: "第 3 列 0 表示应答丢失，1 表示送达。同键不同增量在幂等组冲突。" },
+  },
+  defaults: { goalLabel: "核对应答丢失前是否已经执行写入", retryWriteAttempts: [[1, 5, 0], [1, 5, 1], [2, 3, 1]] },
+  columns: ["请求键", "应答链路", "直接组总值", "幂等组总值", "幂等组结果"],
+  metricLabels: { retryKeyDirectValue: "直接组最终值", retryKeySafeValue: "幂等组最终值", retryKeyReused: "复用结果次数",
+    retryKeyConflicts: "同键冲突次数", retryKeyLostResponses: "丢失的应答数" },
+  focusMetric: "retryKeySafeValue", alternateTrial: "把第二次请求的键改成 3。",
+  run({ retryWriteAttempts }) {
+    const results = new Map<number, { amount: number; response: number }>();
+    let plain = 0;
+    let safe = 0;
+    let replayed = 0;
+    let conflicts = 0;
+    let lost = 0;
+    const steps = retryWriteAttempts.map(([key, amount, arrived]) => {
+      plain += amount;
+      lost += Number(!arrived);
+      const existing = results.get(key);
+      let outcome: string;
+      if (!existing) {
+        safe += amount;
+        results.set(key, { amount, response: safe });
+        outcome = `写入并保存结果 ${safe}`;
+      } else if (existing.amount !== amount) {
+        conflicts++;
+        outcome = "同键不同参数 · 拒绝";
+      } else {
+        replayed++;
+        outcome = `复用原结果 ${existing.response}`;
+      }
+      return [key, arrived ? "送达" : "丢失", plain, safe, outcome] as const;
+    });
+    return { steps, metrics: { retryKeyDirectValue: plain, retryKeySafeValue: safe, retryKeyReused: replayed,
+      retryKeyConflicts: conflicts, retryKeyLostResponses: lost }, report: {
+      conclusion: `直接组最终 ${plain}。幂等组最终 ${safe}。`,
+      detail: `尝试 ${steps.length} 次。应答丢失 ${lost} 次。复用原结果 ${replayed} 次。参数冲突 ${conflicts} 次。回放分别展示副作用与应答。`,
+      explanation: "写入在应答发送前完成。没收到应答不代表没执行。幂等键对应一次意图。同键同参复用结果。模型把写入与记键视为原子操作。",
+      suggestion: "只把重试换成新键。验证重复写入。再试保留键却改参数。",
+    } };
+  },
+});
+
+export const outputBackpressureLab = defineCurriculumLab({
+  id: "output-backpressure", domain: "networks", title: "发送队列高水位与背压",
+  description: "交替生产和写出。跟踪等待与队列。",
+  comparison: "直接入队 / 高水位限流",
+  topics: ["output-queue-high-watermark", "nonblocking-partial-write"],
+  input: {
+    backpressureSchedule: { kind: "rows", columns: [[0, 16], [0, 16]], minItems: 1, maxItems: 18, label: "新增量与可写量", hint: "每行一拍，先接收数据，再尝试写出。" },
+    backpressureCeiling: { kind: "integer", min: 1, max: 24, label: "发送队列高水位", hint: "满后数据留在上游，之后重试。" },
+  },
+  defaults: { goalLabel: "在同一写能力下比较队列峰值", backpressureSchedule: [[4, 1], [4, 0], [2, 2], [0, 4], [0, 4]], backpressureCeiling: 4 },
+  columns: ["时刻", "直接写出", "直接剩余", "限流写出", "限流队列剩余", "上游待入队"],
+  metricLabels: { backpressureUnlimitedPeak: "直接组队列峰值", backpressureLimitedPeak: "限流组队列峰值",
+    backpressureDeferredTicks: "留有上游等待的拍数", backpressureLimitedSent: "限流组已写出",
+    backpressureLimitedPending: "限流组结束待发（含上游）" },
+  focusMetric: "backpressureLimitedPeak", alternateTrial: "把高水位提高到 8。",
+  run({ backpressureSchedule, backpressureCeiling }) {
+    let unlimited = 0;
+    let limited = 0;
+    let upstream = 0;
+    let maxUnlimited = 0;
+    let maxLimited = 0;
+    let deferred = 0;
+    let sent = 0;
+    const steps = backpressureSchedule.map(([produced, writable], index) => {
+      unlimited += produced;
+      upstream += produced;
+      const allowed = Math.min(upstream, backpressureCeiling - limited);
+      limited += allowed;
+      upstream -= allowed;
+      deferred += Number(upstream > 0);
+      maxUnlimited = Math.max(maxUnlimited, unlimited);
+      maxLimited = Math.max(maxLimited, limited);
+      const directWrite = Math.min(writable, unlimited);
+      const boundedWrite = Math.min(writable, limited);
+      unlimited -= directWrite;
+      limited -= boundedWrite;
+      sent += boundedWrite;
+      return [index + 1, directWrite, unlimited, boundedWrite, limited, upstream] as const;
+    });
+    return { steps, metrics: { backpressureUnlimitedPeak: maxUnlimited, backpressureLimitedPeak: maxLimited,
+      backpressureDeferredTicks: deferred, backpressureLimitedSent: sent, backpressureLimitedPending: limited + upstream }, report: {
+      conclusion: `直接队列峰值 ${maxUnlimited}。限流峰值 ${maxLimited}。`,
+      detail: `共观察 ${steps.length} 拍。上游等过 ${deferred} 拍。限流组写出 ${sent} 单位。末尾仍需发送 ${limited + upstream} 单位。峰值取写出前。`,
+      explanation: "可写量会随时刻变化。每拍只写对端允许的量。高水位只约束发送队列。未入队数据留在上游。队列腾出空间后再接收。",
+      suggestion: "只调整高水位。核对峰值和待发量。再保留一拍不可写观察。",
+    } };
+  },
+});
+
+const nextHeaderExtension = new Map<number, string>([[0, "逐跳选项"], [43, "路由"], [44, "分片"], [51, "认证"], [60, "目的选项"]]);
+const nextHeaderTerminal = new Map<number, string>([[6, "TCP"], [17, "UDP"], [58, "ICMPv6"], [59, "无下一首部"]]);
+
+export const nextHeaderLab = defineCurriculumLab({
+  id: "next-header", domain: "networks", title: "IPv6 的下一首部与协议分流",
+  description: "沿首部类型逐项解析。定位最终协议。",
+  topics: ["ipv6-next-header-demux"],
+  input: {
+    nextHeaderStart: { kind: "integer", min: 0, max: 255, label: "IPv6 头中的类型", hint: "例如 0 逐跳选项，43 路由，6 TCP，17 UDP。" },
+    nextHeaderFields: { kind: "list", min: 0, max: 255, minItems: 0, maxItems: 12, label: "扩展头中的后继类型",
+      hint: "按报文顺序输入。缺少后继字段时报告中断。" },
+  },
+  defaults: { goalLabel: "沿逐跳选项和路由首部找到 UDP", nextHeaderStart: 0, nextHeaderFields: [43, 17] },
+  columns: ["步骤", "当前类型号", "首部解释", "读取到的后继号", "动作"],
+  metricLabels: { nextHeaderParsed: "解析的扩展头数", nextHeaderDestination: "最终分流结果", nextHeaderRemaining: "未消费后继字段数" },
+  focusMetric: "nextHeaderDestination", alternateTrial: "后继列表只保留 60。",
+  run({ nextHeaderStart, nextHeaderFields }) {
+    let type = nextHeaderStart;
+    let used = 0;
+    const steps: [number, number, string, number | string, string][] = [];
+    while (nextHeaderExtension.has(type) && used < nextHeaderFields.length) {
+      const next = nextHeaderFields[used++];
+      steps.push([steps.length + 1, type, nextHeaderExtension.get(type)!, next, "继续"]);
+      type = next;
+    }
+    const terminal = nextHeaderTerminal.get(type);
+    const failure = nextHeaderExtension.has(type) ? "扩展头字段缺失" : "未建模的类型";
+    const result = terminal ?? failure;
+    steps.push([steps.length + 1, type, nextHeaderExtension.get(type) ?? result, "—", terminal ? "停止解析" : "无法继续"]);
+    return { steps, metrics: { nextHeaderParsed: used, nextHeaderDestination: result, nextHeaderRemaining: nextHeaderFields.length - used }, report: {
+      conclusion: `解析 ${used} 个扩展头。最终结果为 ${result}。`,
+      detail: `起始类型为 ${nextHeaderStart}。停在类型 ${type}。剩余字段有 ${nextHeaderFields.length - used} 个。回放列出后继号。模型使用类型链。`,
+      explanation: "字段指出紧随的首部类型。遇扩展头仍要取后继。到传输协议后停止追链。59 表示后续无头。模型只支持表内类型。",
+      suggestion: "只改变一个后继字段。核对分流结果。再删掉末尾字段观察。",
+    } };
+  },
+});
+
+export const naptMappingLab = defineCurriculumLab({
+  id: "napt-mapping", domain: "networks", title: "NAPT 与端口映射",
+  description: "多台内网主机共用一个外网地址。",
+  topics: ["ipv4-napt-port-mapping"],
+  input: {
+    naptRequests: { kind: "rows", columns: [[1, 12], [1024, 65535]], minItems: 1, maxItems: 16, label: "内网主机与源端口",
+      hint: "每行一个出站 UDP 包，均发往同一外部端点。" },
+    naptPortCapacity: { kind: "integer", min: 1, max: 12, label: "可用公网端口数", hint: "从 40000 起连续分配。" },
+  },
+  defaults: { goalLabel: "观察同源端口的主机如何区分回包", naptRequests: [[1, 5000], [2, 5000], [1, 5000], [1, 6000]], naptPortCapacity: 2 },
+  columns: ["出站包", "内网端点", "公网端口", "映射动作", "回包去向"],
+  metricLabels: { naptAllocated: "新建映射数", naptReused: "复用映射次数", naptBlocked: "端口不足的包数", naptReplies: "正确分发的回包数" },
+  focusMetric: "naptBlocked", alternateTrial: "把公网端口数改为 3。",
+  run({ naptRequests, naptPortCapacity }) {
+    const outbound = new Map<string, number>();
+    const inbound = new Map<number, string>();
+    let reused = 0;
+    let blocked = 0;
+    let replies = 0;
+    const steps = naptRequests.map(([host, port], index) => {
+      const address = `主机 ${host}:${port}`;
+      let outside = outbound.get(address);
+      const hit = outside !== undefined;
+      if (outside === undefined) {
+        if (outbound.size >= naptPortCapacity) {
+          blocked++;
+          return [index + 1, address, "—", "无空闲端口", "无回包"] as const;
+        }
+        outside = 40000 + outbound.size;
+        outbound.set(address, outside);
+        inbound.set(outside, address);
+      }
+      reused += Number(hit);
+      replies += Number(inbound.get(outside) === address);
+      return [index + 1, address, outside, hit ? "复用" : "分配", inbound.get(outside)!] as const;
+    });
+    return { steps, metrics: { naptAllocated: outbound.size, naptReused: reused, naptBlocked: blocked, naptReplies: replies }, report: {
+      conclusion: `收到并分发 ${replies} 个回包。端口不足挡下 ${blocked} 个包。`,
+      detail: `共请求 ${steps.length} 次。端口池有 ${naptPortCapacity} 格。新建 ${outbound.size} 条映射。复用 ${reused} 次。回放显示出站与回包的一对一关系。`,
+      explanation: "映射区分内网地址和端口。不同主机可用相同内网端口。公网端口区分回包。模型固定外部端点。映射在本轮内不释放。",
+      suggestion: "只增加池容量。核对哪个包转为成功。再让两次请求使用同一端点。",
+    } };
+  },
+});
+
+export const tcpFramingLab = defineCurriculumLab({
+  id: "tcp-framing", domain: "networks", title: "TCP 字节流与消息拆分",
+  description: "按字节读入。用长度头找回消息。",
+  comparison: "每次读取算一条 / 长度前缀解析",
+  topics: ["tcp-message-framing", "frame-length-resource-limit"],
+  input: {
+    framingLengths: { kind: "list", min: 1, max: 12, minItems: 1, maxItems: 9, label: "各消息正文长度", hint: "每条添加一个字节的长度头。正文用消息编号填充。" },
+    framingReadSizes: { kind: "list", min: 1, max: 32, minItems: 1, maxItems: 12, label: "读取块大小序列", hint: "按序循环读取，直到字节流耗尽。" },
+    framingMaxAllowed: { kind: "integer", min: 1, max: 12, label: "允许的正文上限", hint: "超长时解析器拒绝后续数据。" },
+  },
+  defaults: { goalLabel: "检查一次读取和一条消息是否等价", framingLengths: [2, 4, 1], framingReadSizes: [1, 3], framingMaxAllowed: 8 },
+  columns: ["读取", "读到的字节", "本块恢复的正文长度", "未处理字节数", "解析状态"],
+  metricLabels: { framingReadCount: "读取次数", framingDecodedCount: "正确恢复消息数", framingBlocked: "拒绝的超长头数",
+    framingBodyBytes: "恢复的正文字节数", framingPeakPending: "块末缓冲峰值" },
+  focusMetric: "framingReadCount", alternateTrial: "只把读取序列换成一个 20。",
+  run({ framingLengths, framingReadSizes, framingMaxAllowed }) {
+    const bytes = framingLengths.flatMap((length, index) => [length, ...Array<number>(length).fill(index + 1)]);
+    const pending: number[] = [];
+    const steps: [number, string, string, number, string][] = [];
+    let cursor = 0;
+    let decoded = 0;
+    let delivered = 0;
+    let peak = 0;
+    let rejected = false;
+    while (cursor < bytes.length) {
+      const size = framingReadSizes[steps.length % framingReadSizes.length];
+      const chunk = bytes.slice(cursor, cursor + size);
+      cursor += chunk.length;
+      const ready: number[] = [];
+      if (!rejected) {
+        pending.push(...chunk);
+        while (pending.length) {
+          const length = pending[0];
+          if (length > framingMaxAllowed) {
+            rejected = true;
+            pending.length = 0;
+            break;
+          }
+          if (pending.length <= length) break;
+          pending.splice(0, length + 1);
+          delivered += length;
+          decoded++;
+          ready.push(length);
+        }
+      }
+      peak = Math.max(peak, pending.length);
+      steps.push([steps.length + 1, sequenceText(chunk), sequenceText(ready), pending.length, rejected ? "拒绝后续解析" : pending.length ? "等待剩余正文" : "无残留"]);
+    }
+    return { steps, metrics: { framingReadCount: steps.length, framingDecodedCount: decoded, framingBlocked: Number(rejected),
+      framingBodyBytes: delivered, framingPeakPending: peak }, report: {
+      conclusion: `读取 ${steps.length} 次。解析出 ${decoded} 条完整消息。`,
+      detail: `原消息有 ${framingLengths.length} 条。流长 ${bytes.length} 字节。恢复正文 ${delivered} 字节。块末最多存 ${peak} 个字节。${rejected ? "本轮遇到超长头。" : "本轮没有超长头。"}`,
+      explanation: "一次读取可能切开一条消息。也可能带来多条。先看长度，再等正文收齐。完整后才交付。超长头会让模型停止解析。",
+      suggestion: "只增大读取块。对照消息数是否一致。再把上限调低观察拒绝。",
+    } };
+  },
+});
+
+export const tcpHalfCloseLab = defineCurriculumLab({
+  id: "tcp-half-close", domain: "networks", title: "TCP 半关闭与 FIN",
+  description: "关掉一个发送方向。检查另一侧还能发多少。",
+  topics: ["tcp-half-close-fin", "socket-recv-zero-eof"],
+  input: {
+    halfCloseEvents: { kind: "rows", columns: [[0, 1], [0, 1], [0, 20]], minItems: 1, maxItems: 18, label: "发送端、类型、字节数",
+      hint: "端点 0/1。类型 0 发数据（至少 1 字节）；1 发 FIN（字节填 0）。" },
+  },
+  defaults: { goalLabel: "核对半关闭后两个方向各自的能力", halfCloseEvents: [[0, 0, 3], [0, 1, 0], [1, 0, 5], [0, 0, 2], [1, 1, 0]] },
+  check: ({ halfCloseEvents }) => halfCloseEvents.every(([, kind, length]) => kind ? length === 0 : length > 0),
+  columns: ["事件", "结果", "0 号发送侧", "1 号发送侧", "对端读到"],
+  metricLabels: { halfCloseBytesZero: "0 号送达字节数", halfCloseBytesOne: "1 号送达字节数", halfCloseBlockedSends: "FIN 后拦截的发送",
+    halfCloseRemainingBytes: "半关闭期间送达字节数", halfCloseFinCount: "生效的 FIN 数" },
+  focusMetric: "halfCloseRemainingBytes", alternateTrial: "把第 4 步的数据改为从 1 号发送。",
+  run({ halfCloseEvents }) {
+    const closed = [false, false];
+    const bytes = [0, 0];
+    let blocked = 0;
+    let remaining = 0;
+    const steps = halfCloseEvents.map(([peer, fin, count]) => {
+      let observation: string;
+      let read = "无";
+      if (fin) {
+        observation = closed[peer] ? "方向已关闭" : "FIN 生效";
+        if (!closed[peer]) read = "题设无在途数据 · EOF";
+        closed[peer] = true;
+      } else if (closed[peer]) {
+        observation = "方向已关闭 · 未发出";
+        blocked++;
+      } else {
+        observation = "送达";
+        bytes[peer] += count;
+        if (closed[1 - peer]) remaining += count;
+        read = `${count} 字节`;
+      }
+      return [fin ? `${peer} 发 FIN` : `${peer} 发 ${count} 字节`, observation,
+        closed[0] ? "已关" : "可写", closed[1] ? "已关" : "可写", read] as const;
+    });
+    return { steps, metrics: { halfCloseBytesZero: bytes[0], halfCloseBytesOne: bytes[1], halfCloseBlockedSends: blocked,
+      halfCloseRemainingBytes: remaining, halfCloseFinCount: closed.filter(Boolean).length }, report: {
+      conclusion: `单方向关闭期间仍送达 ${remaining} 字节。`,
+      detail: `共处理 ${steps.length} 项操作。0 号送达 ${bytes[0]} 字节。1 号送达 ${bytes[1]} 字节。拦住 ${blocked} 次发送。最终关闭 ${closed.filter(Boolean).length} 个发送方向。`,
+      explanation: "FIN 结束一个发送方向。对端读完旧数据才看到 EOF。反向仍可发送。模型按序即时送达。不模拟在途重传或复位。",
+      suggestion: "只改关闭后那次发送的方向。比较能否到达。再交换两次 FIN 的顺序。",
+    } };
+  },
+});
+
+export const corsReadLab = defineCurriculumLab({
+  id: "cors-read", domain: "networks", title: "同源检查与 CORS 读权限",
+  description: "比较服务端返回和脚本能否读取。",
+  topics: ["cors-origin-boundary"],
+  input: {
+    corsSourcePort: { kind: "integer", min: 1, max: 65535, label: "页面端口", hint: "同一 HTTPS 主机，只改端口。" },
+    corsTargetPort: { kind: "integer", min: 1, max: 65535, label: "请求目标端口", hint: "跨端口就是跨源。" },
+    corsOriginRule: { kind: "integer", min: 0, max: 2, label: "允许来源响应头", hint: "0 无；1 回显页面来源；2 星号。" },
+    corsCredentialsMode: { kind: "integer", min: 0, max: 1, label: "是否使用 include 模式", hint: "0 不携带跨源凭据；1 include 模式。" },
+    corsCredentialsHeader: { kind: "integer", min: 0, max: 1, label: "是否返回允许凭据", hint: "1 表示 Access-Control-Allow-Credentials 为 true。" },
+  },
+  defaults: { goalLabel: "核对星号响应头在 include 模式下的行为", corsSourcePort: 3000, corsTargetPort: 4000,
+    corsOriginRule: 2, corsCredentialsMode: 1, corsCredentialsHeader: 1 },
+  columns: ["检查点", "输入或响应", "结果"],
+  metricLabels: { corsOriginMatch: "请求是否同源", corsServerStatus: "服务器返回状态", corsReadable: "脚本能否读取响应", corsOriginHeader: "允许来源响应头" },
+  focusMetric: "corsReadable", alternateTrial: "关闭 include 模式，其他响应头不变。",
+  run({ corsSourcePort, corsTargetPort, corsOriginRule, corsCredentialsMode, corsCredentialsHeader }) {
+    const origin = new URL(`https://lab.test:${corsSourcePort}`).origin;
+    const target = new URL(`https://lab.test:${corsTargetPort}`).origin;
+    const same = origin === target;
+    const header = corsOriginRule === 2 ? "*" : corsOriginRule === 1 ? origin : "缺失";
+    const allowed = same || (corsCredentialsMode ? corsOriginRule === 1 && corsCredentialsHeader === 1 : corsOriginRule > 0);
+    const steps = [
+      ["比较来源", `${origin} → ${target}`, same ? "同源" : "跨源"],
+      ["收到响应", "状态 200", "服务器已返回"],
+      ["核对允许来源", header, same ? "同源无需 CORS" : corsOriginRule === 0 ? "缺少允许来源" :
+        corsOriginRule === 2 && corsCredentialsMode ? "include 模式不接受星号" : "来源检查通过"],
+      ["核对脚本读取", corsCredentialsMode ? "include 模式" : "无跨源凭据", allowed ? "可读取" : "阻止读取"],
+    ] as const;
+    return { steps, metrics: { corsOriginMatch: same ? "是" : "否", corsServerStatus: 200, corsReadable: allowed ? "是" : "否",
+      corsOriginHeader: header }, report: {
+      conclusion: `服务器返回 200。脚本${allowed ? "可以" : "无法"}读取响应。`,
+      detail: `来源端口 ${corsSourcePort}。目标端口 ${corsTargetPort}。本轮为${same ? "同源" : "跨源"}。允许凭据响应头${corsCredentialsHeader ? "存在" : "缺失"}。回放列出每项检查。`,
+      explanation: "协议、主机、端口都参与同源比较。跨源读取要过 CORS 检查。include 要求显式允许来源。还需允许凭据。本实验固定简单 GET。",
+      suggestion: "先只切换 include 模式。再把星号改成明确来源。对比读取权限。",
+    } };
+  },
+});
+
 export const tcpHandshakeLab = defineCurriculumLab({
   id: "tcp-handshake", domain: "networks", title: "TCP 握手与初始序号",
   description: "跟踪 SYN、确认号和丢包重试。",

@@ -102,7 +102,7 @@ test("real engines run validated plans only after confirmation, including DNS ca
   let index = 0;
   const { ask } = await setup(t, ({ question, capabilities }) => {
     assert.equal(question, examples[index][0]);
-    assert.equal(capabilities.length, 114);
+    assert.equal(capabilities.length, 162);
     const join = capabilities.find(({ id }) => id === "join-strategies");
     assert.deepEqual(Object.keys(join.parameters), ["goalLabel", "leftRows", "rightRows"]);
     assert.match(join.comparison, /哈希分组/);
@@ -194,7 +194,42 @@ test("the AI Workbench configures a custom TCP handshake and executes after conf
   assert.deepEqual(results.steps[0].slice(-3), ["丢失", "SYN-SENT", "LISTEN"]);
 });
 
-test("all 96 curriculum labs run and retest from their learning-path entries", async (t) => {
+test("the AI Workbench configures length-bounded TCP framing and confirms its run", async (t) => {
+  const { ask } = await setup(t, ({ capabilities }) => {
+    const tool = capabilities.find(({ id }) => id === "tcp-framing");
+    assert.deepEqual(Object.keys(tool.parameters), ["goalLabel", "framingLengths", "framingReadSizes", "framingMaxAllowed"]);
+    return { intent: "create", engine: "tcp-framing", version: 1,
+      parameters: { goalLabel: "短消息通过后拒绝超长正文", framingLengths: [2, 6, 2], framingReadSizes: [3], framingMaxAllowed: 4 } };
+  });
+  const response = await ask("模拟分批读取 TCP 消息，收到 6 字节正文的头后停止解析。");
+  assert.equal(response.httpStatus, 201);
+  const workflow = await getExperimentWorkflow(response.sessionId);
+  assert.equal(workflow.plan.engineId, "tcp-framing");
+  const { results } = await confirmAndRun(workflow);
+  assert.equal(results.metrics.framingDecodedCount, "1");
+  assert.equal(results.metrics.framingBlocked, "1");
+  assert.equal(results.metrics.framingBodyBytes, "2");
+  assert.deepEqual(results.steps[0], [1, "2、1、1", "2", 0, "无残留"]);
+});
+
+test("the AI Workbench can configure and confirm a custom lazy segment tree run", async (t) => {
+  const { ask } = await setup(t, ({ capabilities }) => {
+    const tool = capabilities.find(({ id }) => id === "lazy-segment-tree");
+    assert.deepEqual(Object.keys(tool.parameters), ["goalLabel", "lazySegmentValues", "lazySegmentOperations"]);
+    return { intent: "create", engine: "lazy-segment-tree", version: 1, parameters: {
+      goalLabel: "先加整段，再查询右侧", lazySegmentValues: [2, 4, 6], lazySegmentOperations: [[0, 0, 3, 1], [1, 1, 3, 0]],
+    } };
+  });
+  const response = await ask("给 2、4、6 全部加一，然后查后两项的和。");
+  assert.equal(response.httpStatus, 201);
+  const workflow = await getExperimentWorkflow(response.sessionId);
+  assert.equal(workflow.plan.engineId, "lazy-segment-tree");
+  const { results } = await confirmAndRun(workflow);
+  assert.equal(results.metrics.lazySegmentLastSum, "12");
+  assert.deepEqual(results.steps.at(-1).slice(0, 4), ["求和", "[1, 3)", 12, 12]);
+});
+
+test("all 144 curriculum labs run and retest from their learning-path entries", async (t) => {
   await setup(t, () => assert.fail("Local runs should not call an AI service"));
   t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-01-01T00:00:00Z") });
   const cases = {
@@ -339,6 +374,150 @@ test("all 96 curriculum labs run and retest from their learning-path entries", a
     "ranking-metrics": ["rankingCutoff", 2,
       { rankingRecallA: "66.7%", rankingRecallB: "66.7%", rankingNdcgA: "0.9468", rankingNdcgB: "0.6299" },
       { rankingRecallA: "66.7%", rankingRecallB: "33.3%", rankingNdcgA: "1" }, /靠后位置增益会折损/],
+    "stable-merge": ["stableMergeKeys", [2, 1, 2, 3],
+      { mergeStableIds: "2、4、1、3", mergeRightIds: "4、2、3、1", mergeRightReversed: "2", mergeStableReversed: "0" },
+      { mergeStableIds: "2、1、3、4", mergeRightReversed: "1" }, /平局先取左/],
+    "counting-sort": ["countingKeys", [3, 1, 3, 2, 1, 10],
+      { countingSpan: "3", countingEmpty: "0", countingIdsOut: "2、5、4、1、3" },
+      { countingSpan: "10", countingEmpty: "6", countingKeysOut: "1、1、2、3、3、10" }, /原序列从后往前放/],
+    "heap-build": ["heapBuildKeys", [4, 5, 6, 7, 8, 9],
+      { heapDownChecks: "6", heapUpChecks: "8", heapDownSwaps: "4", heapUpSwaps: "8", heapBuiltRoot: "4" },
+      { heapDownSwaps: "0", heapUpSwaps: "0", heapBuiltRoot: "4" }, /先选更小的子节点/],
+    "matrix-chain": ["chainDimensions", [10, 30, 5, 2],
+      { chainOptimalCost: "4500", chainLeftCost: "4500", chainParentheses: "((A1×A2)×A3)", chainCandidates: "4" },
+      { chainOptimalCost: "900", chainLeftCost: "1600", chainSaved: "700", chainParentheses: "(A1×(A2×A3))" }, /枚举最后一次合并/],
+    "compare-swap": ["compareSwapOverlap", 0,
+      { compareSwapPlain: "5", compareSwapAtomic: "8", compareSwapRetries: "1", compareSwapLost: "3" },
+      { compareSwapPlain: "8", compareSwapAtomic: "8", compareSwapRetries: "0" }, /失败时读取新值再算/],
+    "segment-address": ["segmentDescriptors", [[100, 5], [400, 4]],
+      { segmentAllowed: "2", segmentBlocked: "2", segmentAddresses: "100、402" },
+      { segmentAllowed: "4", segmentBlocked: "0", segmentAddresses: "100、104、402、403" }, /等于段长也越界/],
+    "false-sharing": ["falseShareDistance", 4,
+      { falseShareTransfers: "5", falseSharePaddedTransfers: "0", falseShareLineB: "0" },
+      { falseShareTransfers: "0", falseSharePaddedTransfers: "0", falseShareLineB: "1" }, /写权限仍按缓存行跟踪/],
+    "journal-replay": ["journalReplayCount", 1,
+      { journalImageResult: "13、15", journalDeltaResult: "16、10", journalMismatches: "2", journalSkipped: "1" },
+      { journalImageResult: "13、15", journalDeltaResult: "13、15", journalMismatches: "0" }, /重复写同值不会累加/],
+    "napt-mapping": ["naptPortCapacity", 3,
+      { naptAllocated: "2", naptReused: "1", naptBlocked: "1", naptReplies: "3" },
+      { naptAllocated: "3", naptBlocked: "0", naptReplies: "4" }, /公网端口区分回包/],
+    "tcp-framing": ["framingReadSizes", [20],
+      { framingReadCount: "6", framingDecodedCount: "3", framingBodyBytes: "7", framingPeakPending: "2" },
+      { framingReadCount: "1", framingDecodedCount: "3", framingBodyBytes: "7", framingPeakPending: "0" }, /先看长度，再等正文收齐/],
+    "tcp-half-close": ["halfCloseEvents", [[0, 0, 3], [0, 1, 0], [1, 0, 5], [1, 0, 2], [1, 1, 0]],
+      { halfCloseBytesZero: "3", halfCloseBytesOne: "5", halfCloseBlockedSends: "1", halfCloseRemainingBytes: "5" },
+      { halfCloseBytesOne: "7", halfCloseBlockedSends: "0", halfCloseRemainingBytes: "7" }, /反向仍可发送/],
+    "cors-read": ["corsCredentialsMode", 0,
+      { corsOriginMatch: "否", corsServerStatus: "200", corsReadable: "否", corsOriginHeader: "*" },
+      { corsReadable: "是", corsServerStatus: "200" }, /include 要求显式允许来源/],
+    "nullish-default": ["nullishCodes", [0, 1, 5],
+      { nullishDefaulted: "2", nullishOrDefaulted: "5", nullishDifferences: "3" },
+      { nullishDefaulted: "2", nullishOrDefaulted: "2", nullishDifferences: "0" }, /零、假和空串都是假值/],
+    "context-exit": ["contextSuppress", 1,
+      { contextExitCalls: "1", contextManualOpen: "1", contextWithOpen: "0", contextPropagated: "是" },
+      { contextExitCalls: "1", contextWithOpen: "0", contextPropagated: "否" }, /返回真可抑制正文异常/],
+    "utf8-stream": ["textStreamChunkSize", 4,
+      { textStreamBytes: "5", textStreamChunks: "3", textStreamReplacement: "3", textStreamMatched: "是" },
+      { textStreamChunks: "2", textStreamReplacement: "0", textStreamMatched: "是" }, /流式解码保留未凑齐的字节/],
+    "event-delegation": ["delegatedBubbles", 0,
+      { delegatedReached: "是", delegatedDirectMatch: "否", delegatedClosest: "1", delegatedPathLength: "3" },
+      { delegatedReached: "否", delegatedClosest: "无", delegatedPathLength: "1" }, /委托从目标找最近按钮/],
+    "partial-index": ["partialQueryStatus", 0,
+      { partialIndexEntries: "3", partialIndexUsable: "是", partialRowsScanned: "3", partialMatches: "2", partialWouldMiss: "0" },
+      { partialIndexUsable: "否", partialRowsScanned: "5", partialMatches: "4", partialWouldMiss: "2" }, /查询必须推出索引条件/],
+    "bitmap-filters": ["bitmapUnion", 1,
+      { bitmapMatchedA: "3", bitmapMatchedB: "3", bitmapHeapRows: "2", bitmapOutputIds: "3、5" },
+      { bitmapHeapRows: "4", bitmapSavedRows: "1", bitmapOutputIds: "1、2、3、5" }, /同一行并集后只读一次/],
+    "merge-join": ["mergeJoinRight", [2, 3],
+      { mergeJoinPairs: "6", mergeJoinGroups: "1", mergeJoinHeadChecks: "3", mergeJoinNestedCandidates: "16" },
+      { mergeJoinPairs: "2", mergeJoinGroups: "1", mergeJoinNestedCandidates: "8" }, /组内每行都能互配/],
+    "two-phase-lock": ["phaseLockOperations", [[0, 0], [0, 1], [0, 2], [1, 0], [1, 1]],
+      { phaseLockFreeAcquired: "3", phaseLockStrictAcquired: "2", phaseLockDenied: "1", phaseLockFinal: "空" },
+      { phaseLockStrictAcquired: "3", phaseLockDenied: "0", phaseLockFinal: "2" }, /成功释放一把后进入收缩/],
+    "gradient-clip": ["clipGradientLimit", 10,
+      { clipGradientRawNorm: "10", clipGradientNorm: "5", clipGradientScale: "0.5", clipGradientChanged: "2" },
+      { clipGradientNorm: "10", clipGradientScale: "1", clipGradientChanged: "0" }, /超限才乘统一因子/],
+    "convolution-window": ["convolutionStride", 2,
+      { convolutionOutputSize: "5", convolutionOutputValues: "-2、-2、-2、-2、4", convolutionOperations: "15" },
+      { convolutionOutputSize: "3", convolutionOutputValues: "-2、-2、4", convolutionOperations: "9" }, /只处理一个完整窗口/],
+    "backward-branches": ["backwardInput", 0,
+      { backwardOutput: "37", backwardBranchOne: "20", backwardBranchTwo: "12", backwardTotalGradient: "32", backwardNumericGradient: "32" },
+      { backwardOutput: "1", backwardBranchOne: "4", backwardBranchTwo: "0", backwardTotalGradient: "4", backwardNumericGradient: "4" }, /对同一输入的贡献要相加/],
+    "momentum-update": ["momentumHistoryPct", 0,
+      { momentumPlainPos: "1.8984", momentumFinalPos: "-0.0234", momentumPlainLoss: "1.802", momentumFinalLoss: "0.0003", momentumCrossings: "1" },
+      { momentumFinalPos: "1.8984", momentumFinalLoss: "1.802", momentumCrossings: "0" }, /动量组还带着旧方向/],
+    "huffman-coding": ["huffmanWeights", [3, 3, 3, 3],
+      { huffmanBits: "18", huffmanFixedBits: "24", huffmanSavedBits: "6", huffmanMaxLength: "3" },
+      { huffmanBits: "24", huffmanSavedBits: "0", huffmanMaxLength: "2" }, /每次取权重最小的两项/],
+    "lazy-segment-tree": ["lazySegmentOperations", [[0, 0, 4, 3], [1, 0, 4, 0], [0, 1, 3, -1], [1, 1, 3, 0]],
+      { lazySegmentLastSum: "7", lazySegmentNaiveTouches: "12", lazySegmentTreeTouches: "12", lazySegmentPushes: "3" },
+      { lazySegmentLastSum: "9", lazySegmentPushes: "3" }, /只看部分区间时先下推/],
+    "hash-stride": ["strideHashStep", 3,
+      { strideLinearFailures: "0", strideCustomFailures: "1", strideCustomUsed: "4", strideReachable: "4" },
+      { strideCustomFailures: "0", strideCustomUsed: "5", strideReachable: "8" }, /步长和槽数互素才可遍历/],
+    "suffix-lookup": ["suffixLookupPattern", "ban",
+      { suffixLookupLeft: "1", suffixLookupRight: "3", suffixLookupCount: "2", suffixLookupPositions: "1、3" },
+      { suffixLookupLeft: "3", suffixLookupRight: "4", suffixLookupCount: "1", suffixLookupPositions: "0" }, /相同前缀形成一段/],
+    "asid-tags": ["asidSlots", 1,
+      { asidFlushHits: "0", asidTaggedHits: "3", asidSwitches: "4", asidTaggedEvictions: "0" },
+      { asidTaggedHits: "0", asidTaggedEvictions: "5" }, /ASID 把它们区分/],
+    "sparse-page-table": ["sparsePageReferences", [0, 8, 16, 24, 32, 40, 48, 56],
+      { sparsePageLeaves: "3", sparsePageSlots: "32", sparsePageFlatSlots: "64", sparsePageMapped: "4" },
+      { sparsePageLeaves: "8", sparsePageSlots: "72", sparsePageMapped: "8" }, /空区域不用分配二级表/],
+    "wait-cycle": ["waitGraphEdges", [[0, 1], [1, 2], [3, 0], [4, 5]],
+      { waitCycleCount: "3", waitCycleMembers: "0、1、2", waitCycleDependent: "1" },
+      { waitCycleCount: "0", waitCycleDependent: "0", waitCycleEdges: "4" }, /沿边能回到自己即在环上/],
+    "coherence-writes": ["coherenceOperations", [[0, 0, 0], [0, 1, 9], [1, 0, 0], [1, 0, 0], [1, 0, 0]],
+      { coherenceInvalidations: "1", coherenceRefills: "3", coherenceStaleReads: "2", coherenceLatest: "9" },
+      { coherenceInvalidations: "0", coherenceRefills: "2", coherenceStaleReads: "0" }, /另一核丢掉有效副本/],
+    "etag-request": ["etagServerVersions", [[1, 80], [1, 80], [1, 80], [1, 80]],
+      { etagConditionalBytes: "176", etagFullBytes: "352", etagSavedBytes: "176", etagNotModified: "2" },
+      { etagConditionalBytes: "80", etagFullBytes: "320", etagSavedBytes: "240", etagNotModified: "3" }, /返回 304 并复用正文/],
+    "retry-key": ["retryWriteAttempts", [[1, 5, 0], [3, 5, 1], [2, 3, 1]],
+      { retryKeyDirectValue: "13", retryKeySafeValue: "8", retryKeyReused: "1", retryKeyLostResponses: "1" },
+      { retryKeySafeValue: "13", retryKeyReused: "0" }, /没收到应答不代表没执行/],
+    "output-backpressure": ["backpressureCeiling", 8,
+      { backpressureUnlimitedPeak: "9", backpressureLimitedPeak: "4", backpressureDeferredTicks: "3", backpressureLimitedSent: "10", backpressureLimitedPending: "0" },
+      { backpressureLimitedPeak: "8", backpressureDeferredTicks: "1", backpressureLimitedSent: "10", backpressureLimitedPending: "0" }, /未入队数据留在上游/],
+    "next-header": ["nextHeaderFields", [60],
+      { nextHeaderParsed: "2", nextHeaderDestination: "UDP", nextHeaderRemaining: "0" },
+      { nextHeaderParsed: "1", nextHeaderDestination: "扩展头字段缺失" }, /到传输协议后停止追链/],
+    "git-snapshot": ["gitSnapshotActions", [[0, 1], [1, 0], [0, 2], [1, 0], [2, 0]],
+      { gitSnapshotWork: "2", gitSnapshotIndex: "1", gitSnapshotHead: "1", gitSnapshotUnstaged: "是" },
+      { gitSnapshotIndex: "2", gitSnapshotHead: "2", gitSnapshotUnstaged: "否" }, /提交只取暂存快照/],
+    "mutation-threshold": ["mutationProbeValues", [2, 8, 5],
+      { mutationKilledCount: "2", mutationSurvivorCount: "1", mutationSurvivorNames: "严格大于" },
+      { mutationKilledCount: "3", mutationSurvivorCount: "0", mutationSurvivorNames: "无" }, /只测两侧可能漏掉等号/],
+    "promise-rejection": ["promiseFinishTimes", [[1, 0], [2, 0], [4, 0], [5, 0]],
+      { promiseAggregateAt: "2", promiseAggregateStatus: "拒绝", promiseContinued: "2", promiseCanceled: "2" },
+      { promiseAggregateAt: "5", promiseAggregateStatus: "成功", promiseCanceled: "0" }, /额外通知才会触发取消/],
+    "defensive-list": ["defensiveOutputEdit", 12,
+      { defensiveBadLanes: "2", defensiveSharedState: "99、8、-7", defensiveInputCopyState: "4、8、-7", defensiveBothCopyState: "4、8、12" },
+      { defensiveBadLanes: "1", defensiveInputCopyState: "4、8、12" }, /返回副本能隔离导出修改/],
+    "partition-pruning": ["partitionQueryBounds", [0, 55],
+      { partitionRangeReads: "1", partitionHashReads: "4", partitionMatchCount: "6", partitionRangePeak: "6", partitionHashPeak: "4" },
+      { partitionRangeReads: "3", partitionHashReads: "4", partitionMatchCount: "8" }, /区间只访问重叠分区/],
+    "watermark-windows": ["watermarkAllowedLag", 4,
+      { watermarkAccepted: "3", watermarkDropped: "2", watermarkTotal: "10", watermarkFinalMark: "10", watermarkFinalized: "2" },
+      { watermarkAccepted: "5", watermarkDropped: "0", watermarkTotal: "22", watermarkFinalMark: "8", watermarkFinalized: "1" }, /用旧水位判断/],
+    "skew-salting": ["skewSaltTarget", 0,
+      { skewPlainPeak: "6", skewSaltingPeak: "3", skewSaltingLoads: "1、2、3、2", skewResultMatched: "是" },
+      { skewSaltingPeak: "6", skewSaltingLoads: "0、6、1、1", skewResultMatched: "是" }, /再按原键加总/],
+    "transaction-outbox": ["outboxRelayEnabled", 0,
+      { outboxCommitted: "2", outboxDirectPublished: "1", outboxRelayPublished: "2", outboxPending: "0", outboxBusinessValue: "8" },
+      { outboxRelayPublished: "0", outboxPending: "2", outboxBusinessValue: "8" }, /发件箱与业务一起提交/],
+    "top-p-draw": ["topPCutoffPct", 90,
+      { topPCandidateCount: "2", topPCoverage: "75", topPChosenIds: "1、2" },
+      { topPCandidateCount: "3", topPCoverage: "90", topPChosenIds: "1、2、3" }, /按保留权重再归一化/],
+    "binary-confidence": ["binaryConfidenceRows", [[90, 1], [60, 0], [60, 0], [10, 0]],
+      { binaryConfidenceErrors: "2", binaryConfidenceMeanLoss: "0.8574", binaryConfidenceWorst: "2.3026" },
+      { binaryConfidenceErrors: "2", binaryConfidenceMeanLoss: "0.5108", binaryConfidenceWorst: "0.9163" }, /对数损失取真类概率/],
+    "kv-projection-cache": ["kvToyTokens", [1, 2, 3, 4, 5],
+      { kvProjectionPlain: "20", kvProjectionCached: "8", kvProjectionDotProducts: "10", kvProjectionSame: "是" },
+      { kvProjectionPlain: "30", kvProjectionCached: "10", kvProjectionDotProducts: "15", kvProjectionSame: "是" }, /当前查询仍看历史键/],
+    "relu-zero-gradient": ["reluInitialWeight", 1,
+      { reluZeroUpdates: "6", reluFinalWeight: "-1", reluFinalLoss: "2", reluLeakyFinalWeight: "1.5183" },
+      { reluZeroUpdates: "0", reluFinalWeight: "1.9844", reluLeakyFinalWeight: "1.9844", reluFinalLoss: "0.0001" }, /Leaky 负区仍有斜率/],
   };
   assert.deepEqual(curriculumLabs.map(({ id }) => id), Object.keys(cases));
   const counts = {};
@@ -428,9 +607,23 @@ test("all 96 curriculum labs run and retest from their learning-path entries", a
         assert.deepEqual(compared.rounds.map(({ metrics }) => metrics.handshakeFinalAck), ["901", "901", "901"]);
         assert.deepEqual(compared.changes.map(({ metrics }) => metrics.find(({ key }) => key === "handshakeTransmissions").deltas), [["−2"], ["+1"]]);
       }
+      if (lab.id === "tcp-framing") {
+        const third = await run({ ...preset, framingReadSizes: [2] }, second);
+        const compared = experimentRunComparison(await getComparableExperimentRuns(third), lab.id, lab.version);
+        assert.deepEqual(compared.rounds.map(({ metrics }) => metrics.framingReadCount), ["6", "1", "5"]);
+        assert.deepEqual(compared.rounds.map(({ metrics }) => metrics.framingDecodedCount), ["3", "3", "3"]);
+        assert.deepEqual(compared.changes.map(({ metrics }) => metrics.find(({ key }) => key === "framingReadCount").deltas), [["−5"], ["+4"]]);
+      }
+      if (lab.id === "hash-stride") {
+        const third = await run({ ...preset, strideHashStep: 4 }, second);
+        const compared = experimentRunComparison(await getComparableExperimentRuns(third), lab.id, lab.version);
+        assert.deepEqual(compared.rounds.map(({ metrics }) => metrics.strideReachable), ["4", "8", "2"]);
+        assert.deepEqual(compared.rounds.map(({ metrics }) => metrics.strideCustomFailures), ["1", "0", "3"]);
+        assert.deepEqual(compared.changes.map(({ metrics }) => metrics.find(({ key }) => key === "strideCustomFailures").deltas), [["−1"], ["+3"]]);
+      }
     });
   }
-  assert.deepEqual(Object.values(counts), [16, 16, 16, 16, 16, 16]);
+  assert.deepEqual(Object.values(counts), [24, 24, 24, 24, 24, 24]);
 });
 
 test("knowledge, network recommendations, unsupported requests and clarification do not create plans", async (t) => {

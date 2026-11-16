@@ -1,6 +1,348 @@
 import { defineCurriculumLab, gapText, sequenceText } from "./curriculumLab";
 import { simulatePageReplacement } from "./pageReplacement";
 
+export const asidTagLab = defineCurriculumLab({
+  id: "asid-tags", domain: "operating-systems", title: "TLB 的地址空间标识",
+  description: "进程来回切换。对照清空和保留带标签项。",
+  comparison: "切换时清空 / 带 ASID 的 TLB",
+  topics: ["tlb-asid-tagging"],
+  input: {
+    asidSlots: { kind: "integer", min: 1, max: 8, label: "TLB 容量", hint: "两组同容量，满时淘汰最久未用项。" },
+    asidReferenceRows: { kind: "rows", columns: [[0, 3], [0, 15]], minItems: 1, maxItems: 20, label: "进程号与虚页号", hint: "每行一次访问。相同虚页在不同进程有不同映射。" },
+  },
+  defaults: { goalLabel: "查看带地址空间标签后有多少命中", asidSlots: 4, asidReferenceRows: [[0, 1], [1, 1], [0, 1], [1, 1], [0, 2], [0, 1]] },
+  columns: ["进程", "虚页", "物理页", "清空组", "标签组", "标签组当前键"],
+  metricLabels: { asidFlushHits: "清空组命中", asidTaggedHits: "标签组命中", asidSwitches: "进程切换次数", asidTaggedEvictions: "标签组淘汰" },
+  focusMetric: "asidTaggedHits", alternateTrial: "把容量缩到 1。",
+  run({ asidSlots, asidReferenceRows }) {
+    const lanes = [false, true].map((tagged) => ({ tagged, used: [] as string[], hits: 0, evictions: 0 }));
+    let previous = asidReferenceRows[0][0];
+    let switches = 0;
+    const steps = asidReferenceRows.map(([process, page]) => {
+      const change = previous !== process;
+      previous = process;
+      switches += Number(change);
+      const status = lanes.map((lane) => {
+        if (change && !lane.tagged) lane.used.length = 0;
+        const key = lane.tagged ? `${process}:${page}` : String(page);
+        const hit = lane.used.indexOf(key);
+        if (hit >= 0) {
+          lane.used.splice(hit, 1);
+          lane.hits++;
+        } else if (lane.used.length === asidSlots) {
+          lane.used.shift();
+          lane.evictions++;
+        }
+        lane.used.push(key);
+        return `${change && !lane.tagged ? "先清空 · " : ""}${hit >= 0 ? "命中" : "缺失"}`;
+      });
+      return [process, page, process * 16 + page, status[0], status[1], lanes[1].used.join("、")] as const;
+    });
+    return { steps, metrics: { asidFlushHits: lanes[0].hits, asidTaggedHits: lanes[1].hits, asidSwitches: switches,
+      asidTaggedEvictions: lanes[1].evictions }, report: {
+      conclusion: `清空组命中 ${lanes[0].hits} 次。标签组命中 ${lanes[1].hits} 次。`,
+      detail: `访问 ${steps.length} 次。切换 ${switches} 次。当前容量 ${asidSlots}。标签组淘汰 ${lanes[1].evictions} 次。回放列出虚页和模型物理页。`,
+      explanation: "不同进程会用到同一虚页号。ASID 把它们区分。带标签时可保留旧项。容量仍有限。模型不复用 ASID。",
+      suggestion: "只缩小容量。对比切换后的命中。再让两进程访问不同虚页。",
+    } };
+  },
+});
+
+export const sparsePageTableLab = defineCurriculumLab({
+  id: "sparse-page-table", domain: "operating-systems", title: "多级页表的按需分配",
+  description: "映射稀疏虚页。数实际分配的页表格。",
+  comparison: "单级表 / 两级按需分配",
+  topics: ["multilevel-page-table-sparse"],
+  input: {
+    sparsePageLeafSize: { kind: "integer", min: 2, max: 16, label: "每张二级表的格数", hint: "填 2、4、8 或 16。模型有 64 个虚页。" },
+    sparsePageReferences: { kind: "list", min: 0, max: 63, minItems: 1, maxItems: 20, label: "依次映射的虚页", hint: "可重复映射。页号 0–63。" },
+  },
+  defaults: { goalLabel: "对照集中和分散的映射如何占用页表", sparsePageLeafSize: 8, sparsePageReferences: [0, 1, 8, 63] },
+  check: ({ sparsePageLeafSize }) => 64 % sparsePageLeafSize === 0,
+  columns: ["虚页", "一级下标", "二级下标", "动作", "两级累计格数"],
+  metricLabels: { sparsePageLeaves: "二级表数量", sparsePageSlots: "两级分配格数", sparsePageFlatSlots: "单级分配格数", sparsePageMapped: "不同虚页数" },
+  focusMetric: "sparsePageSlots", alternateTrial: "把页号改成 0、8、16、24、32、40、48、56。",
+  run({ sparsePageLeafSize, sparsePageReferences }) {
+    const root = 64 / sparsePageLeafSize;
+    const leaves = new Map<number, Set<number>>();
+    const steps = sparsePageReferences.map((page) => {
+      const upper = Math.floor(page / sparsePageLeafSize);
+      const lower = page % sparsePageLeafSize;
+      const table = leaves.get(upper) ?? new Set<number>();
+      const result = !leaves.has(upper) ? "先分配二级表" : table.has(lower) ? "已有映射" : "使用已有二级表";
+      table.add(lower);
+      leaves.set(upper, table);
+      return [page, upper, lower, result, root + leaves.size * sparsePageLeafSize] as const;
+    });
+    const total = root + leaves.size * sparsePageLeafSize;
+    const mapped = [...leaves.values()].reduce((count, table) => count + table.size, 0);
+    return { steps, metrics: { sparsePageLeaves: leaves.size, sparsePageSlots: total, sparsePageFlatSlots: 64, sparsePageMapped: mapped }, report: {
+      conclusion: `两级表占 ${total} 格。单级表固定占 64 格。`,
+      detail: `一级表有 ${root} 格。分配 ${leaves.size} 张二级表。实际映射 ${mapped} 个虚页。回放显示何时新建表。模型按格数比较。`,
+      explanation: "虚页号拆成高低两段。高段找二级表。低段找页表项。空区域不用分配二级表。映射分散会占用更多表。",
+      suggestion: "固定二级表大小，只分散页号。检查两级总格数。再试重复映射。",
+    } };
+  },
+});
+
+export const waitCycleLab = defineCurriculumLab({
+  id: "wait-cycle", domain: "operating-systems", title: "等待图与死锁环",
+  description: "沿等待边追踪。区分在环上与受环影响。",
+  topics: ["wait-for-cycle-detection"],
+  input: {
+    waitGraphTasks: { kind: "integer", min: 2, max: 8, label: "任务数", hint: "从 0 编号。" },
+    waitGraphEdges: { kind: "rows", columns: [[0, 7], [0, 7]], minItems: 0, maxItems: 24, label: "等待者与持有者", hint: "每行一条有向边。可用自等待测试长度为 1 的环。" },
+  },
+  defaults: { goalLabel: "把环上的任务和受牵连的任务分开", waitGraphTasks: 6, waitGraphEdges: [[0, 1], [1, 2], [2, 0], [3, 0], [4, 5]] },
+  check: ({ waitGraphTasks, waitGraphEdges }) => waitGraphEdges.every(([a, b]) => a < waitGraphTasks && b < waitGraphTasks),
+  columns: ["任务", "沿边到达的任务", "能否返回自己", "判定"],
+  metricLabels: { waitCycleCount: "在环任务数", waitCycleMembers: "在环任务", waitCycleDependent: "受环牵连但不在环的任务", waitCycleEdges: "不同等待边数" },
+  focusMetric: "waitCycleCount", alternateTrial: "只删除 2 到 0 的边。",
+  run({ waitGraphTasks, waitGraphEdges }) {
+    const graph = Array.from({ length: waitGraphTasks }, () => new Set<number>());
+    for (const [a, b] of waitGraphEdges) graph[a].add(b);
+    const reached = graph.map((_, start) => {
+      const found = new Set(graph[start]);
+      for (const node of found) for (const next of graph[node]) found.add(next);
+      return found;
+    });
+    const cyclic = reached.flatMap((nodes, id) => nodes.has(id) ? [id] : []);
+    let dependent = 0;
+    const steps = reached.map((nodes, id) => {
+      const self = nodes.has(id);
+      const tied = !self && cyclic.some((node) => nodes.has(node));
+      dependent += Number(tied);
+      return [id, sequenceText([...nodes]), self ? "能" : "不能", self ? "在环上" : tied ? "受环牵连" : "未发现环相关等待"] as const;
+    });
+    return { steps, metrics: { waitCycleCount: cyclic.length, waitCycleMembers: sequenceText(cyclic), waitCycleDependent: dependent,
+      waitCycleEdges: graph.reduce((total, edges) => total + edges.size, 0) }, report: {
+      conclusion: `环上有 ${cyclic.length} 个任务。另有 ${dependent} 个受牵连。`,
+      detail: `图有 ${waitGraphTasks} 个任务。环上编号为 ${sequenceText(cyclic)}。每行从该任务出发。回放列出可达任务。重复边只计一条。`,
+      explanation: "边从等待者指向持有者。沿边能回到自己即在环上。仅能到环上则是牵连。题设为单实例锁。检测使用同一时刻的图。",
+      suggestion: "只断开环上的一条边。核对在环和牵连数。再试增加自环。",
+    } };
+  },
+});
+
+export const coherenceWritesLab = defineCurriculumLab({
+  id: "coherence-writes", domain: "operating-systems", title: "写无效协议与缓存副本",
+  description: "两核交替读写。核对何时读到旧值。",
+  comparison: "写入时无效其他副本 / 保留旧副本",
+  topics: ["coherence-invalidation-copy"],
+  input: {
+    coherenceInitial: { kind: "integer", min: -99, max: 99, label: "主存初值", hint: "两个核心起初都没有副本。" },
+    coherenceOperations: { kind: "rows", columns: [[0, 1], [0, 1], [-99, 99]], minItems: 1, maxItems: 20, label: "核、读写、值", hint: "0 读，值填 0；1 写，值填新值。" },
+  },
+  defaults: { goalLabel: "确认写无效后另一核首次读取会重新取值", coherenceInitial: 1,
+    coherenceOperations: [[0, 0, 0], [1, 0, 0], [0, 1, 9], [1, 0, 0], [1, 0, 0]] },
+  check: ({ coherenceOperations }) => coherenceOperations.every(([, write, value]) => write === 1 || value === 0),
+  columns: ["操作", "最新值", "写无效组", "旧副本组", "有效副本（写无效组）"],
+  metricLabels: { coherenceInvalidations: "实际无效次数", coherenceRefills: "写无效组重新取值", coherenceStaleReads: "旧副本组读旧次数", coherenceLatest: "最终最新值" },
+  focusMetric: "coherenceStaleReads", alternateTrial: "把写 9 移到核 1 第一次读之前。",
+  run({ coherenceInitial, coherenceOperations }) {
+    let latest = coherenceInitial;
+    let invalidated = 0;
+    let reloads = 0;
+    let stale = 0;
+    const correct: (number | null)[] = [null, null];
+    const unsafe = [...correct];
+    const steps = coherenceOperations.map(([core, write, value]) => {
+      let good: string;
+      let bad: string;
+      if (write) {
+        latest = value;
+        correct[core] = value;
+        unsafe[core] = value;
+        const had = correct[1 - core] !== null;
+        correct[1 - core] = null;
+        invalidated += Number(had);
+        good = had ? "无效另一核副本" : "无副本需无效";
+        bad = "保留另一核副本";
+      } else {
+        const refill = correct[core] === null;
+        reloads += Number(refill);
+        correct[core] ??= latest;
+        unsafe[core] ??= latest;
+        stale += Number(unsafe[core] !== latest);
+        good = `${refill ? "重新取" : "命中"} · ${correct[core]}`;
+        bad = `${unsafe[core] === latest ? "读值" : "读旧值"} · ${unsafe[core]}`;
+      }
+      return [`核 ${core} ${write ? "写" : "读"}`, latest, good, bad, correct.map((item) => item ?? "无效").join(" / ")] as const;
+    });
+    return { steps, metrics: { coherenceInvalidations: invalidated, coherenceRefills: reloads, coherenceStaleReads: stale, coherenceLatest: latest }, report: {
+      conclusion: `保留旧副本读旧 ${stale} 次。写无效组按最新值读取。`,
+      detail: `执行 ${steps.length} 个操作。无效副本 ${invalidated} 次。首次取值或重取 ${reloads} 次。最终最新值 ${latest}。回放标出每次读到的值。`,
+      explanation: "复制值可留在两个核。一个核写入时通知另一个核。另一核丢掉有效副本。下次读时再取。模型只跟踪同一地址。",
+      suggestion: "只把写提前。检查是否仍读旧值。再增加一次另一核的写。",
+    } };
+  },
+});
+
+export const compareSwapLab = defineCurriculumLab({
+  id: "compare-swap", domain: "operating-systems", title: "原子比较交换与重试",
+  description: "两个线程各加一次。对照旧值写入与 CAS。",
+  comparison: "直接写回旧计算 / CAS 校验重试",
+  topics: ["compare-and-swap-retry"],
+  input: {
+    compareSwapInitial: { kind: "integer", min: -90, max: 90, label: "初始值", hint: "-90 到 90 的整数。" },
+    compareSwapIncrements: { kind: "rows", columns: [[1, 20], [1, 20]], minItems: 1, maxItems: 8, label: "甲、乙各次增量",
+      hint: "每行是一次双线程更新，先处理甲。" },
+    compareSwapOverlap: { kind: "integer", min: 0, max: 1, label: "乙是否先读旧值", hint: "1 乙在甲写前读；0 甲写后乙才读。" },
+  },
+  defaults: { goalLabel: "观察旧期望值失败后的重新计算", compareSwapInitial: 0, compareSwapIncrements: [[3, 5]], compareSwapOverlap: 1 },
+  columns: ["轮内事件", "直接写组当前值", "CAS 组当前值", "记录"],
+  metricLabels: { compareSwapPlain: "直接写最终值", compareSwapAtomic: "CAS 最终值", compareSwapRetries: "CAS 重试次数",
+    compareSwapLost: "直接写丢失的增量" },
+  focusMetric: "compareSwapRetries", alternateTrial: "把乙改为在甲写完后读取。",
+  run({ compareSwapInitial, compareSwapIncrements, compareSwapOverlap }) {
+    let plain = compareSwapInitial;
+    let atomic = compareSwapInitial;
+    let retries = 0;
+    const steps: [string, number, number, string][] = [];
+    for (const [index, [a, b]] of compareSwapIncrements.entries()) {
+      const startPlain = plain;
+      const startAtomic = atomic;
+      plain += a;
+      atomic += a;
+      steps.push([`${index + 1} · 甲完成`, plain, atomic, compareSwapOverlap ? "乙已读取旧值" : "乙随后读取"]);
+      const plainExpected = compareSwapOverlap ? startPlain : plain;
+      let expected = compareSwapOverlap ? startAtomic : atomic;
+      if (expected !== atomic) {
+        retries++;
+        steps.push([`${index + 1} · 乙比较失败`, plain, atomic, `预期 ${expected}，实值 ${atomic}`]);
+        expected = atomic;
+      }
+      plain = plainExpected + b;
+      atomic = expected + b;
+      steps.push([`${index + 1} · 乙完成`, plain, atomic, `CAS 按 ${expected} 加 ${b}`]);
+    }
+    return { steps, metrics: { compareSwapPlain: plain, compareSwapAtomic: atomic, compareSwapRetries: retries,
+      compareSwapLost: atomic - plain }, report: {
+      conclusion: `直接写最终为 ${plain}。CAS 保留增量，最终为 ${atomic}。`,
+      detail: `初值是 ${compareSwapInitial}。有 ${compareSwapIncrements.length} 组并发操作。CAS 重试 ${retries} 次。直接写少加 ${atomic - plain}。回放列出预期和实际值。`,
+      explanation: "直接写接受旧计算结果。CAS 比较预期和当前值。相同才写。失败时读取新值再算。模型固定甲先写，重试期间无人再改。",
+      suggestion: "只调整乙的读取时机。比较重试和最终值。再增加一组操作。",
+    } };
+  },
+});
+
+export const segmentAddressLab = defineCurriculumLab({
+  id: "segment-address", domain: "operating-systems", title: "分段地址与越界检查",
+  description: "先判断段界限。再换算物理地址。",
+  topics: ["segmentation-base-limit"],
+  input: {
+    segmentDescriptors: { kind: "rows", columns: [[0, 999], [1, 32]], minItems: 1, maxItems: 8, label: "段基址与长度", hint: "按段号从 0 填基址和长度。" },
+    segmentAccesses: { kind: "rows", columns: [[0, 7], [0, 63]], minItems: 1, maxItems: 18, label: "段号与偏移", hint: "偏移从 0 计。不存在的段也可测试。" },
+  },
+  defaults: { goalLabel: "检查段末端和相邻位置的访问", segmentDescriptors: [[100, 4], [400, 3]], segmentAccesses: [[0, 0], [0, 4], [1, 2], [1, 3]] },
+  columns: ["段号", "偏移", "长度", "基址", "结果"],
+  metricLabels: { segmentAllowed: "允许访问次数", segmentBlocked: "越界或无段次数", segmentAddresses: "成功转换地址" },
+  focusMetric: "segmentBlocked", alternateTrial: "把两个段的长度分别增到 5、4。",
+  run({ segmentDescriptors, segmentAccesses }) {
+    const addresses: number[] = [];
+    const steps = segmentAccesses.map(([id, offset]) => {
+      const descriptor = segmentDescriptors[id];
+      if (!descriptor) return [id, offset, "—", "—", "段不存在"] as const;
+      const [base, length] = descriptor;
+      if (offset >= length) return [id, offset, length, base, "越界"] as const;
+      const address = base + offset;
+      addresses.push(address);
+      return [id, offset, length, base, address] as const;
+    });
+    const blocked = steps.length - addresses.length;
+    return { steps, metrics: { segmentAllowed: addresses.length, segmentBlocked: blocked, segmentAddresses: sequenceText(addresses) }, report: {
+      conclusion: `放行 ${addresses.length} 次。拦截 ${blocked} 次。`,
+      detail: `段表有 ${segmentDescriptors.length} 项。共发起 ${steps.length} 次访问。成功地址为 ${sequenceText(addresses)}。回放逐项展示段长度和结果。`,
+      explanation: "段号先定位段描述符。偏移必须小于段长。等于段长也越界。放行后用基址加偏移。模型按字节编号。",
+      suggestion: "只加长段。对照越界数。再试段长减一和段长两个偏移。",
+    } };
+  },
+});
+
+export const falseSharingLab = defineCurriculumLab({
+  id: "false-sharing", domain: "operating-systems", title: "缓存行与伪共享",
+  description: "两核写不同变量。对照变量是否同一行。",
+  comparison: "原间距 / 至少相隔一个缓存行",
+  topics: ["cache-line-false-sharing"],
+  input: {
+    falseShareLineWidth: { kind: "integer", min: 2, max: 16, label: "每行的字数", hint: "一行容纳 2–16 个字。" },
+    falseShareDistance: { kind: "integer", min: 1, max: 32, label: "两变量间距", hint: "变量 A 在 0；B 在指定字位置。" },
+    falseShareWriterOrder: { kind: "list", min: 0, max: 1, minItems: 1, maxItems: 20, label: "写入核序列", hint: "0 写 A；1 写 B。每项一次写。" },
+  },
+  defaults: { goalLabel: "测隔开变量后缓存行是否仍来回转移", falseShareLineWidth: 4, falseShareDistance: 1, falseShareWriterOrder: [0, 1, 0, 1, 0, 1] },
+  columns: ["写入核", "原布局行号", "原布局事件", "对齐组行号", "对齐组事件"],
+  metricLabels: { falseShareTransfers: "原布局行所有权转移", falseSharePaddedTransfers: "分行后转移数",
+    falseShareLineA: "原布局变量 A 行号", falseShareLineB: "原布局变量 B 行号" },
+  focusMetric: "falseShareTransfers", alternateTrial: "把变量间距改为 4。",
+  run({ falseShareLineWidth, falseShareDistance, falseShareWriterOrder }) {
+    const lineB = Math.floor(falseShareDistance / falseShareLineWidth);
+    const isolate = Math.max(1, lineB);
+    const layouts = [[0, lineB], [0, isolate]].map((lines) => ({ lines, owners: new Map<number, number>(), transfers: 0 }));
+    const steps = falseShareWriterOrder.map((core) => {
+      const events = layouts.map((layout) => {
+        const line = layout.lines[core];
+        const prior = layout.owners.get(line);
+        const transfer = prior !== undefined && prior !== core;
+        layout.transfers += Number(transfer);
+        layout.owners.set(line, core);
+        return [line, transfer ? `从核 ${prior} 转移` : prior === undefined ? "首次取得" : "继续持有"] as const;
+      });
+      return [core, ...events[0], ...events[1]] as const;
+    });
+    return { steps, metrics: { falseShareTransfers: layouts[0].transfers, falseSharePaddedTransfers: layouts[1].transfers,
+      falseShareLineA: 0, falseShareLineB: lineB }, report: {
+      conclusion: `原布局转移 ${layouts[0].transfers} 次。分行后转移 ${layouts[1].transfers} 次。`,
+      detail: `写入 ${steps.length} 次。每行 ${falseShareLineWidth} 个字。原变量在第 0 和 ${lineB} 行。比较组 B 在第 ${isolate} 行。首次取得不计转移。`,
+      explanation: "每个核只改自己的变量。写权限仍按缓存行跟踪。两变量同一行就会争用。不同行可各自持有。模型统计所有权变化。",
+      suggestion: "只拉开变量间距。检查行号和转移数。再改变两核写入顺序。",
+    } };
+  },
+});
+
+export const journalReplayLab = defineCurriculumLab({
+  id: "journal-replay", domain: "operating-systems", title: "文件日志与幂等重放",
+  description: "恢复时再次中断。对照写块映像和加增量。",
+  comparison: "写入已提交块映像 / 重复执行增量",
+  topics: ["journal-commit-replay", "journal-replay-idempotent-image"],
+  input: {
+    journalBlockValues: { kind: "list", min: -99, max: 99, minItems: 1, maxItems: 8, label: "磁盘初始块值", hint: "块从 0 编号。" },
+    journalOperations: { kind: "rows", columns: [[0, 7], [-20, 20]], minItems: 1, maxItems: 12, label: "块号与增量", hint: "按日志顺序填操作。" },
+    journalCommittedCount: { kind: "integer", min: 0, max: 12, label: "已提交日志条数", hint: "前几条有效，不超过总记录数。" },
+    journalReplayCount: { kind: "integer", min: 1, max: 4, label: "从头恢复几次", hint: "每次继续使用上次恢复过的磁盘。" },
+  },
+  defaults: { goalLabel: "核对两次恢复后是否重复加值", journalBlockValues: [10, 20], journalOperations: [[0, 3], [1, -5], [0, 1]], journalCommittedCount: 2, journalReplayCount: 2 },
+  check: ({ journalBlockValues, journalOperations, journalCommittedCount }) =>
+    journalCommittedCount <= journalOperations.length && journalOperations.every(([id]) => id < journalBlockValues.length),
+  columns: ["重放", "块号", "日志", "映像写后", "增量写后"],
+  metricLabels: { journalImageResult: "映像组块值", journalDeltaResult: "增量组块值", journalMismatches: "最终不同块数",
+    journalSkipped: "未提交日志条数", journalReplayWrites: "每组重放写次数" },
+  focusMetric: "journalMismatches", alternateTrial: "只重放一次。",
+  run({ journalBlockValues, journalOperations, journalCommittedCount, journalReplayCount }) {
+    const pending = [...journalBlockValues];
+    const log = journalOperations.slice(0, journalCommittedCount).map(([block, delta]) => ({ block, delta, after: pending[block] += delta }));
+    const images = [...journalBlockValues];
+    const deltas = [...journalBlockValues];
+    const steps: [number | string, number | string, string, string, string][] = [];
+    const skipped = journalOperations.length - journalCommittedCount;
+    for (let round = 1; round <= journalReplayCount; round++) {
+      for (const { block, delta, after } of log) {
+        images[block] = after;
+        deltas[block] += delta;
+        steps.push([round, block, `映像 ${after} / 增量 ${delta}`, sequenceText(images), sequenceText(deltas)]);
+      }
+    }
+    if (skipped) steps.push(["跳过", "—", `${skipped} 条未提交`, sequenceText(images), sequenceText(deltas)]);
+    const mismatch = images.filter((value, index) => value !== deltas[index]).length;
+    return { steps, metrics: { journalImageResult: sequenceText(images), journalDeltaResult: sequenceText(deltas),
+      journalMismatches: mismatch, journalSkipped: skipped, journalReplayWrites: log.length * journalReplayCount }, report: {
+      conclusion: `重放 ${journalReplayCount} 次后，两组有 ${mismatch} 个不同块。`,
+      detail: `已提交 ${log.length} 条。跳过 ${skipped} 条。每组写 ${log.length * journalReplayCount} 次。映像组为 ${sequenceText(images)}。增量组为 ${sequenceText(deltas)}。`,
+      explanation: "恢复只处理已提交记录。块映像保存写后的完整值。重复写同值不会累加。增量直接执行会再算一次。模型不跟踪日志回收。",
+      suggestion: "只减少重放次数。核对块值。再改单条日志的提交边界。",
+    } };
+  },
+});
+
 export const lockOrderingLab = defineCurriculumLab({
   id: "lock-ordering", domain: "operating-systems", title: "固定加锁顺序与死锁",
   description: "两个任务竞争两把锁。回放谁在等谁。",

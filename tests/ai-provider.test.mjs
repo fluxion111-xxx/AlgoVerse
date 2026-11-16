@@ -514,12 +514,15 @@ test("learning advice uses the target and exact topic activity without inferring
   assert.equal(learningSuggestion(practiced, "networks")?.entry.topic.id, "network-encapsulation");
   const read = { ...empty, readTopics: new Set(knowledgeEntries.filter(({ domain }) => domain.id === "networks").map(({ topic }) => topic.id)) };
   const orderedPractices = [
-    "packet-routing", "ipv6-hop-limit", "per-hop-delivery-probability", "ipv6-packet-too-big", "ipv4-df-fragment-needed",
-    "tcp-sequence-ack", "tcp-three-way-sequence", "tcp-rto-backoff", "tcp-sack-out-of-order-blocks",
-    "ethernet-crc-detection", "arp-next-hop-resolution", "dns-recursive-iterative", "dns-negative-cache",
+    "packet-routing", "ipv6-hop-limit", "per-hop-delivery-probability", "ipv6-packet-too-big", "ipv4-napt-port-mapping", "ipv4-df-fragment-needed",
+    "tcp-sequence-ack", "tcp-three-way-sequence", "tcp-rto-backoff", "tcp-half-close-fin", "tcp-sack-out-of-order-blocks",
+    "ipv6-next-header-demux", "ethernet-crc-detection", "arp-next-hop-resolution", "http-method-idempotency", "http-cache-validation",
+    "dns-recursive-iterative", "dns-negative-cache",
     "cidr-prefix-match", "cidr-aggregate-alignment", "ipv4-subnet-network-host", "link-state-routing",
     "ethernet-source-learning", "vlan-trunk-tag", "stp-block-redundant-path", "link-aggregation-flow-hash",
-    "capture-model-hop-event-crosscheck", "tcp-trace-gap-dupacks-sack", "pmtu-size-dependent-stall", "tcp-receive-window", "tcp-cwnd-rwnd",
+    "capture-model-hop-event-crosscheck", "tcp-trace-gap-dupacks-sack", "pmtu-size-dependent-stall", "tcp-message-framing",
+    "frame-length-resource-limit", "retry-idempotency", "tcp-receive-window", "tcp-cwnd-rwnd", "socket-recv-zero-eof",
+    "nonblocking-partial-write", "output-queue-high-watermark", "cors-origin-boundary",
   ];
   const byTopic = {};
   for (const id of orderedPractices) {

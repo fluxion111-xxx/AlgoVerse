@@ -1,5 +1,313 @@
 import { defineCurriculumLab, sequenceText } from "./curriculumLab";
 
+export const gitSnapshotLab = defineCurriculumLab({
+  id: "git-snapshot", domain: "programming", title: "Git 暂存区与提交快照",
+  description: "编辑、暂存、提交。对照文件的三个版本。",
+  topics: ["git-staging", "git-commit-parent-tree"],
+  input: {
+    gitSnapshotActions: { kind: "rows", columns: [[0, 2], [-20, 99]], minItems: 1, maxItems: 18, label: "操作与新版本",
+      hint: "0 编辑，第二列填版本；1 暂存；2 提交。暂存和提交第二列填 0。" },
+  },
+  defaults: { goalLabel: "验证再次编辑后提交仍使用暂存快照", gitSnapshotActions: [[0, 1], [1, 0], [0, 2], [2, 0]] },
+  check: ({ gitSnapshotActions }) => gitSnapshotActions.every(([op, value]) => op === 0 || value === 0),
+  columns: ["动作", "工作区", "暂存区", "HEAD", "结果"],
+  metricLabels: { gitSnapshotWork: "最终工作区", gitSnapshotIndex: "最终暂存区", gitSnapshotHead: "最终提交值",
+    gitSnapshotCommits: "产生的提交数", gitSnapshotUnstaged: "是否有未暂存改动" },
+  focusMetric: "gitSnapshotHead", alternateTrial: "在提交前再加一次暂存。",
+  run({ gitSnapshotActions }) {
+    let working = 0;
+    let staged = 0;
+    let head = 0;
+    let commits = 0;
+    const steps = gitSnapshotActions.map(([op, value]) => {
+      let status: string;
+      if (op === 0) { working = value; status = "只改工作区"; }
+      else if (op === 1) { staged = working; status = "复制工作区值"; }
+      else if (head === staged) status = "没有暂存变化";
+      else { head = staged; commits++; status = "提交暂存快照"; }
+      return [["编辑", "暂存", "提交"][op], working, staged, head, status] as const;
+    });
+    return { steps, metrics: { gitSnapshotWork: working, gitSnapshotIndex: staged, gitSnapshotHead: head, gitSnapshotCommits: commits,
+      gitSnapshotUnstaged: working !== staged ? "是" : "否" }, report: {
+      conclusion: `最后提交值是 ${head}。工作区是 ${working}。`,
+      detail: `执行 ${steps.length} 个动作。产生 ${commits} 次提交。最终暂存值 ${staged}。工作区${working !== staged ? "有" : "没有"}未暂存变化。模型只跟踪一个文件。`,
+      explanation: "编辑不会改暂存区。暂存复制当前版本。提交只取暂存快照。后来编辑仍留在工作区。模拟不执行真实 Git 命令。",
+      suggestion: "只在提交前增加一次暂存。核对 HEAD。再试空提交。",
+    } };
+  },
+});
+
+export const mutationThresholdLab = defineCurriculumLab({
+  id: "mutation-threshold", domain: "programming", title: "变异测试与存活变异",
+  description: "运行原条件和三个变体。找漏测分支。",
+  topics: ["mutation-test-surviving-mutant"],
+  input: {
+    mutationThresholdValue: { kind: "integer", min: -19, max: 19, label: "允许的最低分", hint: "原条件为输入大于等于此值。" },
+    mutationProbeValues: { kind: "list", min: -20, max: 20, minItems: 1, maxItems: 18, label: "测试输入", hint: "可填边界与两侧值。" },
+  },
+  defaults: { goalLabel: "找到只剩等号差异的存活变体", mutationThresholdValue: 5, mutationProbeValues: [2, 8] },
+  columns: ["测试值", "原条件", "严格大于", "小于等于", "恒真", "本例检出"],
+  metricLabels: { mutationKilledCount: "检出变体数", mutationSurvivorCount: "存活变体数", mutationSurvivorNames: "存活变体", mutationProbed: "执行的测试数" },
+  focusMetric: "mutationSurvivorCount", alternateTrial: "在测试列表中加入 5。",
+  run({ mutationThresholdValue, mutationProbeValues }) {
+    const names = ["严格大于", "小于等于", "恒真"];
+    const killed = new Set<string>();
+    const steps = mutationProbeValues.map((value) => {
+      const original = value >= mutationThresholdValue;
+      const variants = [value > mutationThresholdValue, value <= mutationThresholdValue, true];
+      const mismatches = names.filter((_, index) => variants[index] !== original);
+      mismatches.forEach((name) => killed.add(name));
+      const word = (result: boolean) => result ? "通过" : "拒绝";
+      return [value, word(original), word(variants[0]), word(variants[1]), word(variants[2]), mismatches.join("、") || "无"] as const;
+    });
+    const survivors = names.filter((name) => !killed.has(name));
+    const last = survivors.join("、") || "无";
+    return { steps, metrics: { mutationKilledCount: killed.size, mutationSurvivorCount: survivors.length,
+      mutationSurvivorNames: last, mutationProbed: steps.length }, report: {
+      conclusion: `三个变体检出 ${killed.size} 个。仍存活 ${survivors.length} 个。`,
+      detail: `运行 ${steps.length} 个测试。阈值是 ${mutationThresholdValue}。存活项为 ${last}。回放逐项比对原条件。任一反例即可检出变体。`,
+      explanation: "变异是刻意改一小处。测试要比较可观察结果。只测两侧可能漏掉等号。存活只说明这批测试没区分。模型不估算代码覆盖率。",
+      suggestion: "只加入边界值。查看谁不再存活。再删掉所有低于阈值的测试。",
+    } };
+  },
+});
+
+export const promiseRejectionLab = defineCurriculumLab({
+  id: "promise-rejection", domain: "programming", title: "Promise.all 拒绝与取消",
+  description: "并发任务有一个失败。观察余下任务。",
+  comparison: "仅聚合拒绝 / 同时通知协作取消",
+  topics: ["promise-all-rejection-cancellation"],
+  input: {
+    promiseFinishTimes: { kind: "rows", columns: [[1, 20], [0, 1]], minItems: 1, maxItems: 12, label: "完成时刻与是否拒绝",
+      hint: "每行一个任务。第二列 0 成功、1 拒绝。同拍按输入顺序。" },
+  },
+  defaults: { goalLabel: "区分聚合失败和剩余任务各自的执行", promiseFinishTimes: [[1, 0], [2, 1], [4, 0], [5, 0]] },
+  columns: ["时刻", "任务", "只聚合", "协作取消组", "聚合状态"],
+  metricLabels: { promiseAggregateAt: "聚合确定时刻", promiseAggregateStatus: "聚合结果", promiseContinued: "拒绝后仍完成的任务",
+    promiseCanceled: "协作组取消任务数" },
+  focusMetric: "promiseCanceled", alternateTrial: "把第 2 个任务改为成功。",
+  run({ promiseFinishTimes }) {
+    const tasks = promiseFinishTimes.map(([time, rejects], index) => ({ time, rejects, id: index + 1 })).sort((a, b) => a.time - b.time || a.id - b.id);
+    let failed = false;
+    let settle = tasks.at(-1)!.time;
+    let later = 0;
+    const steps = tasks.map(({ time, rejects, id }, index) => {
+      const canceled = failed;
+      if (canceled) later++;
+      else if (rejects) { failed = true; settle = time; }
+      const baseline = rejects ? "拒绝" : "成功";
+      return [time, id, baseline, canceled ? "收到通知 · 取消" : baseline,
+        failed ? "已拒绝" : index === tasks.length - 1 ? "全部成功" : "等待中"] as const;
+    });
+    return { steps, metrics: { promiseAggregateAt: settle, promiseAggregateStatus: failed ? "拒绝" : "成功",
+      promiseContinued: later, promiseCanceled: later }, report: {
+      conclusion: `聚合在第 ${settle} 拍${failed ? "拒绝" : "成功"}。协作组取消 ${later} 项。`,
+      detail: `同时启动 ${tasks.length} 个任务。只聚合组在拒绝后仍完成 ${later} 项。回放比较每个任务。同拍按输入顺序。`,
+      explanation: "任一拒绝会立即确定聚合结果。其他任务仍按自己的时序执行。额外通知才会触发取消。题设剩余任务支持协作取消。",
+      suggestion: "只把首个失败改为成功。核对确定时刻。再把另一个任务改为拒绝。",
+    } };
+  },
+});
+
+export const defensiveListLab = defineCurriculumLab({
+  id: "defensive-list", domain: "programming", title: "防御性复制与对象不变量",
+  description: "改入参数组和读出的数组。观察内部状态。",
+  comparison: "共享引用 / 只复制入参 / 读写边界均复制",
+  topics: ["defensive-copy-invariant"],
+  input: {
+    defensiveInitialList: { kind: "list", min: -20, max: 99, minItems: 2, maxItems: 12, label: "初始有序列表", hint: "允许相等。必须非递减。" },
+    defensiveInputEdit: { kind: "integer", min: -20, max: 99, label: "调用者写入首项", hint: "构造后修改传入列表的首项。" },
+    defensiveOutputEdit: { kind: "integer", min: -20, max: 99, label: "调用者写入导出末项", hint: "读取后修改返回列表的末项。" },
+  },
+  defaults: { goalLabel: "核对构造和导出两侧的引用是否隔离", defensiveInitialList: [4, 8, 12], defensiveInputEdit: 99, defensiveOutputEdit: -7 },
+  check: ({ defensiveInitialList }) => defensiveInitialList.every((value, index) => index === 0 || value >= defensiveInitialList[index - 1]),
+  columns: ["阶段", "共享组内部", "仅入口复制组", "两处复制组", "违反有序约定的组数"],
+  metricLabels: { defensiveBadLanes: "违反有序约定的组数", defensiveSharedState: "共享组最终状态",
+    defensiveInputCopyState: "仅入口复制组最终状态", defensiveBothCopyState: "两处复制组最终状态" },
+  focusMetric: "defensiveBadLanes", alternateTrial: "把导出末项的写入值改为 12。",
+  run({ defensiveInitialList, defensiveInputEdit, defensiveOutputEdit }) {
+    const inputs = Array.from({ length: 3 }, () => [...defensiveInitialList]);
+    const states = [inputs[0], [...inputs[1]], [...inputs[2]]];
+    const ordered = (values: number[]) => values.every((value, index) => index === 0 || value >= values[index - 1]);
+    const count = () => states.filter((values) => !ordered(values)).length;
+    const snapshot = (stage: string) => [stage, sequenceText(states[0]), sequenceText(states[1]), sequenceText(states[2]), count()] as const;
+    const steps = [snapshot("构造对象")];
+    inputs.forEach((values) => { values[0] = defensiveInputEdit; });
+    steps.push(snapshot("改原入参首项"));
+    const exports = [states[0], states[1], [...states[2]]];
+    exports.forEach((values) => { values[values.length - 1] = defensiveOutputEdit; });
+    steps.push(snapshot("改导出末项"));
+    return { steps, metrics: { defensiveBadLanes: count(), defensiveSharedState: sequenceText(states[0]),
+      defensiveInputCopyState: sequenceText(states[1]), defensiveBothCopyState: sequenceText(states[2]) }, report: {
+      conclusion: `最后有 ${count()} 组破坏有序约定。`,
+      detail: `初始有 ${defensiveInitialList.length} 项。先改入参首项。再改返回末项。共享组结束为 ${sequenceText(states[0])}。双向复制组为 ${sequenceText(states[2])}。`,
+      explanation: "对象要求内部列表有序。共享引用允许外部改它。入口复制只能挡住原入参。返回副本能隔离导出修改。元素是整数。",
+      suggestion: "只把导出末项改回原值。比较违规组数。再只保留入口修改。",
+    } };
+  },
+});
+
+export const nullishDefaultLab = defineCurriculumLab({
+  id: "nullish-default", domain: "programming", title: "空值合并与假值默认",
+  description: "给同一值填默认。对照 ?? 和 ||。",
+  comparison: "空值合并 ?? / 逻辑或 ||",
+  topics: ["js-nullish-coalescing"],
+  input: {
+    nullishCodes: { kind: "list", min: 0, max: 5, minItems: 1, maxItems: 18, label: "输入类型序列",
+      hint: "0 未定义，1 空值，2 假，3 数字零，4 空字符串，5 数字九。" },
+    nullishFallbackValue: { kind: "integer", min: 1, max: 99, label: "默认数值", hint: "两组共用同一个非零数。" },
+  },
+  defaults: { goalLabel: "识别应保留的零、假和空串", nullishCodes: [0, 1, 2, 3, 4, 5], nullishFallbackValue: 7 },
+  columns: ["输入", "?? 结果", "|| 结果", "结果相同"],
+  metricLabels: { nullishDefaulted: "?? 取默认次数", nullishOrDefaulted: "|| 取默认次数", nullishDifferences: "结果不同次数" },
+  focusMetric: "nullishDifferences", alternateTrial: "把输入序列改为 0、1、5。",
+  run({ nullishCodes, nullishFallbackValue }) {
+    const choices = [undefined, null, false, 0, "", 9] as const;
+    const label = (value: unknown) => value === undefined ? "未定义" : value === null ? "空值" : JSON.stringify(value);
+    let nullish = 0;
+    let falsy = 0;
+    let different = 0;
+    const steps = nullishCodes.map((code) => {
+      const value = choices[code];
+      const a = value ?? nullishFallbackValue;
+      const b = value || nullishFallbackValue;
+      nullish += Number(value === undefined || value === null);
+      falsy += Number(!value);
+      different += Number(a !== b);
+      return [label(value), label(a), label(b), a === b ? "是" : "否"] as const;
+    });
+    return { steps, metrics: { nullishDefaulted: nullish, nullishOrDefaulted: falsy, nullishDifferences: different }, report: {
+      conclusion: `?? 取默认 ${nullish} 次。|| 取默认 ${falsy} 次。`,
+      detail: `输入有 ${steps.length} 项。默认值为 ${nullishFallbackValue}。两个结果不同有 ${different} 项。回放可看每项的类型和值。`,
+      explanation: "?? 只在 null 或未定义时替换。|| 遇假值就取右侧。零、假和空串都是假值。它们仍可以是有效输入。",
+      suggestion: "先只保留空值和非零数。再加入零和空串。核对结果差异。",
+    } };
+  },
+});
+
+export const contextExitLab = defineCurriculumLab({
+  id: "context-exit", domain: "programming", title: "Python 上下文管理与异常清理",
+  description: "模拟进入或正文失败。观察 __exit__。",
+  comparison: "with 上下文管理 / 只在尾部手动关闭",
+  topics: ["python-context-manager-exit"],
+  input: {
+    contextFailure: { kind: "integer", min: 0, max: 2, label: "失败阶段", hint: "0 无；1 进入前失败；2 正文抛错。" },
+    contextSuppress: { kind: "integer", min: 0, max: 1, label: "退出函数是否抑制异常", hint: "1 表示 __exit__ 返回真。" },
+  },
+  defaults: { goalLabel: "核对正文抛错后退出方法的清理和传播", contextFailure: 2, contextSuppress: 0 },
+  columns: ["阶段", "尾部关闭组", "with 组", "说明"],
+  metricLabels: { contextExitCalls: "调用退出方法次数", contextManualOpen: "手动组残留资源",
+    contextWithOpen: "with 组残留资源", contextPropagated: "with 组异常是否传出" },
+  focusMetric: "contextPropagated", alternateTrial: "让退出函数返回真。",
+  run({ contextFailure, contextSuppress }) {
+    const entered = contextFailure !== 1;
+    const bodyFailed = contextFailure === 2;
+    const suppressed = bodyFailed && contextSuppress === 1;
+    const manualOpen = Number(entered && bodyFailed);
+    const escaped = contextFailure === 1 || (bodyFailed && !suppressed);
+    const steps: [string, string, string, string][] = [
+      ["进入", entered ? "资源打开" : "打开失败", entered ? "__enter__ 成功" : "__enter__ 抛异常", entered ? "两组已取得资源" : "题设未取得资源"],
+    ];
+    if (entered) {
+      steps.push(["正文", bodyFailed ? "抛出异常" : "正常返回", bodyFailed ? "抛出异常" : "正常返回", "两组执行相同正文"]);
+      steps.push(["退出", bodyFailed ? "跳过尾部关闭" : "关闭资源", "__exit__ 关闭资源", suppressed ? "退出方法抑制异常" : "执行资源清理"]);
+    }
+    steps.push(["外层", contextFailure ? "收到异常" : "继续执行", escaped ? "收到异常" : "继续执行", "结束本轮模拟"]);
+    return { steps, metrics: { contextExitCalls: Number(entered), contextManualOpen: manualOpen, contextWithOpen: 0,
+      contextPropagated: escaped ? "是" : "否" }, report: {
+      conclusion: `with 组剩余资源为 0。异常${escaped ? "传出" : "未传出"}。`,
+      detail: `失败阶段编号 ${contextFailure}。退出函数执行 ${Number(entered)} 次。手动组遗留 ${manualOpen} 个资源。退出函数返回值选项为 ${contextSuppress}。`,
+      explanation: "进入成功后，退出方法会执行。正文异常也会交给它。返回真可抑制正文异常。进入失败不调用退出方法。题设失败发生在取得资源前。",
+      suggestion: "只切换退出返回值。比较外层是否收到异常。再把失败点移到进入阶段。",
+    } };
+  },
+});
+
+const utf8ExperimentEncoder = new TextEncoder();
+
+export const streamedTextLab = defineCurriculumLab({
+  id: "utf8-stream", domain: "programming", title: "UTF-8 分块解码",
+  description: "把同一字节流切块。比较独立解码和流式解码。",
+  comparison: "每块独立解码 / 维护状态解码",
+  topics: ["python-text-encoding-newline"],
+  input: {
+    textStreamSource: { kind: "text", maxLength: 36, label: "输入文本", hint: "可用中文和表情；不含替换字符。" },
+    textStreamChunkSize: { kind: "integer", min: 1, max: 16, label: "每块的字节数", hint: "按字节切分，1–16 字节。" },
+  },
+  defaults: { goalLabel: "观察汉字跨区块后解码结果", textStreamSource: "A你B", textStreamChunkSize: 2 },
+  check: ({ textStreamSource }) => !textStreamSource.includes("�") && new TextDecoder("utf-8", { ignoreBOM: true })
+    .decode(utf8ExperimentEncoder.encode(textStreamSource)) === textStreamSource,
+  columns: ["区块", "字节（十六进制）", "独立解码", "流式解码"],
+  metricLabels: { textStreamBytes: "总字节数", textStreamChunks: "区块数", textStreamReplacement: "独立解码替换字符数",
+    textStreamMatched: "流式结果是否等于输入" },
+  focusMetric: "textStreamReplacement", alternateTrial: "只把区块大小改为 4。",
+  run({ textStreamSource, textStreamChunkSize }) {
+    const bytes = utf8ExperimentEncoder.encode(textStreamSource);
+    const streaming = new TextDecoder("utf-8", { ignoreBOM: true });
+    const standalone = new TextDecoder("utf-8", { ignoreBOM: true });
+    let combined = "";
+    let replacements = 0;
+    const steps: [number, string, string, string][] = [];
+    for (let offset = 0; offset < bytes.length; offset += textStreamChunkSize) {
+      const chunk = bytes.slice(offset, offset + textStreamChunkSize);
+      const naive = standalone.decode(chunk);
+      const decoded = streaming.decode(chunk, { stream: offset + chunk.length < bytes.length });
+      combined += decoded;
+      replacements += Array.from(naive).filter((char) => char === "�").length;
+      steps.push([steps.length + 1, [...chunk].map((value) => value.toString(16).padStart(2, "0")).join(" "),
+        JSON.stringify(naive), JSON.stringify(decoded)]);
+    }
+    return { steps, metrics: { textStreamBytes: bytes.length, textStreamChunks: steps.length,
+      textStreamReplacement: replacements, textStreamMatched: combined === textStreamSource ? "是" : "否" }, report: {
+      conclusion: `独立解码产生 ${replacements} 个替换字符。流式解码还原输入。`,
+      detail: `输入编码成 ${bytes.length} 字节。切成 ${steps.length} 块。块长上限为 ${textStreamChunkSize}。回放能看每块的字节和解码结果。`,
+      explanation: "一个 UTF-8 字符可能跨块。独立解码会丢掉边界状态。流式解码保留未凑齐的字节。下一块到来后继续解码。模型使用替换式错误处理。",
+      suggestion: "只改变每块字节数。观察替换次数。再换成包含表情的字符串。",
+    } };
+  },
+});
+
+export const delegatedEventLab = defineCurriculumLab({
+  id: "event-delegation", domain: "programming", title: "事件冒泡与委托选择",
+  description: "从被点击节点向上走。比较两种匹配方式。",
+  comparison: "只检查事件目标 / 沿祖先寻找按钮",
+  topics: ["dom-event-delegation"],
+  input: {
+    delegatedParents: { kind: "list", min: -1, max: 11, minItems: 2, maxItems: 12, label: "各节点的父编号",
+      hint: "节点 0 是根，填 -1；其他节点的父编号必须较小。" },
+    delegatedButtons: { kind: "list", min: 0, max: 11, minItems: 0, maxItems: 12, label: "按钮节点编号", hint: "可标记多个按钮。" },
+    delegatedTarget: { kind: "integer", min: 0, max: 11, label: "事件目标节点", hint: "填写存在的节点编号。" },
+    delegatedBubbles: { kind: "integer", min: 0, max: 1, label: "是否允许冒泡", hint: "监听器只登记在根节点。" },
+  },
+  defaults: { goalLabel: "辨认点击子节点时委托匹配到的按钮", delegatedParents: [-1, 0, 1, 0], delegatedButtons: [1, 3], delegatedTarget: 2, delegatedBubbles: 1 },
+  check: ({ delegatedParents, delegatedButtons, delegatedTarget }) => delegatedParents[0] === -1 &&
+    delegatedParents.slice(1).every((parent, index) => parent >= 0 && parent <= index) &&
+    delegatedTarget < delegatedParents.length && delegatedButtons.every((button) => button < delegatedParents.length),
+  columns: ["事件经过节点", "节点是按钮", "根监听状态", "委托判定"],
+  metricLabels: { delegatedReached: "根是否收到", delegatedDirectMatch: "仅检查目标是否匹配",
+    delegatedClosest: "向上找到的按钮", delegatedPathLength: "事件经过节点数" },
+  focusMetric: "delegatedClosest", alternateTrial: "把是否冒泡改为 0。",
+  run({ delegatedParents, delegatedButtons, delegatedTarget, delegatedBubbles }) {
+    const buttons = new Set(delegatedButtons);
+    const path = [delegatedTarget];
+    if (delegatedBubbles) {
+      for (let node = delegatedParents[delegatedTarget]; node >= 0; node = delegatedParents[node]) path.push(node);
+    }
+    const reached = path.includes(0);
+    const closest = reached ? path.find((node) => buttons.has(node)) : undefined;
+    const direct = reached && buttons.has(delegatedTarget);
+    const steps = path.map((node) => [node, buttons.has(node) ? "是" : "否", node === 0 ? "收到事件" : "未到根",
+      node === 0 ? closest === undefined ? "无匹配" : `匹配按钮 ${closest}` : "—"] as const);
+    return { steps, metrics: { delegatedReached: reached ? "是" : "否", delegatedDirectMatch: direct ? "是" : "否",
+      delegatedClosest: closest ?? "无", delegatedPathLength: path.length }, report: {
+      conclusion: `根监听器${reached ? "收到" : "没收到"}事件。匹配按钮为 ${closest ?? "无"}。`,
+      detail: `目标是 ${delegatedTarget}。经过 ${path.length} 个节点。节点顺序为 ${sequenceText(path)}。仅检查目标${direct ? "能" : "不能"}匹配。回放标出到根的时点。`,
+      explanation: "事件目标是触发位置。冒泡会沿父节点向上。到根时才执行委托。委托从目标找最近按钮。模型不模拟捕获或拦截。",
+      suggestion: "只关闭冒泡。核对根是否收到。再点击根或按钮节点自身。",
+    } };
+  },
+});
+
 export const mutableDefaultLab = defineCurriculumLab({
   id: "mutable-default", domain: "programming", title: "Python 可变默认参数",
   description: "连续调用函数。对照共享列表和新列表。",

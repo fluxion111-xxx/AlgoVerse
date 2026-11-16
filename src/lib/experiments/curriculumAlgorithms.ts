@@ -1,5 +1,409 @@
 import { defineCurriculumLab, gapText, sequenceText } from "./curriculumLab";
 
+export const huffmanCodingLab = defineCurriculumLab({
+  id: "huffman-coding", domain: "algorithms", title: "Huffman 最小合并编码",
+  description: "反复合并最轻节点。对照定长编码。",
+  comparison: "Huffman / 定长编码",
+  topics: ["huffman-smallest-merge"],
+  input: { huffmanWeights: { kind: "list", min: 1, max: 99, minItems: 2, maxItems: 12, label: "各符号出现次数", hint: "每项一个符号。按输入从 1 编号。" } },
+  defaults: { goalLabel: "核对低频和高频符号的编码长度", huffmanWeights: [1, 1, 2, 8] },
+  columns: ["阶段", "节点内容", "合并权重或频次", "累计开销或编码"],
+  metricLabels: { huffmanBits: "Huffman 正文位数", huffmanFixedBits: "定长正文位数", huffmanSavedBits: "节省的位数",
+    huffmanMaxLength: "最长码长" },
+  focusMetric: "huffmanSavedBits", alternateTrial: "把四个频次都改为 3。",
+  run({ huffmanWeights }) {
+    const queue = huffmanWeights.map((weight, id) => ({ weight, id: id + 1, symbols: [{ id: id + 1, code: "" }] }));
+    const steps: [string, string | number, number, string | number][] = [];
+    let cost = 0;
+    let nextId = queue.length + 1;
+    while (queue.length > 1) {
+      queue.sort((a, b) => a.weight - b.weight || a.id - b.id);
+      const [left, right] = queue.splice(0, 2);
+      const weight = left.weight + right.weight;
+      cost += weight;
+      const symbols = [...left.symbols.map(({ id, code }) => ({ id, code: `0${code}` })),
+        ...right.symbols.map(({ id, code }) => ({ id, code: `1${code}` }))];
+      queue.push({ weight, id: nextId++, symbols });
+      steps.push(["合并", `${left.id} + ${right.id}`, weight, cost]);
+    }
+    const codes = queue[0].symbols.sort((a, b) => a.id - b.id);
+    for (const { id, code } of codes) steps.push(["码表", id, huffmanWeights[id - 1], code]);
+    const occurrences = queue[0].weight;
+    const fixed = occurrences * Math.ceil(Math.log2(huffmanWeights.length));
+    return { steps, metrics: { huffmanBits: cost, huffmanFixedBits: fixed, huffmanSavedBits: fixed - cost,
+      huffmanMaxLength: Math.max(...codes.map(({ code }) => code.length)) }, report: {
+      conclusion: `Huffman 用 ${cost} 位。定长编码用 ${fixed} 位。`,
+      detail: `共有 ${codes.length} 种符号。总频次 ${occurrences}。正文节省 ${fixed - cost} 位。回放最后列码表。位数不含码表头。`,
+      explanation: "每次取权重最小的两项。合并权重加入总开销。左边接 0，右边接 1。同频按节点编号。高频符号通常使用短码。",
+      suggestion: "只让频次接近。比较节省位数。再让某个符号明显更常见。",
+    } };
+  },
+});
+
+export const lazySegmentLab = defineCurriculumLab({
+  id: "lazy-segment-tree", domain: "algorithms", title: "线段树的延迟标记",
+  description: "交替做区间加和区间求和。",
+  comparison: "逐项处理 / 延迟线段树",
+  topics: ["segment-tree-lazy-tags", "segment-tree"],
+  input: {
+    lazySegmentValues: { kind: "list", min: -20, max: 20, minItems: 1, maxItems: 16, label: "初始数组", hint: "按下标从 0 填入。" },
+    lazySegmentOperations: { kind: "rows", columns: [[0, 1], [0, 15], [1, 16], [-20, 20]], minItems: 1, maxItems: 16, label: "类型、左端、右端、增量",
+      hint: "0 区间加；1 求和，增量填 0。左闭右开。至少求和一次。" },
+  },
+  defaults: { goalLabel: "验证延迟加值与逐项求和得到相同结果", lazySegmentValues: [1, 2, 3, 4],
+    lazySegmentOperations: [[0, 0, 4, 2], [1, 0, 4, 0], [0, 1, 3, -1], [1, 1, 3, 0]] },
+  check: ({ lazySegmentValues, lazySegmentOperations }) => lazySegmentOperations.some(([kind]) => kind === 1) &&
+    lazySegmentOperations.every(([kind, l, r, delta]) => l < r && r <= lazySegmentValues.length && (!kind || delta === 0)),
+  columns: ["操作", "区间", "逐项结果", "线段树结果", "本步访问树节点", "下推次数"],
+  metricLabels: { lazySegmentLastSum: "末次区间和", lazySegmentNaiveTouches: "逐项处理次数",
+    lazySegmentTreeTouches: "访问树节点数", lazySegmentPushes: "标记下推次数" },
+  focusMetric: "lazySegmentLastSum", alternateTrial: "把第一次区间增量从 2 改成 3。",
+  run({ lazySegmentValues, lazySegmentOperations }) {
+    const direct = [...lazySegmentValues];
+    const sums = Array<number>(4 * direct.length).fill(0);
+    const marks = [...sums];
+    let visits = 0;
+    let pushes = 0;
+    let naive = 0;
+    let lastSum = 0;
+    function build(node: number, lo: number, hi: number): number {
+      if (hi - lo === 1) return sums[node] = direct[lo];
+      const mid = (lo + hi) >>> 1;
+      return sums[node] = build(node * 2, lo, mid) + build(node * 2 + 1, mid, hi);
+    }
+    const apply = (node: number, length: number, delta: number) => { sums[node] += length * delta; marks[node] += delta; };
+    build(1, 0, direct.length);
+    function visit(node: number, lo: number, hi: number, left: number, right: number, delta: number | null): number {
+      if (right <= lo || hi <= left) return 0;
+      visits++;
+      if (left <= lo && hi <= right) {
+        if (delta !== null) apply(node, hi - lo, delta);
+        return sums[node];
+      }
+      const mid = (lo + hi) >>> 1;
+      if (marks[node]) {
+        apply(node * 2, mid - lo, marks[node]);
+        apply(node * 2 + 1, hi - mid, marks[node]);
+        marks[node] = 0;
+        pushes++;
+      }
+      const partial = visit(node * 2, lo, mid, left, right, delta) + visit(node * 2 + 1, mid, hi, left, right, delta);
+      if (delta !== null) sums[node] = sums[node * 2] + sums[node * 2 + 1];
+      return partial;
+    }
+    const steps = lazySegmentOperations.map(([kind, l, r, delta]) => {
+      const visitBefore = visits;
+      const pushBefore = pushes;
+      const tree = visit(1, 0, direct.length, l, r, kind ? null : delta);
+      naive += r - l;
+      let sum = 0;
+      for (let i = l; i < r; i++) {
+        if (!kind) direct[i] += delta;
+        sum += direct[i];
+      }
+      if (kind) lastSum = tree;
+      return [kind ? "求和" : `加 ${delta}`, `[${l}, ${r})`, kind ? sum : "已更新", kind ? tree : "已更新",
+        visits - visitBefore, pushes - pushBefore] as const;
+    });
+    return { steps, metrics: { lazySegmentLastSum: lastSum, lazySegmentNaiveTouches: naive, lazySegmentTreeTouches: visits,
+      lazySegmentPushes: pushes }, report: {
+      conclusion: `末次区间和为 ${lastSum}。延迟标记下推 ${pushes} 次。`,
+      detail: `处理 ${steps.length} 次操作。逐项处理 ${naive} 格。树访问 ${visits} 个相交节点。两种计数口径分开。回放并列每次查询和。`,
+      explanation: "整段覆盖时直接改节点和。增量留在该节点。只看部分区间时先下推。更新结束向上重算总和。计数不含建树。",
+      suggestion: "只改第一次增量。核对两列查询。再改单次查询的区间。",
+    } };
+  },
+});
+
+export const hashStrideLab = defineCurriculumLab({
+  id: "hash-stride", domain: "algorithms", title: "双重哈希的探测步长",
+  description: "比较线性探测和指定步长。",
+  comparison: "线性探测 / 固定第二哈希值",
+  topics: ["hash-double-probe-coprime"],
+  input: {
+    strideHashSlots: { kind: "integer", min: 2, max: 18, label: "哈希槽位数", hint: "初始位置为键对槽数取模。" },
+    strideHashStep: { kind: "integer", min: 1, max: 17, label: "对照组步长", hint: "必须小于槽数。可测试与槽数不互素。" },
+    strideHashKeys: { kind: "list", min: 0, max: 99, minItems: 1, maxItems: 20, label: "插入键顺序", hint: "按顺序尝试，重复键只保留一份。" },
+  },
+  defaults: { goalLabel: "查看非互素时探测是否过早回到起点", strideHashSlots: 8, strideHashStep: 2, strideHashKeys: [0, 8, 16, 24, 32] },
+  check: ({ strideHashSlots, strideHashStep }) => strideHashStep < strideHashSlots,
+  columns: ["键", "线性路径", "线性结果", "对照组路径", "对照组结果"],
+  metricLabels: { strideLinearFailures: "线性失败次数", strideCustomFailures: "指定步长失败次数",
+    strideCustomUsed: "指定组已用槽位", strideReachable: "指定步长能遍历的槽位数" },
+  focusMetric: "strideCustomFailures", alternateTrial: "把对照组步长改成 3。",
+  run({ strideHashSlots, strideHashStep, strideHashKeys }) {
+    const lanes = [1, strideHashStep].map((step) => ({ step, slots: Array<number | null>(strideHashSlots).fill(null), fails: 0 }));
+    const steps = strideHashKeys.map((key) => {
+      const inserts = lanes.map((lane) => {
+        const origin = key % strideHashSlots;
+        const path: number[] = [];
+        let result = "探测环内无空槽";
+        for (let idx = origin; !path.includes(idx); idx = (idx + lane.step) % strideHashSlots) {
+          path.push(idx);
+          if (lane.slots[idx] === key) { result = "已有该键"; break; }
+          if (lane.slots[idx] === null) { lane.slots[idx] = key; result = `放入 ${idx}`; break; }
+        }
+        if (result === "探测环内无空槽") lane.fails++;
+        return [sequenceText(path), result] as const;
+      });
+      return [key, ...inserts[0], ...inserts[1]] as const;
+    });
+    const gcd = (a: number, b: number): number => b ? gcd(b, a % b) : a;
+    const reachable = strideHashSlots / gcd(strideHashSlots, strideHashStep);
+    const used = lanes[1].slots.filter((value) => value !== null).length;
+    return { steps, metrics: { strideLinearFailures: lanes[0].fails, strideCustomFailures: lanes[1].fails,
+      strideCustomUsed: used, strideReachable: reachable }, report: {
+      conclusion: `指定步长只能走 ${reachable} 个槽。插入失败 ${lanes[1].fails} 次。`,
+      detail: `槽数是 ${strideHashSlots}。步长为 ${strideHashStep}。线性失败 ${lanes[0].fails} 次。指定组使用 ${used} 格。回放列出每次走过的槽。`,
+      explanation: "冲突后加步长并取模。回到起点时停止。步长和槽数互素才可遍历。否则空槽也可能够不到。模型固定第二哈希值。",
+      suggestion: "只换成互素步长。对比失败数。再改一批初始位置相同的键。",
+    } };
+  },
+});
+
+export const suffixLookupLab = defineCurriculumLab({
+  id: "suffix-lookup", domain: "algorithms", title: "后缀数组中的模式区间",
+  description: "对后缀排序。用两次二分圈出匹配。",
+  topics: ["suffix-array-pattern-range"],
+  input: {
+    suffixLookupText: { kind: "text", maxLength: 24, label: "正文", hint: "填写 1–24 个小写英文字母。" },
+    suffixLookupPattern: { kind: "text", maxLength: 12, label: "要查的模式", hint: "填写 1–12 个小写英文字母。" },
+  },
+  defaults: { goalLabel: "定位匹配后缀的连续区间", suffixLookupText: "banana", suffixLookupPattern: "ana" },
+  check: ({ suffixLookupText, suffixLookupPattern }) => /^[a-z]+$/.test(suffixLookupText) && /^[a-z]+$/.test(suffixLookupPattern),
+  columns: ["阶段", "当前范围", "中点或后缀位置", "比较用前缀", "动作"],
+  metricLabels: { suffixLookupLeft: "排序区间左界", suffixLookupRight: "排序区间右界", suffixLookupCount: "匹配位置数",
+    suffixLookupPositions: "正文匹配位置", suffixLookupChecks: "二分比较次数" },
+  focusMetric: "suffixLookupCount", alternateTrial: "把模式从 ana 改成 ban。",
+  run({ suffixLookupText, suffixLookupPattern }) {
+    const suffixes = Array.from(suffixLookupText, (_, i) => ({ i, text: suffixLookupText.slice(i) }))
+      .sort((a, b) => a.text < b.text ? -1 : a.text > b.text ? 1 : 0);
+    const steps: [string, string, number, string, string][] = suffixes.map(({ i, text }, rank) => ["后缀排序", `排名 ${rank}`, i, text, "已排序"]);
+    let checks = 0;
+    const boundary = (upper: boolean) => {
+      let left = 0;
+      let right = suffixes.length;
+      while (left < right) {
+        const mid = (left + right) >>> 1;
+        const prefix = suffixes[mid].text.slice(0, suffixLookupPattern.length);
+        const advance = prefix < suffixLookupPattern || (upper && prefix === suffixLookupPattern);
+        steps.push([upper ? "找右界" : "找左界", `[${left}, ${right})`, mid, prefix, advance ? "左界往右" : "右界往左"]);
+        checks++;
+        if (advance) left = mid + 1;
+        else right = mid;
+      }
+      return left;
+    };
+    const start = boundary(false);
+    const end = boundary(true);
+    const positions = suffixes.slice(start, end).map(({ i }) => i).sort((a, b) => a - b);
+    return { steps, metrics: { suffixLookupLeft: start, suffixLookupRight: end, suffixLookupCount: positions.length,
+      suffixLookupPositions: sequenceText(positions), suffixLookupChecks: checks }, report: {
+      conclusion: `找到 ${positions.length} 处匹配。正文位置为 ${sequenceText(positions)}。`,
+      detail: `有 ${suffixes.length} 个后缀。排序区间为 [${start}, ${end})。二分比较 ${checks} 次。计数不含排序。位置从 0 起。`,
+      explanation: "按字典序排列后缀。比较时只看模式长度。相同前缀形成一段。左界找首个不小于。右界跳过所有相等项。",
+      suggestion: "只换搜索模式。核对区间长度。再试一个不存在的模式。",
+    } };
+  },
+});
+
+export const stableMergeLab = defineCurriculumLab({
+  id: "stable-merge", domain: "algorithms", title: "归并排序与稳定性",
+  description: "给相同键加编号。观察先后顺序。",
+  comparison: "相等时先取左侧 / 先取右侧",
+  topics: ["stable-merge-sort"],
+  input: {
+    stableMergeKeys: { kind: "list", min: -99, max: 99, minItems: 2, maxItems: 20, label: "排序键", hint: "按输入编号。允许重复键。" },
+  },
+  defaults: { goalLabel: "检查同键时的取法是否改变原顺序", stableMergeKeys: [2, 1, 2, 1] },
+  columns: ["轮宽", "合并范围", "左优先编号", "右优先编号"],
+  metricLabels: { mergeStableIds: "左优先结果编号", mergeRightIds: "右优先结果编号",
+    mergeRightReversed: "右优先逆序同键对", mergeStableReversed: "左优先逆序同键对", mergeSortedKeys: "排序后的键" },
+  focusMetric: "mergeRightReversed", alternateTrial: "把最后一项从 1 改为 3。",
+  run({ stableMergeKeys }) {
+    const seed = stableMergeKeys.map((key, index) => ({ key, id: index + 1 }));
+    const lanes = [[...seed], [...seed]];
+    const steps: [number, string, string, string][] = [];
+    const n = seed.length;
+    for (let width = 1; width < n; width *= 2) {
+      for (let start = 0; start + width < n; start += width * 2) {
+        const mid = start + width;
+        const end = Math.min(mid + width, n);
+        const mergedIds = lanes.map((lane, group) => {
+          const left = lane.slice(start, mid);
+          const right = lane.slice(mid, end);
+          let i = 0;
+          let j = 0;
+          const merged: typeof left = [];
+          while (i < left.length && j < right.length) {
+            const diff = left[i].key - right[j].key;
+            merged.push(diff < 0 || (diff === 0 && group === 0) ? left[i++] : right[j++]);
+          }
+          merged.push(...left.slice(i), ...right.slice(j));
+          lane.splice(start, merged.length, ...merged);
+          return sequenceText(merged.map(({ id }) => id));
+        });
+        steps.push([width, `[${start}, ${end})`, mergedIds[0], mergedIds[1]]);
+      }
+    }
+    const [stable, right] = lanes;
+    const inversions = (lane: typeof seed) => lane.reduce((sum, row, i) =>
+      sum + lane.slice(i + 1).filter((item) => item.key === row.key && item.id < row.id).length, 0);
+    const keys = sequenceText(stable.map(({ key }) => key));
+    return { steps, metrics: { mergeStableIds: sequenceText(stable.map(({ id }) => id)), mergeRightIds: sequenceText(right.map(({ id }) => id)),
+      mergeRightReversed: inversions(right), mergeStableReversed: inversions(stable), mergeSortedKeys: keys }, report: {
+      conclusion: `左优先保留同键顺序。右优先颠倒 ${inversions(right)} 对。`,
+      detail: `共排序 ${n} 项。两组的键都为 ${keys}。左优先逆序同键为 ${inversions(stable)} 对。右优先为 ${inversions(right)} 对。回放保留每项编号。`,
+      explanation: "归并逐次比较两侧首项。左段原本在右段之前。平局先取左，可保留原顺序。取右仍能排好键。编号能看出是否稳定。",
+      suggestion: "只改一个重复键。检查逆序对数。再把所有键设成相同。",
+    } };
+  },
+});
+
+export const countingSortLab = defineCurriculumLab({
+  id: "counting-sort", domain: "algorithms", title: "计数排序与值域开销",
+  description: "先数频次，再按前缀位置稳定放入。",
+  topics: ["counting-sort"],
+  input: {
+    countingKeys: { kind: "list", min: -99, max: 99, minItems: 1, maxItems: 24, label: "待排序的键", hint: "整数键，可含负数或重复。" },
+  },
+  defaults: { goalLabel: "对照值域变大后计数格数的变化", countingKeys: [3, 1, 3, 2, 1] },
+  columns: ["阶段", "键", "计数或终点", "输入编号", "输出位置"],
+  metricLabels: { countingSpan: "计数格数", countingEmpty: "空计数格", countingPlaced: "放入次数", countingKeysOut: "排序结果", countingIdsOut: "排序后的原编号" },
+  focusMetric: "countingSpan", alternateTrial: "在末尾追加一个键 10。",
+  run({ countingKeys }) {
+    const min = Math.min(...countingKeys);
+    const max = Math.max(...countingKeys);
+    const counts = Array<number>(max - min + 1).fill(0);
+    const steps: [string, number, number, number | string, number | string][] = [];
+    countingKeys.forEach((key, index) => steps.push(["数频次", key, ++counts[key - min], index + 1, "—"]));
+    const empty = counts.filter((value) => value === 0).length;
+    let sum = 0;
+    const next = counts.map((count) => sum += count);
+    const keys = [...countingKeys];
+    const ids = [...countingKeys];
+    for (let index = countingKeys.length - 1; index >= 0; index--) {
+      const key = countingKeys[index];
+      const place = --next[key - min];
+      keys[place] = key;
+      ids[place] = index + 1;
+      steps.push(["稳定放入", key, place + 1, index + 1, place]);
+    }
+    return { steps, metrics: { countingSpan: counts.length, countingEmpty: empty, countingPlaced: keys.length,
+      countingKeysOut: sequenceText(keys), countingIdsOut: sequenceText(ids) }, report: {
+      conclusion: `用 ${counts.length} 个计数格排好 ${keys.length} 个键。`,
+      detail: `最小键是 ${min}。最大键是 ${max}。其中 ${empty} 个格子没用到。放入 ${keys.length} 次。输出为 ${sequenceText(keys)}。回放的位置从 0 起。`,
+      explanation: "键减最小值得到格号。频次前缀和给出放入终点。原序列从后往前放。相同键的原顺序得以保留。值域越宽，占用越大。",
+      suggestion: "只加入一个离群键。检查空格数。再用重复键核对编号顺序。",
+    } };
+  },
+});
+
+export const heapBuildLab = defineCurriculumLab({
+  id: "heap-build", domain: "algorithms", title: "自底向上建堆",
+  description: "同一批键。比较下沉建堆和逐项上浮。",
+  comparison: "自底向上下沉 / 逐项插入上浮",
+  topics: ["heap-bottom-up-build", "binary-heap"],
+  input: {
+    heapBuildKeys: { kind: "list", min: -99, max: 99, minItems: 2, maxItems: 24, label: "建堆的键", hint: "2–24 个整数。实验构建最小堆。" },
+  },
+  defaults: { goalLabel: "比较同一输入的比较和换位次数", heapBuildKeys: [9, 8, 7, 6, 5, 4] },
+  columns: ["方法", "处理位置", "累计比较", "累计换位", "当前堆数组"],
+  metricLabels: { heapDownChecks: "下沉比较次数", heapUpChecks: "插入比较次数", heapDownSwaps: "下沉换位数",
+    heapUpSwaps: "插入换位数", heapBuiltRoot: "最小堆堆顶" },
+  focusMetric: "heapUpSwaps", alternateTrial: "只把输入顺序换成升序。",
+  run({ heapBuildKeys }) {
+    const down = [...heapBuildKeys];
+    const up: number[] = [];
+    const steps: [string, number, number, number, string][] = [];
+    let downChecks = 0;
+    let downSwaps = 0;
+    let upChecks = 0;
+    let upSwaps = 0;
+    for (let start = Math.floor(down.length / 2) - 1; start >= 0; start--) {
+      let root = start;
+      while (root * 2 + 1 < down.length) {
+        let child = root * 2 + 1;
+        if (child + 1 < down.length) {
+          downChecks++;
+          if (down[child + 1] < down[child]) child++;
+        }
+        downChecks++;
+        if (down[root] <= down[child]) break;
+        [down[root], down[child]] = [down[child], down[root]];
+        downSwaps++;
+        root = child;
+      }
+      steps.push(["下沉", start, downChecks, downSwaps, sequenceText(down)]);
+    }
+    for (const value of heapBuildKeys) {
+      up.push(value);
+      let child = up.length - 1;
+      while (child > 0) {
+        const parent = Math.floor((child - 1) / 2);
+        upChecks++;
+        if (up[parent] <= up[child]) break;
+        [up[parent], up[child]] = [up[child], up[parent]];
+        upSwaps++;
+        child = parent;
+      }
+      steps.push(["插入", up.length - 1, upChecks, upSwaps, sequenceText(up)]);
+    }
+    return { steps, metrics: { heapDownChecks: downChecks, heapUpChecks: upChecks, heapDownSwaps: downSwaps,
+      heapUpSwaps: upSwaps, heapBuiltRoot: down[0] }, report: {
+      conclusion: `下沉比较 ${downChecks} 次。插入比较 ${upChecks} 次。`,
+      detail: `输入有 ${down.length} 项。下沉换位 ${downSwaps} 次。插入换位 ${upSwaps} 次。两组堆顶都是 ${down[0]}。回放列出每次调整后的数组。`,
+      explanation: "下沉先处理靠下的父节点。调整时先选更小的子节点。叶子无需下沉。插入要让新项向上走。不同的堆排列也可有同一堆顶。",
+      suggestion: "只换输入顺序。测比较和换位。再试相同键。",
+    } };
+  },
+});
+
+export const matrixChainLab = defineCurriculumLab({
+  id: "matrix-chain", domain: "algorithms", title: "矩阵链乘与区间动态规划",
+  description: "保留矩阵顺序。试不同括号。",
+  topics: ["interval-dp-matrix-chain"],
+  input: {
+    chainDimensions: { kind: "list", min: 1, max: 60, minItems: 3, maxItems: 9, label: "相邻维度", hint: "如 10、30、5 代表 10×30 与 30×5。" },
+  },
+  defaults: { goalLabel: "找出标量乘法次数最少的括号顺序", chainDimensions: [10, 30, 5, 60] },
+  columns: ["区间", "拆分点", "两侧代价", "合并代价", "候选总次数"],
+  metricLabels: { chainOptimalCost: "最少标量乘法", chainLeftCost: "从左逐个相乘次数",
+    chainSaved: "最优少用次数", chainParentheses: "最优括号", chainCandidates: "试算拆分数" },
+  focusMetric: "chainOptimalCost", alternateTrial: "把最后一维从 60 改为 2。",
+  run({ chainDimensions }) {
+    const n = chainDimensions.length - 1;
+    const cost = Array.from({ length: n }, () => Array<number>(n).fill(0));
+    const order = Array.from({ length: n }, (_, index) => Array<string>(n).fill(`A${index + 1}`));
+    const steps: [string, number, number, number, number][] = [];
+    for (let width = 2; width <= n; width++) {
+      for (let left = 0; left + width <= n; left++) {
+        const right = left + width - 1;
+        cost[left][right] = Infinity;
+        for (let split = left; split < right; split++) {
+          const children = cost[left][split] + cost[split + 1][right];
+          const combine = chainDimensions[left] * chainDimensions[split + 1] * chainDimensions[right + 1];
+          const total = children + combine;
+          steps.push([`${left + 1}–${right + 1}`, split + 1, children, combine, total]);
+          if (total < cost[left][right]) {
+            cost[left][right] = total;
+            order[left][right] = `(${order[left][split]}×${order[split + 1][right]})`;
+          }
+        }
+      }
+    }
+    const left = chainDimensions.slice(2).reduce((sum, size, index) => sum + chainDimensions[0] * chainDimensions[index + 1] * size, 0);
+    const best = cost[0][n - 1];
+    return { steps, metrics: { chainOptimalCost: best, chainLeftCost: left, chainSaved: left - best,
+      chainParentheses: order[0][n - 1], chainCandidates: steps.length }, report: {
+      conclusion: `最优需 ${best} 次标量乘法。从左算需 ${left} 次。`,
+      detail: `共有 ${n} 个矩阵。试算 ${steps.length} 个拆分。少用 ${left - best} 次乘法。最优顺序是 ${order[0][n - 1]}。回放按区间长度推进。`,
+      explanation: "每个区间枚举最后一次合并。两边先各取最优。合并次数等于三维相乘。先算短区间再算长区间。平局保留先试的拆分。",
+      suggestion: "只改末端维度。检查最优括号。再试所有维度相同。",
+    } };
+  },
+});
+
 export const differenceArrayLab = defineCurriculumLab({
   id: "difference-array", domain: "algorithms", title: "差分数组与区间更新",
   description: "对照逐项改值和只改区间端点。",

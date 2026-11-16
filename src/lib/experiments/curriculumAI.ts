@@ -1,7 +1,335 @@
-import { defineCurriculumLab } from "./curriculumLab";
+import { defineCurriculumLab, sequenceText } from "./curriculumLab";
 
 const percent = (numerator: number, denominator: number) => denominator === 0 ? "无定义" : `${(100 * numerator / denominator).toFixed(1)}%`;
 const decimal = (value: number) => Number(value.toFixed(4));
+
+export const topPSamplingLab = defineCurriculumLab({
+  id: "top-p-draw", domain: "ai", title: "Top-p 采样的候选范围",
+  description: "按权重选最小候选集。用种子复现抽样。",
+  topics: ["llm-top-p-sampling"],
+  input: {
+    topPTokenWeights: { kind: "list", min: 1, max: 99, minItems: 2, maxItems: 12, label: "各候选权重", hint: "权重会归一化；按输入编号。" },
+    topPCutoffPct: { kind: "integer", min: 1, max: 100, label: "累计概率门槛（%）", hint: "选累计概率达到该比例的最少前缀。" },
+    topPRandomSeed: { kind: "integer", min: 0, max: 65535, label: "随机种子", hint: "相同种子可复现抽样。" },
+    topPDrawTimes: { kind: "integer", min: 1, max: 20, label: "抽取次数", hint: "有放回抽样。" },
+  },
+  defaults: { goalLabel: "对照门槛变化后重归一化的候选集", topPTokenWeights: [50, 25, 15, 10], topPCutoffPct: 75,
+    topPRandomSeed: 7, topPDrawTimes: 8 },
+  columns: ["阶段", "候选或次数", "权重或随机数", "覆盖或抽中", "说明"],
+  metricLabels: { topPCandidateCount: "保留候选数", topPCoverage: "保留的原概率（%）", topPChosenIds: "保留候选编号", topPDrawSequence: "抽样编号" },
+  focusMetric: "topPCandidateCount", alternateTrial: "只把累计门槛改为 90。",
+  run({ topPTokenWeights, topPCutoffPct, topPRandomSeed, topPDrawTimes }) {
+    const sorted = topPTokenWeights.map((weight, index) => ({ weight, id: index + 1 })).sort((a, b) => b.weight - a.weight || a.id - b.id);
+    const all = topPTokenWeights.reduce((sum, value) => sum + value, 0);
+    const chosen: typeof sorted = [];
+    let mass = 0;
+    const steps: [string, number, number, number, string][] = [];
+    for (const token of sorted) {
+      chosen.push(token);
+      mass += token.weight;
+      steps.push(["筛选", token.id, token.weight, decimal(mass * 100 / all), "保留"]);
+      if (mass * 100 >= all * topPCutoffPct) break;
+    }
+    const draw = randomSource(topPRandomSeed);
+    const sequence: number[] = [];
+    for (let index = 1; index <= topPDrawTimes; index++) {
+      const value = draw();
+      let remainder = value * mass;
+      const token = chosen.find(({ weight }) => { remainder -= weight; return remainder < 0; }) ?? chosen.at(-1)!;
+      sequence.push(token.id);
+      steps.push(["采样", index, decimal(value), token.id, `候选内概率 ${decimal(token.weight / mass)}`]);
+    }
+    return { steps, metrics: { topPCandidateCount: chosen.length, topPCoverage: decimal(mass * 100 / all),
+      topPChosenIds: sequenceText(chosen.map(({ id }) => id)), topPDrawSequence: sequenceText(sequence) }, report: {
+      conclusion: `门槛 ${topPCutoffPct}%。保留 ${chosen.length} 个候选。`,
+      detail: `原有 ${sorted.length} 个候选。保留原概率 ${decimal(mass * 100 / all)}%。抽取 ${topPDrawTimes} 次。种子是 ${topPRandomSeed}。回放列出每次抽中编号。`,
+      explanation: "先按权重从大到小排。累加到门槛即停止。按保留权重再归一化。抽样只在候选内进行。相同权重按输入顺序。",
+      suggestion: "固定权重与种子。只增大门槛。比较候选及抽取变化。",
+    } };
+  },
+});
+
+export const binaryConfidenceLab = defineCurriculumLab({
+  id: "binary-confidence", domain: "ai", title: "二分类对数损失与置信度",
+  description: "用同一批概率。对照判错和损失。",
+  comparison: "0/1 分类错误 / 对数损失",
+  topics: ["binary-log-loss-confidence"],
+  input: {
+    binaryConfidenceRows: { kind: "rows", columns: [[0, 100], [0, 1]], minItems: 1, maxItems: 20, label: "正类概率百分数与标签",
+      hint: "预测按 50% 分类。算对数时把真类概率下限设为 0.0001。" },
+  },
+  defaults: { goalLabel: "观察错误次数相同时损失如何变化", binaryConfidenceRows: [[90, 1], [90, 0], [60, 0], [10, 0]] },
+  columns: ["样本", "正类概率（%）", "标签", "分类结果", "分给真类的概率", "对数损失"],
+  metricLabels: { binaryConfidenceErrors: "分类错误数", binaryConfidenceMeanLoss: "平均对数损失",
+    binaryConfidenceWorst: "最大单例损失", binaryConfidenceWorstId: "最大损失样本编号" },
+  focusMetric: "binaryConfidenceMeanLoss", alternateTrial: "把第 2 行的概率改为 60%。",
+  run({ binaryConfidenceRows }) {
+    let errors = 0;
+    let total = 0;
+    let maximum = -1;
+    let worst = 1;
+    const steps = binaryConfidenceRows.map(([p, label], index) => {
+      const correct = Number(p >= 50) === label;
+      const trueProbability = (label ? p : 100 - p) / 100;
+      const loss = -Math.log(Math.max(0.0001, trueProbability));
+      errors += Number(!correct);
+      total += loss;
+      if (loss > maximum) { maximum = loss; worst = index + 1; }
+      return [index + 1, p, label, correct ? "正确" : "错误", trueProbability, decimal(loss)] as const;
+    });
+    const mean = decimal(total / steps.length);
+    return { steps, metrics: { binaryConfidenceErrors: errors, binaryConfidenceMeanLoss: mean, binaryConfidenceWorst: decimal(maximum),
+      binaryConfidenceWorstId: worst }, report: {
+      conclusion: `分类错 ${errors} 题。平均对数损失为 ${mean}。`,
+      detail: `共有 ${steps.length} 题。分类门槛为 50%。第 ${worst} 题损失最大。该题损失为 ${decimal(maximum)}。回放展示真类概率。`,
+      explanation: "对数损失取真类概率。概率越低，惩罚越大。0/1 错误只看判对没有。本模型为避免无穷值设了概率下限。",
+      suggestion: "不改标签。只降低过度自信的错误预测。核对错误数和损失。",
+    } };
+  },
+});
+
+export const kvProjectionCacheLab = defineCurriculumLab({
+  id: "kv-projection-cache", domain: "ai", title: "KV 缓存与历史投影复用",
+  description: "同一序列逐词解码。比较投影计算次数。",
+  comparison: "每步重算全前缀 / 保留历史 K、V",
+  topics: ["llm-kv-cache"],
+  input: {
+    kvToyTokens: { kind: "list", min: -5, max: 5, minItems: 1, maxItems: 14, label: "各位置标量表示", hint: "输入 1–14 个小整数，按自回归顺序。" },
+    kvKeyFactor: { kind: "integer", min: -3, max: 3, label: "键投影系数", hint: "用相同系数计算两个对照组。" },
+    kvValueFactor: { kind: "integer", min: -3, max: 3, label: "值投影系数", hint: "由原表示乘系数得到。" },
+  },
+  defaults: { goalLabel: "验证历史投影减少且注意力输出不变", kvToyTokens: [1, 2, 3, 4], kvKeyFactor: 1, kvValueFactor: 2 },
+  columns: ["解码步", "重算投影数", "复用组新投影数", "已缓存标量数", "重算输出", "缓存输出"],
+  metricLabels: { kvProjectionPlain: "重算组投影次数", kvProjectionCached: "缓存组投影次数", kvProjectionCacheSize: "最终缓存标量数",
+    kvProjectionDotProducts: "每组点积次数", kvProjectionSame: "逐步输出一致" },
+  focusMetric: "kvProjectionPlain", alternateTrial: "在序列末尾再加一项 5。",
+  run({ kvToyTokens, kvKeyFactor, kvValueFactor }) {
+    const project = (value: number) => ({ key: value * kvKeyFactor, val: value * kvValueFactor });
+    const stored: ReturnType<typeof project>[] = [];
+    const evaluate = (query: number, pairs: typeof stored) => {
+      const weights = normalizedExp(pairs.map(({ key }) => key * query));
+      return pairs.reduce((sum, { val }, i) => sum + val * weights[i], 0);
+    };
+    let plain = 0;
+    let dotProducts = 0;
+    let same = true;
+    const steps = kvToyTokens.map((value, index) => {
+      const recomputed = kvToyTokens.slice(0, index + 1).map(project);
+      stored.push(project(value));
+      const a = evaluate(value, recomputed);
+      const b = evaluate(value, stored);
+      same &&= a === b;
+      plain += recomputed.length * 2;
+      dotProducts += recomputed.length;
+      return [index + 1, recomputed.length * 2, 2, stored.length * 2, decimal(a), decimal(b)] as const;
+    });
+    return { steps, metrics: { kvProjectionPlain: plain, kvProjectionCached: stored.length * 2, kvProjectionCacheSize: stored.length * 2,
+      kvProjectionDotProducts: dotProducts, kvProjectionSame: same ? "是" : "否" }, report: {
+      conclusion: `重算投影 ${plain} 次。缓存组投影 ${stored.length * 2} 次。`,
+      detail: `一共解码 ${steps.length} 步。逐步输出${same ? "一致" : "不同"}。两组各点积 ${dotProducts} 次。最终持有 ${stored.length * 2} 个标量。回放列出每步输出。`,
+      explanation: "每个位置生成 K 和 V。历史值在单层模型中固定。缓存组只投影新位置。当前查询仍看历史键。模型以标量计内存和计算。",
+      suggestion: "只加长序列。检查投影数和缓存大小。再改投影系数核对输出。",
+    } };
+  },
+});
+
+export const reluActivationLab = defineCurriculumLab({
+  id: "relu-zero-gradient", domain: "ai", title: "ReLU 的零梯度区",
+  description: "从负激活开始。观察梯度能否推动更新。",
+  comparison: "ReLU / 保留负区斜率的 Leaky ReLU",
+  topics: ["relu-dead-neuron"],
+  input: {
+    reluInitialWeight: { kind: "integer", min: -10, max: 10, label: "初始权重", hint: "固定输入为 1，预激活等于权重。" },
+    reluTargetOutput: { kind: "integer", min: 1, max: 12, label: "目标输出", hint: "用平方损失优化。" },
+    reluLeakPct: { kind: "integer", min: 1, max: 50, label: "负区斜率百分数", hint: "仅用于 Leaky ReLU。" },
+    reluTrainingTicks: { kind: "integer", min: 1, max: 16, label: "训练步数", hint: "两组学习率固定为 0.5。" },
+  },
+  defaults: { goalLabel: "比较负区的梯度与两种权重轨迹", reluInitialWeight: -1, reluTargetOutput: 2, reluLeakPct: 25, reluTrainingTicks: 6 },
+  columns: ["步", "ReLU 梯度", "ReLU 更新后权重", "Leaky 梯度", "Leaky 更新后权重"],
+  metricLabels: { reluZeroUpdates: "ReLU 零梯度步数", reluFinalWeight: "ReLU 末权重", reluLeakyFinalWeight: "Leaky 末权重",
+    reluFinalLoss: "ReLU 末损失", reluLeakyFinalLoss: "Leaky 末损失" },
+  focusMetric: "reluZeroUpdates", alternateTrial: "把初始权重从 -1 改为 1。",
+  run({ reluInitialWeight, reluTargetOutput, reluLeakPct, reluTrainingTicks }) {
+    const alpha = reluLeakPct / 100;
+    const activation = (weight: number, slope: number) => weight > 0 ? weight : weight * slope;
+    const gradient = (weight: number, slope: number) => (activation(weight, slope) - reluTargetOutput) * (weight > 0 ? 1 : slope);
+    const loss = (weight: number, slope: number) => (activation(weight, slope) - reluTargetOutput) ** 2 / 2;
+    let plain = reluInitialWeight;
+    let leaky = reluInitialWeight;
+    let zeros = 0;
+    const steps = Array.from({ length: reluTrainingTicks }, (_, index) => {
+      const first = gradient(plain, 0);
+      const second = gradient(leaky, alpha);
+      zeros += Number(first === 0);
+      plain -= first * 0.5;
+      leaky -= second * 0.5;
+      return [index + 1, decimal(first), decimal(plain), decimal(second), decimal(leaky)] as const;
+    });
+    return { steps, metrics: { reluZeroUpdates: zeros, reluFinalWeight: decimal(plain), reluLeakyFinalWeight: decimal(leaky),
+      reluFinalLoss: decimal(loss(plain, 0)), reluLeakyFinalLoss: decimal(loss(leaky, alpha)) }, report: {
+      conclusion: `ReLU 有 ${zeros} 步梯度为零。末权重是 ${decimal(plain)}。`,
+      detail: `起点为 ${reluInitialWeight}。目标为 ${reluTargetOutput}。两组均更新 ${steps.length} 步。负区斜率为 ${alpha}。Leaky 末权重为 ${decimal(leaky)}。`,
+      explanation: "负预激活下 ReLU 输出零。局部梯度也为零。Leaky 负区仍有斜率。梯度可以继续更新。模型在零点取左侧斜率。",
+      suggestion: "只改初始权重的符号。比较零梯度步数。再改负区斜率。",
+    } };
+  },
+});
+
+export const gradientClipLab = defineCurriculumLab({
+  id: "gradient-clip", domain: "ai", title: "全局范数裁剪",
+  description: "量整组梯度。按同一比例缩小。",
+  comparison: "原梯度 / 按全局范数裁剪",
+  topics: ["gradient-clipping-global-norm"],
+  input: {
+    clipGradientVector: { kind: "list", min: -30, max: 30, minItems: 1, maxItems: 12, label: "原梯度向量", hint: "每项一个梯度分量。" },
+    clipGradientLimit: { kind: "integer", min: 1, max: 60, label: "范数上限", hint: "使用欧氏范数，1–60。" },
+  },
+  defaults: { goalLabel: "核对裁剪后的方向和长度", clipGradientVector: [6, 8], clipGradientLimit: 5 },
+  columns: ["分量", "原值", "统一缩放因子", "裁剪值"],
+  metricLabels: { clipGradientRawNorm: "原范数", clipGradientNorm: "裁剪后范数", clipGradientScale: "统一缩放因子", clipGradientChanged: "值变化的分量" },
+  focusMetric: "clipGradientNorm", alternateTrial: "只把范数上限改为 10。",
+  run({ clipGradientVector, clipGradientLimit }) {
+    const raw = Math.hypot(...clipGradientVector);
+    const scale = raw > clipGradientLimit ? clipGradientLimit / raw : 1;
+    const clipped = clipGradientVector.map((value) => value * scale);
+    const norm = Math.hypot(...clipped);
+    const changed = clipped.filter((value, index) => value !== clipGradientVector[index]).length;
+    const steps = clipped.map((value, index) => [index + 1, clipGradientVector[index], decimal(scale), decimal(value)] as const);
+    return { steps, metrics: { clipGradientRawNorm: decimal(raw), clipGradientNorm: decimal(norm),
+      clipGradientScale: decimal(scale), clipGradientChanged: changed }, report: {
+      conclusion: `原范数为 ${decimal(raw)}。裁剪后为 ${decimal(norm)}。`,
+      detail: `上限设为 ${clipGradientLimit}。向量有 ${steps.length} 项。统一因子是 ${decimal(scale)}。有 ${changed} 项改变。裁剪结果为 ${sequenceText(clipped.map(decimal))}。`,
+      explanation: "先求整组的欧氏长度。超限才乘统一因子。因子是上限除以原长度。方向保持一致。原向量为零时无需缩放。",
+      suggestion: "只提高范数上限。核对何时恢复原值。再用含零分量的向量测试。",
+    } };
+  },
+});
+
+export const convolutionWindowLab = defineCurriculumLab({
+  id: "convolution-window", domain: "ai", title: "卷积窗口、步幅与填充",
+  description: "在一维数据上滑动卷积核。",
+  topics: ["convolution-output-shape", "convolution-receptive-field"],
+  input: {
+    convolutionSamples: { kind: "list", min: -20, max: 20, minItems: 1, maxItems: 16, label: "一维输入", hint: "填 1–16 个数。" },
+    convolutionKernel: { kind: "list", min: -9, max: 9, minItems: 1, maxItems: 8, label: "卷积核", hint: "按顺序点乘，不翻转卷积核。" },
+    convolutionPadding: { kind: "integer", min: 0, max: 6, label: "两端各补几格", hint: "补零。" },
+    convolutionStride: { kind: "integer", min: 1, max: 8, label: "步幅", hint: "窗口每次向右走几格。" },
+  },
+  defaults: { goalLabel: "核对步幅对输出尺寸和取样位置的影响", convolutionSamples: [1, 2, 3, 4, 5],
+    convolutionKernel: [1, 0, -1], convolutionPadding: 1, convolutionStride: 1 },
+  columns: ["输出位", "对应输入范围", "窗口值", "逐项乘积", "输出"],
+  metricLabels: { convolutionOutputSize: "输出长度", convolutionOutputValues: "输出序列", convolutionPaddedInput: "补零后长度",
+    convolutionOperations: "标量乘法次数" },
+  focusMetric: "convolutionOutputSize", alternateTrial: "只把步幅改为 2。",
+  run({ convolutionSamples, convolutionKernel, convolutionPadding, convolutionStride }) {
+    const padding = Array<number>(convolutionPadding).fill(0);
+    const padded = [...padding, ...convolutionSamples, ...padding];
+    const width = convolutionKernel.length;
+    const output: number[] = [];
+    const steps: [number, string, string, string, number][] = [];
+    for (let left = 0; left + width <= padded.length; left += convolutionStride) {
+      const window = padded.slice(left, left + width);
+      const products = window.map((value, index) => value * convolutionKernel[index]);
+      const value = products.reduce((sum, term) => sum + term, 0);
+      output.push(value);
+      steps.push([steps.length, `[${left - convolutionPadding}, ${left + width - convolutionPadding})`,
+        sequenceText(window), sequenceText(products), value]);
+    }
+    return { steps: steps.length ? steps : [["无输出", "—", "—", "—", "核长于输入"]],
+      metrics: { convolutionOutputSize: steps.length, convolutionOutputValues: sequenceText(output),
+        convolutionPaddedInput: padded.length, convolutionOperations: steps.length * width }, report: {
+      conclusion: `步幅为 ${convolutionStride}，得到 ${output.length} 个输出。`,
+      detail: `原长 ${convolutionSamples.length}。补零后长 ${padded.length}。卷积核宽 ${width}。乘法共 ${steps.length * width} 次。结果为 ${sequenceText(output)}。`,
+      explanation: "每次只处理一个完整窗口。值与对应核系数相乘。乘积相加得到输出。移动距离等于步幅。模型用深度学习常见的互相关。",
+      suggestion: "只改步幅。核对输出的长度和位置。再去掉两端补零。",
+    } };
+  },
+});
+
+export const backwardBranchesLab = defineCurriculumLab({
+  id: "backward-branches", domain: "ai", title: "反向传播与分支梯度累加",
+  description: "同一个变量走两条路。核对梯度贡献。",
+  comparison: "单看第一分支 / 汇总两条分支",
+  topics: ["reverse-mode-gradients"],
+  input: {
+    backwardInput: { kind: "integer", min: -12, max: 12, label: "输入 x", hint: "选择 -12 至 12 的整数。" },
+    backwardCoefficients: { kind: "list", min: -6, max: 6, minItems: 3, maxItems: 3, label: "系数 a、b、c",
+      hint: "输出为 (a×x+b)² + c×x²。" },
+  },
+  defaults: { goalLabel: "验证分支梯度相加与中心差分一致", backwardInput: 2, backwardCoefficients: [2, 1, 3] },
+  columns: ["阶段", "值", "局部求导", "对 x 的贡献"],
+  metricLabels: { backwardOutput: "函数输出", backwardBranchOne: "第一支梯度", backwardBranchTwo: "第二支梯度",
+    backwardTotalGradient: "总梯度", backwardNumericGradient: "中心差分梯度" },
+  focusMetric: "backwardTotalGradient", alternateTrial: "只把输入 x 改为 0。",
+  run({ backwardInput, backwardCoefficients }) {
+    const x = backwardInput;
+    const [a, b, c] = backwardCoefficients;
+    const middle = a * x + b;
+    const first = 2 * middle * a;
+    const second = 2 * c * x;
+    const together = first + second;
+    const evaluate = (value: number) => (a * value + b) ** 2 + c * value ** 2;
+    const output = evaluate(x);
+    const h = 0.01;
+    const numeric = decimal((evaluate(x + h) - evaluate(x - h)) / (2 * h));
+    const steps = [
+      ["第一支前向", middle ** 2, `2×${middle}×${a}`, first],
+      ["第二支前向", c * x ** 2, `2×${c}×${x}`, second],
+      ["求和后反传", output, `${first} + (${second})`, together],
+      ["中心差分", output, "相邻两点试算", numeric],
+    ] as const;
+    return { steps, metrics: { backwardOutput: output, backwardBranchOne: first, backwardBranchTwo: second,
+      backwardTotalGradient: together, backwardNumericGradient: numeric }, report: {
+      conclusion: `两支贡献为 ${first} 和 ${second}，总梯度 ${together}。`,
+      detail: `输入为 ${x}。函数输出 ${output}。仅用第一支得到 ${first}。中心差分结果为 ${numeric}。回放列出各次乘法。`,
+      explanation: "共享输入影响两条分支。每条支路按链式法则求导。对同一输入的贡献要相加。中心差分只用前向值核对。这里的函数是二次式。",
+      suggestion: "只改变输入。观察单支和总梯度。再取负的 c，让两支贡献相抵。",
+    } };
+  },
+});
+
+export const momentumUpdateLab = defineCurriculumLab({
+  id: "momentum-update", domain: "ai", title: "动量更新与普通梯度下降",
+  description: "同一个二次损失。对照有无历史方向。",
+  comparison: "普通梯度下降 / 带动量的下降",
+  topics: ["momentum-smoothed-direction"],
+  input: {
+    momentumStart: { kind: "integer", min: -20, max: 20, label: "初始位置", hint: "目标在 0，损失为位置平方的一半。" },
+    momentumRatePct: { kind: "integer", min: 1, max: 50, label: "学习率百分数", hint: "1–50。" },
+    momentumHistoryPct: { kind: "integer", min: 0, max: 95, label: "动量系数百分数", hint: "历史方向乘这个系数，再加当前梯度。" },
+    momentumStepsCount: { kind: "integer", min: 1, max: 16, label: "更新步数", hint: "两组执行相同步数。" },
+  },
+  defaults: { goalLabel: "观察历史方向何时推动位置越过低点", momentumStart: 6, momentumRatePct: 25,
+    momentumHistoryPct: 50, momentumStepsCount: 4 },
+  columns: ["步", "普通位置", "普通损失", "动量方向", "动量位置", "动量损失"],
+  metricLabels: { momentumPlainPos: "普通组末位置", momentumFinalPos: "动量组末位置", momentumPlainLoss: "普通组末损失",
+    momentumFinalLoss: "动量组末损失", momentumCrossings: "动量越过零点次数" },
+  focusMetric: "momentumFinalLoss", alternateTrial: "把动量系数改为 0。",
+  run({ momentumStart, momentumRatePct, momentumHistoryPct, momentumStepsCount }) {
+    const rate = momentumRatePct / 100;
+    const beta = momentumHistoryPct / 100;
+    const loss = (value: number) => value ** 2 / 2;
+    let plain = momentumStart;
+    let moving = momentumStart;
+    let direction = 0;
+    let crossings = 0;
+    const steps = Array.from({ length: momentumStepsCount }, (_, index) => {
+      plain -= rate * plain;
+      direction = beta * direction + moving;
+      const next = moving - rate * direction;
+      crossings += Number(next * moving < 0);
+      moving = next;
+      return [index + 1, decimal(plain), decimal(loss(plain)), decimal(direction), decimal(moving), decimal(loss(moving))] as const;
+    });
+    return { steps, metrics: { momentumPlainPos: decimal(plain), momentumFinalPos: decimal(moving), momentumPlainLoss: decimal(loss(plain)),
+      momentumFinalLoss: decimal(loss(moving)), momentumCrossings: crossings }, report: {
+      conclusion: `普通组末损失 ${decimal(loss(plain))}。动量组为 ${decimal(loss(moving))}。`,
+      detail: `两组都更新 ${steps.length} 次。起点为 ${momentumStart}。动量系数为 ${beta}。末位置分别为 ${decimal(plain)} 和 ${decimal(moving)}。动量越过零点 ${crossings} 次。`,
+      explanation: "二次损失的梯度就是位置。普通组只用当前梯度。动量组还带着旧方向。它可能越过低点。表中损失取舍入前的位置计算。",
+      suggestion: "只关掉动量。核对两组轨迹。再增加更新步数，看是否继续摆动。",
+    } };
+  },
+});
 
 function normalizedExp(values: number[]) {
   const max = Math.max(...values);

@@ -138,14 +138,11 @@
 }
 .tutor-question { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 15px; font-weight: 570; line-height: 1.65; }
 .tutor-assistant-message { justify-self: start; min-width: 0; width: min(100%, 75ch); }
-.tutor-turn-label { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; color: var(--tutor-gold); font-size: 13px; font-weight: 720; }
-.tutor-avatar {
-  display: grid; place-items: center; width: 28px; height: 28px; border-radius: 8px 8px 8px 3px;
-  color: #f3d487; background: linear-gradient(150deg, #4b573e, #303a29);
-}
+.tutor-turn-label { margin-block-end: 5px; color: var(--tutor-gold); font-size: 15px; font-weight: 720; line-height: 1.4; }
 .tutor-answer-text { max-width: 74ch; overflow-wrap: anywhere; line-height: 1.76; }
 .tutor-answer-text :where(p, ol, ul, blockquote, figure, pre, .tutor-markdown-table) + :where(p, ol, ul, blockquote, figure, pre, .tutor-markdown-table) { margin-top: 9px; }
 .tutor-answer-text :is(h1, h2, h3, h4, h5, h6) { margin: 13px 0 4px; font-weight: 735; line-height: 1.24; }
+.tutor-answer-text > :first-child { margin-block-start: 0; }
 .tutor-answer-text :is(h1, h2) { font-size: 1.2em; }
 .tutor-answer-text :is(ul, ol) { padding-inline-start: 1.35em; }
 .tutor-answer-text ul { list-style: disc; }
@@ -167,12 +164,20 @@
 .tutor-code button:focus-visible, .tutor-code pre:focus-visible { outline-color: var(--signal); outline-offset: -2px; }
 .tutor-code pre { max-width: 100%; overflow: auto; padding: 11px 13px; font-size: 13px; line-height: 1.55; }
 .tutor-copy-error { display: block; color: #ffd0a2; padding: 2px 13px 8px; font-size: 13px; }
-.tutor-sources { display: flex; flex-wrap: wrap; align-items: center; gap: 0 13px; margin-top: 8px; color: var(--tutor-muted); font-size: 13px; }
+.tutor-reply-actions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0 16px;
+  margin-block-start: 10px; border-block-start: 1px solid var(--tutor-rule);
+}
+.tutor-sources {
+  display: flex; flex: 0 0 100%; flex-wrap: wrap; align-items: center; gap: 0 12px;
+  min-width: 0; color: var(--tutor-muted); font-size: 13px;
+}
 .tutor-sources strong { font-weight: 680; }
 .tutor-reference-link {
   display: inline-flex; align-items: center; gap: 5px; min-height: 41px; color: var(--tutor-gold);
   font-size: 13px; text-decoration: underline; text-underline-offset: 4px; overflow-wrap: anywhere;
 }
+.tutor-reply-actions .tutor-reference-link { min-width: 0; min-height: 44px; }
 .tutor-pending { display: flex; align-items: center; gap: 7px; color: var(--tutor-muted); font-size: 14px; }
 .tutor-pending span { display: inline-block; width: 13px; height: 2px; background: #a28749; animation: tutor-wait 1s ease-in-out infinite alternate; }
 @keyframes tutor-wait { to { transform: scaleX(.35); } }
