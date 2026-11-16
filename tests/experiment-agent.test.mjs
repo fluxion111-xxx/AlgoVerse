@@ -30,6 +30,10 @@ const { createAIExperimentSession, createWorkbenchSession, confirmExperimentSess
   getLearningProgress, submitKnowledgeExercise } = await import("../src/lib/server/experimentRecords.ts");
 const { learningSuggestion } = await import("../src/lib/learningPath.ts");
 const { getExperimentEngine, registeredEngines } = await import("../src/lib/experimentEngines.ts");
+const { experimentQuestions, nextExperimentQuestion } = await import("../src/lib/experimentQuestions.ts");
+const { maxQuestionLength } = await import("../src/lib/experimentCreator.ts");
+const { courses } = await import("../src/lib/courses.ts");
+const { experimentDomains } = await import("../src/lib/experiments/engine.ts");
 const { experimentEvidence } = await import("../src/lib/experiments/evidence.ts");
 const { schedulingWaitReport } = await import("../src/lib/experimentAgent.ts");
 const model = "Qwen/Qwen3.5-4B";
@@ -39,6 +43,48 @@ const processes = [{ arrival: 0, burst: 6 }, { arrival: 1, burst: 4 }, { arrival
 const call = (policy, quantum) => ({ tool, parameters: { goalLabel: "比较等待时间", policy, quantum, processes } });
 const compare = { from: 1, to: 2, metric: "waiting" };
 const first = { action: "run", plan: ["跑两组基线", "试新时间片"], observation: "固定进程输入。", evidence: [], calls: [call("fcfs", 2), call("rr", 2)] };
+
+test("every recommended question matches its domain and produces real evidence through registered tools", () => {
+  assert.deepEqual(Object.keys(experimentQuestions), courses.map(({ slug }) => slug));
+  assert.deepEqual(Object.entries(experimentDomains), courses.map(({ slug, title }) => [slug, title]));
+  const texts = new Set();
+  for (const [domain, pool] of Object.entries(experimentQuestions)) {
+    assert.ok(pool.length > 1);
+    for (const { text, tool, trials } of pool) {
+      assert.ok(text.length > 0 && text.length <= maxQuestionLength);
+      assert.ok(!texts.has(text), text);
+      texts.add(text);
+      const engine = getExperimentEngine(tool);
+      assert.equal(engine?.domain, domain, text);
+      for (const trial of trials) {
+        const call = prepareToolCall({ tool, parameters: { goalLabel: engine.creator.title, ...trial } }, 42);
+        assert.ok(call, text);
+        const result = engine.run(call.config);
+        assert.equal("kind" in result ? result.kind : "pathfinding", tool);
+        assert.ok(Object.keys(experimentEvidence(result)).length > 0, text);
+      }
+    }
+  }
+});
+
+test("question rotation shares a separate cursor for each module and wraps without consecutive repeats", async (t) => {
+  const saved = new Map();
+  const storage = { getItem: (key) => saved.get(key) ?? null, setItem: (key, value) => saved.set(key, value) };
+  globalThis.window = { sessionStorage: storage };
+  t.after(() => { delete globalThis.window; });
+  const algorithms = experimentQuestions.algorithms;
+  assert.deepEqual(nextExperimentQuestion("algorithms"), { text: algorithms[0].text, lastInRound: false });
+  assert.equal(nextExperimentQuestion("ai").text, experimentQuestions.ai[0].text);
+  const nextPage = await import("../src/lib/experimentQuestions.ts?next-page");
+  assert.equal(nextPage.nextExperimentQuestion("algorithms").text, algorithms[1].text);
+  assert.deepEqual(nextExperimentQuestion("algorithms"), { text: algorithms[2].text, lastInRound: true });
+  assert.equal(nextExperimentQuestion("algorithms").text, algorithms[0].text);
+  globalThis.window = { get sessionStorage() { throw new Error("Storage is disabled"); } };
+  assert.equal(nextExperimentQuestion("ai").text, experimentQuestions.ai[1].text);
+  globalThis.window = { sessionStorage: { ...storage, setItem() { throw new Error("Storage is read-only"); } } };
+  assert.equal(nextExperimentQuestion("ai").text, experimentQuestions.ai[2].text);
+  assert.equal(nextExperimentQuestion("ai").text, experimentQuestions.ai[0].text);
+});
 
 function pricingPage() {
   const chats = [{ modelName: model, targetModelName: model, status: "normal", currency: "¥", inputPrice: 0, price: 0,

@@ -37,7 +37,7 @@ export async function openExperimentQuestion(_error: string, form: FormData): Pr
   let saved: Awaited<ReturnType<typeof saveExperimentQuestion>>;
   try {
     const draft = new FormData();
-    draft.set("question", question);
+    draft.set("question", question.replace(/\r\n?/gu, "\n"));
     saved = await saveExperimentQuestion(draft);
   } catch {
     return "保存失败，请重试。";

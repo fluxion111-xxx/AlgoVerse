@@ -105,6 +105,8 @@
   flex: 1;
   min-width: 0;
   min-height: 54px;
+  max-height: 240px;
+  field-sizing: content;
   padding: 14px;
   border: 1px solid #81856f;
   color: var(--text);
@@ -128,10 +130,27 @@
 .lab-index-creation .lab-creator-submit:hover { background: #f2d694; }
 .lab-index-creation .lab-creator-submit:disabled { opacity: .65; cursor: progress; }
 .lab-index-creation .lab-creator-submit svg { width: 20px; height: 20px; }
-.lab-index-creation .lab-examples { display: flex; flex-wrap: wrap; gap: 4px 13px; margin-top: 9px; }
-.lab-index-creation .lab-examples button { min-height: 44px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 13px; }
-.lab-index-creation .lab-examples button:hover { color: var(--signal); border-color: var(--signal); }
-.lab-index-creation .lab-creator-feedback:not(:empty) { margin-top: 11px; color: #f6cda6; font-size: 14px; }
+.lab-index-creation .lab-examples { margin-top: 13px; }
+.lab-index-creation .lab-examples p:not(.sr-only) { color: var(--muted); font-size: 12px; }
+.lab-index-creation .lab-examples > p:first-child { font-weight: 700; margin-bottom: 3px; }
+.lab-index-creation .lab-examples .experiment-question-status { margin-top: 8px; }
+.lab-index-creation .lab-examples ul { display: flex; flex-wrap: wrap; gap: 4px 13px; margin-top: 3px; }
+.lab-index-creation .lab-examples li { max-width: 100%; }
+.lab-index-creation .lab-examples button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 44px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+  text-align: start;
+}
+.lab-index-creation .lab-examples svg { flex: none; }
+.lab-index-creation .lab-examples button:is(:hover, [aria-pressed="true"]):not(:disabled) { color: var(--signal); border-color: var(--signal); }
+.lab-index-creation .lab-examples button:active:not(:disabled) { background: #f6cda619; }
+.lab-index-creation .lab-examples button:disabled { opacity: .65; cursor: progress; }
+.lab-index-creation .lab-creator-feedback { margin-top: 11px; color: #f6cda6; font-size: 14px; }
 
 @media (max-width: 940px) {
   .lab-index-popover { top: 73px; }

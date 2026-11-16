@@ -5,7 +5,6 @@ import { Header } from "@/components/Header";
 import { CatalogIcon } from "@/components/experiments/CatalogEffects";
 import { EditorialStory } from "@/components/experiments/EditorialStory";
 import { ExperimentPrompt } from "@/components/experiments/ExperimentPrompt";
-import { courseRoute, courses } from "@/lib/courses";
 import { agentWorkbenchLink, quickStartRoute, workbenchFocus, workflowSteps } from "@/lib/navigation";
 import { getActiveAIWorkflow, getActiveAgentTask } from "@/lib/server/experimentRecords";
 import "./home-editorial.css";
@@ -61,12 +60,6 @@ export default function Home() {
           </div>
           <div className="editorial-studio-form">
             <ExperimentPrompt appearance="editorial" />
-            <nav className="editorial-domains" aria-label="六大实验方向">
-              <p>从课程开始</p>
-              <ul>{courses.map((course) => <li key={course.slug}>
-                <NavigationLink href={courseRoute(course)}>{course.title}<CatalogIcon icon="lucide:arrow-up-right" width={15} /></NavigationLink>
-              </li>)}</ul>
-            </nav>
           </div>
         </div>
       </EditorialStory>
