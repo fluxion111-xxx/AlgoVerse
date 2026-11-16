@@ -1,5 +1,5 @@
 import Image from "next/image";
-import Link from "next/link";
+import { NavigationLink } from "@/components/NavigationLink";
 import { CatalogIcon } from "@/components/experiments/CatalogEffects";
 import { chapterFilters, type curriculumChapters, type CurriculumGroup } from "@/lib/curriculum";
 
@@ -89,12 +89,12 @@ export function StudyChapter({ chapter, previous, next, studied }: {
       </figure>
     </header>
     {(previous || next) && <nav className="study-chapter-turn" aria-label="相邻章节">
-      {previous && <Link href={previous.href} aria-label={`上一章 · ${previous.title}`}>
+      {previous && <NavigationLink href={previous.href} aria-label={`上一章 · ${previous.title}`}>
         <CatalogIcon icon="lucide:arrow-left" width={16} /><span><small>上一章</small>{previous.title}</span>
-      </Link>}
-      {next && <Link href={next.href} aria-label={`下一章 · ${next.title}`}>
+      </NavigationLink>}
+      {next && <NavigationLink href={next.href} aria-label={`下一章 · ${next.title}`}>
         <span><small>下一章</small>{next.title}</span><CatalogIcon icon="lucide:arrow-right" width={16} />
-      </Link>}
+      </NavigationLink>}
     </nav>}
   </>;
 }

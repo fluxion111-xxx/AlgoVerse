@@ -1,12 +1,12 @@
 import "server-only";
-import { agentDialogueActive, agentDialogueLimits, agentFinished, agentLimits, type AgentCall, type AgentEvidence, type AgentFocus, type AgentTask, type AgentTurn, type AgentTurnAction, type SchedulingEvidence } from "@/lib/experimentAgent";
+import { agentDialogueActive, agentDialogueLimits, agentFinished, agentLimits, type AgentCall, type AgentEvidence, type AgentFocus, type AgentTask, type AgentTurn, type AgentTurnAction, type SchedulingEvidence, type TutorContext, type TutorTurnDetails } from "@/lib/experimentAgent";
 import { evidenceLabels } from "@/lib/experiments/evidence";
 import { AIRequestError, asObject, requestAIJson, type AICredentials } from "./aiProvider";
 import { agentPlanningTools, agentTools, callAgentTool, prepareToolCall } from "./agentTools";
-import { getDiagnosis, getExperimentRun, saveAgentTask } from "./experimentRecords";
+import { getDiagnosis, getExperimentRun, saveAgentTask, type ExperimentRun } from "./experimentRecords";
 
 const leaseMs = 75_000;
-type FocusUpdate = Omit<AgentFocus, "firstRun"> & { switchTopic?: boolean };
+export type FocusUpdate = Omit<AgentFocus, "firstRun"> & { switchTopic?: boolean };
 type Decision = {
   action: "finish" | AgentTurnAction;
   plan: string[];
@@ -69,6 +69,32 @@ function readFocus(value: unknown): FocusUpdate | undefined {
   };
 }
 
+export type TutorResolution = { action: "plan"; focus: FocusUpdate }
+  | { action: "answer"; observation: string; focus?: FocusUpdate; tutor: TutorTurnDetails };
+
+type TutorDelegate = {
+  access: TutorContext;
+  run: ExperimentRun | null;
+  resolve: (turns: AgentTurn[], context: { focus?: AgentFocus; pendingTool?: string }, credentials: AICredentials) => Promise<{ result: TutorResolution; model: string }>;
+};
+
+export function readTutorResolution(value: unknown) {
+  const object = asObject(value);
+  return object?.action === "plan" && Object.keys(object).every((key) => key === "action" || key === "focus")
+    ? readFocus(object.focus) : undefined;
+}
+
+function visibleTurns(turns: AgentTurn[], access?: TutorContext, hasRuns = false) {
+  return turns.flatMap((turn): AgentTurn[] => {
+    const scope = turn.tutorScope;
+    if (scope?.includeExperiment && (!access?.includeExperiment || scope.runId !== access.runId)) return [];
+    if (scope?.includePractice && (!access?.includePractice || scope.topicId !== access.topicId)) return [];
+    // Older Agent replies can contain results without turn-level provenance.
+    if (access && hasRuns && !turn.tutor && !scope) return [{ message: turn.message }];
+    return [turn];
+  });
+}
+
 function dialogueEvidence(task: AgentTask) {
   const options = new Map<string, AgentEvidence>();
   for (const [to, run] of task.runs.entries()) {
@@ -87,7 +113,7 @@ function currentProposal(task: AgentTask) {
   return task.pending[0] ?? (task.runs.length > firstRun ? task.runs.at(-1) : task.referenceConfig);
 }
 
-function validateDecision(value: unknown, task: AgentTask, limit: number, options?: Map<string, AgentEvidence>, revisionBase?: ReturnType<typeof currentProposal>): Decision | null {
+function validateDecision(value: unknown, task: AgentTask, limit: number, options?: Map<string, AgentEvidence>, revisionBase?: ReturnType<typeof currentProposal>, noAccessibleBase = false): Decision | null {
   const dialogue = !!options;
   const object = asObject(value);
   if (!object || Object.keys(object).some((key) => !["action", "plan", "observation", "evidence", "calls", "autoContinue", "focus"].includes(key))) return null;
@@ -133,7 +159,7 @@ function validateDecision(value: unknown, task: AgentTask, limit: number, option
   const calls: AgentCall[] = [];
   const previousFocus = focus?.switchTopic ? undefined : task.dialogue?.focus;
   const canUsePreset = dialogue && (focus?.defaults ?? previousFocus?.defaults) !== "forbidden"
-    && (focus?.switchTopic || !currentProposal(task));
+    && (focus?.switchTopic || noAccessibleBase || !currentProposal(task));
   const presetGoal = canUsePreset ? focus?.goal ?? focus?.topic ?? previousFocus?.goal ?? previousFocus?.topic : undefined;
   for (const proposal of proposed) {
     const call = prepareToolCall(proposal, task.seed, { presetGoal, base: revisionBase });
@@ -194,7 +220,7 @@ function decisionContext(task: AgentTask, currentTopicOnly = false) {
   const focus = task.dialogue?.focus;
   const firstRun = focus?.firstRun ?? 0;
   const currentExperiment = currentProposal(task);
-  const conversation = (task.dialogue?.turns ?? []).slice(-agentDialogueLimits.context)
+  const conversation = visibleTurns(task.dialogue?.turns ?? []).slice(-agentDialogueLimits.context)
     .map(({ message, reply, action, evidence }) => ({ message, reply, action, evidence }));
   return {
     goal: focus?.goal ?? task.experimentGoal ?? (task.dialogue ? undefined : task.goal),
@@ -218,31 +244,39 @@ function leaseActive(task: AgentTask) {
   return (task.leaseUntil ?? 0) > Date.now();
 }
 
-export async function replyToAgentMessage(task: AgentTask, message: string, credentials: AICredentials, operationId?: string, selectedRound?: number) {
+export async function replyToAgentMessage(task: AgentTask, message: string, credentials: AICredentials, operationId?: string, selectedRound?: number, tutor?: TutorDelegate) {
   credentials.signal.throwIfAborted();
   if (agentDialogueActive(task) || task.phase === "running" || (task.phase === "deciding" && leaseActive(task))) {
     throw new AIRequestError("当前请求还在处理。", 409);
   }
   const dialogue = task.dialogue ?? { turns: [], requests: 0 };
   if (dialogue.requests >= agentDialogueLimits.requests) throw new AIRequestError("已到本对话上限。", 429);
-  const turns = dialogue.pending && dialogue.pending !== message ? [...dialogue.turns, { message: dialogue.pending }] : dialogue.turns;
+  const priorScope = task.tutorContext;
+  const turns = dialogue.pending && dialogue.pending !== message ? [...dialogue.turns, { message: dialogue.pending,
+    ...((priorScope?.includeExperiment || priorScope?.includePractice) && { tutorScope: priorScope }) }] : dialogue.turns;
   let requested = { turns, focus: dialogue.focus, requests: dialogue.requests + 1, pending: message, activeUntil: Date.now() + leaseMs, operationId };
-  let claimed = await update(task, { dialogue: requested });
+  let claimed = await update(task, { dialogue: requested, ...(tutor && { tutorContext: tutor.access }) });
   const remainingBatch = availableBatch(task, task.steps + 1, task.requests + 1);
   let result: Decision;
   let model: string;
   let details;
+  let tutorDetails: TutorTurnDetails | undefined;
   try {
     const evidenceOptions = dialogueEvidence(task);
     const reports = await Promise.all(task.runs.map(async ({ id }, index) => {
+      if (tutor && tutor.run?.id !== id) return null;
       const diagnosis = await getDiagnosis(id);
       return diagnosis && { round: index + 1, conclusion: diagnosis.conclusion, evidence: diagnosis.evidence,
         explanation: diagnosis.explanation, suggestion: diagnosis.suggestion };
     }));
-    details = await schedulingDetails(task);
+    details = tutor ? [] : await schedulingDetails(task);
     const context = decisionContext({ ...task, dialogue: { ...dialogue, turns } });
     const boundedCredentials = { ...credentials, signal: AbortSignal.any([credentials.signal, AbortSignal.timeout(leaseMs - 5000)]) };
-    const response = await requestAIJson<DialogueDecision>(boundedCredentials, {
+    const accessibleFocus = tutor && (task.runs.length || turns.some(({ tutorScope }) => tutorScope?.includeExperiment || tutorScope?.includePractice))
+      ? undefined : context.focus;
+    const response = tutor ? await tutor.resolve(visibleTurns(turns, tutor.access, !!task.runs.length), {
+      focus: accessibleFocus, pendingTool: task.pending[0]?.tool,
+    }, boundedCredentials) : await requestAIJson<DialogueDecision>(boundedCredentials, {
       operation: "experiment_agent", instructions: dialogueInstructions, maxTokens: agentDialogueLimits.outputTokens,
       input: { ...context, ...(task.dialogue || task.runs.length ? {} : { goal: task.goal }),
         message, remainingBatch, lastError: dialogue.error, evidenceOptions: [...evidenceOptions.keys()],
@@ -256,24 +290,33 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
     if (response.result.action === "plan") {
       if (requested.requests >= agentDialogueLimits.requests) throw new AIRequestError("已到本对话上限。", 429);
       const { focus: resolvedFocus } = response.result;
-      const focus = { ...(resolvedFocus.switchTopic ? undefined : context.focus), ...resolvedFocus };
-      const revisionBase = !focus.switchTopic && task.pending.length <= 1 ? currentProposal(task) : undefined;
+      const focus = { ...(resolvedFocus.switchTopic ? undefined : accessibleFocus), ...resolvedFocus };
+      const sharedSession = tutor?.run?.session;
+      const base = tutor ? task.pending[0] ?? (sharedSession && { tool: sharedSession.engineId, version: sharedSession.engineVersion, config: sharedSession.config })
+        : currentProposal(task);
+      const revisionBase = !focus.switchTopic && task.pending.length <= 1 ? base : undefined;
       requested = { ...requested, requests: requested.requests + 1 };
       claimed = await update(claimed, { dialogue: requested });
       ({ result, model } = await requestAIJson<Decision>(boundedCredentials, {
         operation: "experiment_agent", instructions: planningInstructions, maxTokens: agentDialogueLimits.outputTokens,
-        input: { stage: "plan", focus, request: message, currentExperiment: focus.switchTopic ? undefined : context.currentExperiment,
+        input: { stage: "plan", focus, request: message, currentExperiment: !focus.switchTopic && base ? { tool: base.tool, config: base.config } : undefined,
           revisionBase: revisionBase && { tool: revisionBase.tool, config: revisionBase.config },
           pendingTools: focus.switchTopic ? [] : context.pendingTools,
-          runs: focus.switchTopic ? [] : context.runs.filter((run) => run.currentTopic),
+          runs: focus.switchTopic ? [] : context.runs.filter((run) => run.currentTopic && (!tutor || task.runs[run.round - 1].id === tutor.run?.id)),
           diagnoses: focus.switchTopic ? [] : reports.filter((report) => report && context.runs[report.round - 1].currentTopic),
           tools: agentPlanningTools(task.seed), remainingBatch },
         validate: (value) => {
           const proposal = asObject(value);
           if (proposal?.action !== "run" && proposal?.action !== "unsupported" && proposal?.action !== "clarify") return null;
-          return validateDecision({ ...proposal, focus }, task, remainingBatch, evidenceOptions, revisionBase);
+          if (tutor && Array.isArray(proposal.evidence) && proposal.evidence.length) return null;
+          return validateDecision({ ...proposal, focus }, task, remainingBatch, evidenceOptions, revisionBase, !!tutor && !base);
         },
       }));
+    } else if ("tutor" in response.result) {
+      const answer = response.result;
+      tutorDetails = answer.tutor;
+      result = { action: "answer", plan: [], observation: answer.observation, calls: [], evidence: [], focus: answer.focus };
+      model = response.model;
     } else {
       result = response.result;
       model = response.model;
@@ -286,12 +329,14 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
   if (credentials.signal.aborted && operationId) return stopAgentAnalysis(claimed, operationId);
   if (result.action === "finish") throw new Error("Invalid dialogue action");
   const scheduling = result.action === "explain" && !result.observation ? schedulingEvidence(details, result.evidence) : undefined;
-  const reply = result.action === "answer" && !task.pending.length && !task.runs.length
+  const reply = !tutor && result.action === "answer" && !task.pending.length && !task.runs.length
     ? trimChatInvitation(result.observation) : result.observation;
   const turn: AgentTurn = { message, reply, action: result.action, evidence: result.evidence, model, scheduling,
+    ...(tutorDetails && { tutor: tutorDetails }),
+    ...((tutor?.access.includeExperiment || tutor?.access.includePractice) && { tutorScope: tutor.access }),
     ...(result.calls.length && { proposalIds: result.calls.map(({ id }) => id) }) };
   const { switchTopic, ...nextFocus } = result.focus ?? {};
-  const focus = result.focus ? {
+  const focus = result.focus && !(tutor && result.action === "answer" && (tutor.access.includeExperiment || tutor.access.includePractice)) ? {
     ...(switchTopic ? { firstRun: task.runs.length } : dialogue.focus),
     ...nextFocus, topic: result.focus.topic,
   } : dialogue.focus;

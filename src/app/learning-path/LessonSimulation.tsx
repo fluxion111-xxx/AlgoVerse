@@ -29,6 +29,30 @@ import { transactionConcurrencyEngine } from "@/lib/experiments/transactionConcu
 import { treeTraversalEngine } from "@/lib/experiments/treeTraversal";
 import { GOAL, initialWalls, START } from "@/lib/pathfinding";
 
+const demos = {
+  scheduling: SchedulingLessonDemo,
+  memory: MemoryAllocationLessonDemo,
+  network: NetworkTransmissionLessonDemo,
+  "k-means": KMeansLessonDemo,
+  "page-replacement": PageReplacementLessonDemo,
+  "tcp-congestion": TcpCongestionLessonDemo,
+  "transaction-concurrency": TransactionConcurrencyLessonDemo,
+  "gradient-descent": GradientDescentLessonDemo,
+  "hash-collisions": HashCollisionsLessonDemo,
+  "tree-traversal": TreeTraversalLessonDemo,
+  "graph-traversal": GraphTraversalLessonDemo,
+  "deadlock-avoidance": DeadlockAvoidanceLessonDemo,
+  pathfinding: PathfindingLessonDemo,
+  "dynamic-routing": DynamicRoutingLessonDemo,
+  "recursion-stack": RecursionStackLessonDemo,
+  "knn-classification": KnnClassificationLessonDemo,
+};
+
+export function SimulationLessonDemo({ id }: { id: keyof typeof demos }) {
+  const Demo = demos[id];
+  return <Demo />;
+}
+
 type Parameters = Record<string, unknown>;
 
 function LessonSimulation<Config, Result>({ title, hint, runLabel, initial, configure, run, Replay, fields,

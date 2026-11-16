@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import Link from "next/link";
+import { NavigationLink } from "@/components/NavigationLink";
 import { notFound } from "next/navigation";
 import { CatalogIcon } from "@/components/experiments/CatalogEffects";
 import { LabWorkspace } from "@/components/experiments/LabWorkspace";
@@ -58,16 +58,16 @@ export default async function CoursePage({ params, searchParams }: CoursePagePro
             <div className="course-index"><CatalogIcon icon={course.icon} width={23} /><span>{order}</span></div>
             <h1>{course.title}</h1>
             <p>{course.introduction}</p>
-            {defaultTopic ? <Link className="catalog-jump" href={workshopRoute}>查看实验 <CatalogIcon icon="lucide:arrow-down" width={17} /></Link>
+            {defaultTopic ? <NavigationLink className="catalog-jump" href={workshopRoute}>查看实验 <CatalogIcon icon="lucide:arrow-down" width={17} /></NavigationLink>
               : <a className="catalog-jump" href="#course-experiments">查看实验 <CatalogIcon icon="lucide:arrow-down" width={17} /></a>}
           </div>
           {!knowledge && preview}
         </header>
 
         {defaultTopic && entry && <nav className="knowledge-views" aria-label="模块视图">
-          <Link href={knowledgeTopicRoute(entry, run?.id)} aria-current={knowledge ? "page" : undefined}>知识探索</Link>
-          <Link href={workshopRoute} aria-current={!knowledge && !research ? "page" : undefined}>实验工坊</Link>
-          <Link href={researchRoute} aria-current={research ? "page" : undefined}>AI 研究</Link>
+          <NavigationLink href={knowledgeTopicRoute(entry, run?.id)} aria-current={knowledge ? "page" : undefined}>知识探索</NavigationLink>
+          <NavigationLink href={workshopRoute} aria-current={!knowledge && !research ? "page" : undefined}>实验工坊</NavigationLink>
+          <NavigationLink href={researchRoute} aria-current={research ? "page" : undefined}>AI 研究</NavigationLink>
         </nav>}
         {knowledge && entry ? <KnowledgeExplorer key={entry.topic.id} entry={entry} run={run} read={read} preview={preview}
           updateReading={updateTopicReading.bind(null, entry.topic.id)} /> : research && entry ? <div className="course-body">
@@ -86,7 +86,7 @@ export default async function CoursePage({ params, searchParams }: CoursePagePro
                 <div><h3>{course.primary.title}</h3><p>{course.primary.prompt}</p></div>
                 <div className="course-lab-actions">
                   <span className={primaryEngine ? "course-lab-ready" : "course-lab-pending"}>{primaryEngine ? "可运行" : "开发中"}</span>
-                  <Link href={primary}>{primaryEngine ? "打开实验" : "查看详情"} <CatalogIcon icon="lucide:arrow-up-right" width={16} /></Link>
+                  <NavigationLink href={primary}>{primaryEngine ? "打开实验" : "查看详情"} <CatalogIcon icon="lucide:arrow-up-right" width={16} /></NavigationLink>
                 </div>
               </li>
               {course.experiments.map(({ title, prompt, href }) => {
@@ -97,7 +97,7 @@ export default async function CoursePage({ params, searchParams }: CoursePagePro
                     {engine ? (
                       <div className="course-lab-actions">
                         <span className="course-lab-ready">可运行</span>
-                        <Link href={engine.route}>打开实验 <CatalogIcon icon="lucide:arrow-up-right" width={16} /></Link>
+                        <NavigationLink href={engine.route}>打开实验 <CatalogIcon icon="lucide:arrow-up-right" width={16} /></NavigationLink>
                       </div>
                     ) : <span className="course-lab-pending">开发中</span>}
                   </li>

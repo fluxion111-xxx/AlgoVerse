@@ -7,48 +7,11 @@ import { isTeachingModel } from "@/lib/lessons/teachingModels";
 import type { LearningProgress } from "@/lib/server/experimentRecords";
 import { answerDeepExercise, answerKnowledgeExercise } from "./actions";
 import { DeepExercise } from "./DeepExercise";
-import { GrowthLessonDemo } from "./GrowthLessonDemo";
-import { IndexLessonDemo } from "./IndexLessonDemo";
-import {
-  DeadlockAvoidanceLessonDemo, DynamicRoutingLessonDemo, GradientDescentLessonDemo, GraphTraversalLessonDemo,
-  HashCollisionsLessonDemo, KMeansLessonDemo, KnnClassificationLessonDemo, MemoryAllocationLessonDemo,
-  NetworkTransmissionLessonDemo, PageReplacementLessonDemo, PathfindingLessonDemo, RecursionStackLessonDemo,
-  SchedulingLessonDemo, TcpCongestionLessonDemo, TransactionConcurrencyLessonDemo, TreeTraversalLessonDemo,
-} from "./LessonSimulation";
+import { LessonDemo } from "./LessonDemo";
 import { LessonTutor } from "./LessonTutor";
-import { SortingLessonDemo } from "./SortingLessonDemo";
-import { TeachingModelDemo } from "./TeachingModelDemo";
 import "./deep-lesson.css";
 import "../experiments/experiments.css";
 import "../experiments/create/studio.css";
-
-const demos = {
-  growth: GrowthLessonDemo,
-  sorting: SortingLessonDemo,
-  index: IndexLessonDemo,
-  scheduling: SchedulingLessonDemo,
-  memory: MemoryAllocationLessonDemo,
-  network: NetworkTransmissionLessonDemo,
-  "k-means": KMeansLessonDemo,
-  "page-replacement": PageReplacementLessonDemo,
-  "tcp-congestion": TcpCongestionLessonDemo,
-  "transaction-concurrency": TransactionConcurrencyLessonDemo,
-  "gradient-descent": GradientDescentLessonDemo,
-  "hash-collisions": HashCollisionsLessonDemo,
-  "tree-traversal": TreeTraversalLessonDemo,
-  "graph-traversal": GraphTraversalLessonDemo,
-  "deadlock-avoidance": DeadlockAvoidanceLessonDemo,
-  pathfinding: PathfindingLessonDemo,
-  "dynamic-routing": DynamicRoutingLessonDemo,
-  "recursion-stack": RecursionStackLessonDemo,
-  "knn-classification": KnnClassificationLessonDemo,
-};
-
-function LessonDemo({ id }: { id: DeepLesson["demo"] }) {
-  if (isTeachingModel(id)) return <TeachingModelDemo id={id} />;
-  const Demo = demos[id];
-  return <Demo />;
-}
 
 function Section({ block }: { block: LessonBlock }) {
   return <section className="lesson-section" id={`lesson-${block.id}`} aria-labelledby={`lesson-title-${block.id}`}>
@@ -98,7 +61,7 @@ export function DeepStudyLesson({ entry, lesson, progress, toTopic }: {
     <nav className="lesson-index" aria-label="本节目录">{sections.map(([id, title]) =>
       <a key={id} href={`#${id}`}>{title}</a>)}</nav>
     {lesson.blocks.map((block) => <Section key={block.id} block={block} />)}
-    <LessonDemo id={lesson.demo} />
+    {isTeachingModel(lesson.demo) ? <LessonDemo model={lesson.demo} /> : <LessonDemo demo={lesson.demo} />}
     <section className="lesson-section knowledge-practice" id="knowledge-practice" tabIndex={-1} aria-labelledby="lesson-practice-title">
       <h6 id="lesson-practice-title">练习与解析</h6>
       {lesson.exercises.map(({ id, kind, level, prompt, ...item }) => <DeepExercise key={id} id={`lesson-exercise-${id}`}

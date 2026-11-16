@@ -1,9 +1,8 @@
 "use client";
 
 import Image from "next/image";
-import Link from "next/link";
+import { NavigationLink } from "@/components/NavigationLink";
 import { useEffect, useRef, type ReactNode } from "react";
-import { useMotionValueEvent, useScroll } from "motion/react";
 import { CatalogIcon } from "./CatalogEffects";
 
 type StoryLink = { href: string; label: string };
@@ -40,9 +39,6 @@ function Photo({ entry }: { entry: StoryEntry }) {
 
 export function EditorialStory({ id, titleId, mode, kicker, headline, intro, entries, children }: Props) {
   const section = useRef<HTMLElement>(null);
-  const update = useRef<() => void>(null);
-  const { scrollY } = useScroll();
-  useMotionValueEvent(scrollY, "change", () => update.current?.());
 
   useEffect(() => {
     const root = section.current;
@@ -55,10 +51,13 @@ export function EditorialStory({ id, titleId, mode, kicker, headline, intro, ent
     const wide = window.matchMedia("(min-width: 900px) and (min-height: 600px)");
     const images = Array.from(root.querySelectorAll<HTMLElement>(".story-inline"));
     let current = -1;
+    let frame: number | undefined;
 
     const paint = () => {
-      if (reduced.matches) return;
+      frame = undefined;
       const viewport = window.innerHeight;
+      const bounds = root.getBoundingClientRect();
+      if (bounds.top > viewport || bounds.bottom < 0) return;
       const titleTop = title.getBoundingClientRect().top;
       const position = rows.map((row) => row.getBoundingClientRect());
       const imageTops = wide.matches ? [] : images.map((item) => item.getBoundingClientRect().top);
@@ -107,24 +106,31 @@ export function EditorialStory({ id, titleId, mode, kicker, headline, intro, ent
       }
     };
 
+    const schedulePaint = () => {
+      if (frame === undefined && !reduced.matches) frame = window.requestAnimationFrame(paint);
+    };
     const configure = () => {
       root.toggleAttribute("data-motion", !reduced.matches);
       if (reduced.matches) {
+        if (frame !== undefined) window.cancelAnimationFrame(frame);
+        frame = undefined;
         delete root.dataset.active;
         rows.forEach((row) => row.removeAttribute("data-active"));
+        panels.forEach((panel) => panel.removeAttribute("data-active"));
         current = -1;
       }
-      paint();
+      schedulePaint();
     };
-    const observer = new ResizeObserver(paint);
-    update.current = paint;
+    const observer = new ResizeObserver(schedulePaint);
     configure();
     observer.observe(root);
+    window.addEventListener("scroll", schedulePaint, { passive: true });
     window.addEventListener("resize", configure);
     reduced.addEventListener("change", configure);
     return () => {
-      update.current = null;
+      if (frame !== undefined) window.cancelAnimationFrame(frame);
       observer.disconnect();
+      window.removeEventListener("scroll", schedulePaint);
       window.removeEventListener("resize", configure);
       reduced.removeEventListener("change", configure);
     };
@@ -160,12 +166,12 @@ export function EditorialStory({ id, titleId, mode, kicker, headline, intro, ent
               <h3 className="story-row-title">{entry.title}</h3>
               <p className="story-row-description">{entry.description}</p>
               <div className="story-row-links">
-                <Link href={entry.link.href} className="story-link" aria-label={`${entry.link.label} · ${entry.title}`}>
+                <NavigationLink href={entry.link.href} className="story-link" aria-label={`${entry.link.label} · ${entry.title}`}>
                   {entry.link.label}<CatalogIcon icon="lucide:arrow-up-right" width={17} />
-                </Link>
-                {entry.secondary && <Link href={entry.secondary.href} className="story-link story-link-secondary">
+                </NavigationLink>
+                {entry.secondary && <NavigationLink href={entry.secondary.href} className="story-link story-link-secondary">
                   {entry.secondary.label}<CatalogIcon icon="lucide:arrow-right" width={16} />
-                </Link>}
+                </NavigationLink>}
               </div>
             </div>
             <div className="story-inline" aria-hidden="true"><div className="story-image-wipe"><Photo entry={entry} /></div></div>

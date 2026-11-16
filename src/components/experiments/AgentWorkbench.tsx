@@ -13,7 +13,7 @@ import { fetchWithTemporaryAI, useActiveAI } from "@/lib/temporaryAI";
 import { CatalogIcon } from "./CatalogEffects";
 import { DiagnosisSummary } from "./QuickStartDiagnosis";
 import { SortingReplay } from "./SimulationReplay";
-import { TutorReply } from "./TutorReply";
+import { LazyTutorReply } from "./LazyTutorReply";
 
 const phases: Record<AgentTask["phase"], string> = {
   draft: "等待规划", deciding: "AI 正在分析", confirm: "等待确认", running: "工具运行中",
@@ -70,7 +70,7 @@ function SavedSortingReplay({ taskId, runId }: { taskId: string; runId: string }
 export function DecisionDetails({ decision, runs, report = false }: { decision: Pick<AgentDecision, "observation" | "evidence">; runs: AgentRun[]; report?: boolean }) {
   const scheduling = report && decision.evidence.some(({ metric }) => metric === "waiting") ? schedulingWaitReport(runs) : null;
   return <>
-    {!report && decision.observation && <TutorReply answer={decision.observation} reveal={false} />}
+    {!report && decision.observation && <LazyTutorReply answer={decision.observation} reveal={false} />}
     {scheduling && <dl className="preset-details">
       <div><dt>已测 RR 中等待最短</dt><dd>时间片 {scheduling.bestTrials.map(({ config }) => config.quantum).join("、")}
         {" · "}{scheduling.bestWait.toFixed(2)}</dd></div>

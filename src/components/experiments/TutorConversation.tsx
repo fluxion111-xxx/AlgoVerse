@@ -9,7 +9,7 @@ import { isPlatformModel, platformModels } from "@/lib/platformAI";
 import { fetchWithTemporaryAI, selectPlatformAIModel, useActiveAI, useTemporaryAI } from "@/lib/temporaryAI";
 import type { TutorCodeBlock } from "@/lib/tutorReply";
 import { CatalogIcon } from "./CatalogEffects";
-import { TutorReply } from "./TutorReply";
+import { LazyTutorReply } from "./LazyTutorReply";
 
 type Reference = { title: string; href: string };
 type Metric = { id: string; label: string; value: string };
@@ -223,7 +223,7 @@ export function TutorConversation({ initial, choices, topicId, reference, return
             <ol className="tutor-turns">{history.map((turn, index) => <li key={turn.id} id={`tutor-turn-${turn.id}`}>
               <p className="tutor-turn-label">你的问题</p><p className="tutor-question">{turn.question}</p>
               <p className="tutor-turn-label tutor-reply-label"><CatalogIcon icon="lucide:triangle" width={16} />助教回复</p>
-              <TutorReply answer={turn.answer} codeBlocks={turn.codeBlocks} reveal={index === history.length - 1} />
+              <LazyTutorReply answer={turn.answer} codeBlocks={turn.codeBlocks} reveal={index === history.length - 1} />
               {turn.sources.length > 0 && <div className="tutor-sources">
                 <strong>知识引用</strong>{turn.sources.map((source) => <ReferenceLink key={source.href} reference={source} />)}
               </div>}

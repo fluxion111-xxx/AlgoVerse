@@ -1,4 +1,5 @@
 import type { EngineId, ExperimentConfig } from "./experimentEngines";
+import type { TutorCodeBlock } from "./tutorReply";
 
 export const agentLimits = { decisions: 6, runs: 4, steps: 12, batch: 2, outputTokens: 1000 } as const;
 export const agentDialogueLimits = { requests: 24, context: 10, outputTokens: 1200 } as const;
@@ -25,7 +26,10 @@ export type SchedulingEvidence = {
   metric: "waiting" | "response" | "turnaround";
   processes: { process: number; before: number; after: number }[];
 };
-export type AgentTurn = { message: string; stopped?: boolean } & (
+export type TutorContext = { topicId?: string; runId?: string; includeExperiment: boolean; includePractice: boolean };
+export type TutorReference = { title: string; href: string };
+export type TutorTurnDetails = { codeBlocks?: TutorCodeBlock[]; sources: TutorReference[]; recommendation?: TutorReference };
+export type AgentTurn = { message: string; stopped?: boolean; tutorScope?: TutorContext; tutor?: TutorTurnDetails } & (
   { reply: string; model: string; action: AgentTurnAction; evidence: AgentEvidence[]; scheduling?: SchedulingEvidence[]; proposalIds?: string[] }
   | { reply?: never; model?: never; action?: never; evidence?: never; scheduling?: never; proposalIds?: never }
 );
@@ -59,6 +63,7 @@ export type AgentTask = {
   decisions: AgentDecision[];
   clarifications: { question: string; answer: string }[];
   dialogue?: AgentDialogue;
+  tutorContext?: TutorContext;
   experimentGoal?: string;
   autoContinue?: boolean;
   referenceConfig?: Pick<AgentCall, "tool" | "version" | "config">;

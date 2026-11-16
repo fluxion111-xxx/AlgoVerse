@@ -18,6 +18,24 @@ button:focus-visible { outline: 3px solid #e86b32; outline-offset: 4px; }
 .section-nav { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 clamp(12px, 2.5vw, 30px); }
 .section-nav a { padding-block: 10px; font-size: 14px; font-weight: 750; }
 .section-nav a[aria-current], .section-nav a:hover { text-decoration: underline; text-underline-offset: 5px; }
+a:has(> [data-nav-pending]) { cursor: progress; }
+.nav-pending-status[data-nav-pending] {
+  position: fixed;
+  z-index: 20;
+  inset-inline-start: clamp(16px, 4vw, 64px);
+  inset-block-end: max(16px, env(safe-area-inset-bottom));
+  padding: 10px 14px;
+  border-inline-start: 2px solid #e2bd64;
+  color: #f1f1e8;
+  background: linear-gradient(115deg, #30382b, #1c231a);
+  box-shadow: 0 3px 12px #11150f40;
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  pointer-events: none;
+  animation: nav-pending-in .15s .12s both;
+}
+@keyframes nav-pending-in { from { opacity: 0; } to { opacity: 1; } }
 @media (max-width: 600px) {
   :is(.catalog-masthead, .experiment-masthead):has(.section-nav) { flex-wrap: wrap; gap: 4px 12px; padding-block: 10px; }
   :is(.catalog-masthead, .experiment-masthead) .section-nav { flex-basis: 100%; order: 1; }

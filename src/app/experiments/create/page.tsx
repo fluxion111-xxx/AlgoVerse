@@ -14,7 +14,7 @@ import { experimentDomains } from "@/lib/experiments/engine";
 import { evidenceLabels, experimentEvidence } from "@/lib/experiments/evidence";
 import { experimentTaskLinks, quickStartRoute, runAnalysisLink, withExperimentTask, workflowAISettingsRoute, workflowRoute, workflowSteps, type WorkflowStep } from "@/lib/navigation";
 import { getExperimentContext, type ExperimentSearch } from "@/lib/server/experimentContext";
-import { getActiveAIWorkflow, getActiveAgentTask, getActiveExperimentTask, getAgentTask, getDiagnosis, getLearningProgress, getQuickStart } from "@/lib/server/experimentRecords";
+import { getActiveAIWorkflow, getActiveAgentTask, getActiveExperimentTask, getAgentTask, getDiagnosis, getQuickStart, getRecentExperimentRuns } from "@/lib/server/experimentRecords";
 import type { Diagnosis } from "@/lib/quickStart";
 import { runCreatorExperiment } from "../actions";
 import "./creator-flow.css";
@@ -117,7 +117,7 @@ export default async function CreatorPage({ searchParams }: { searchParams: Prom
     const currentRun = context.run?.id ?? task?.runs.at(-1)?.id ?? reference?.run?.id;
     if (intent === "diagnosis") {
       const runId = currentRun ?? (!explicitTask && !params.agentId && params.new !== "1"
-        ? (await getActiveExperimentTask())?.runId ?? (await getLearningProgress()).recent[0]?.id : undefined);
+        ? (await getActiveExperimentTask())?.runId ?? (await getRecentExperimentRuns())[0]?.id : undefined);
       if (runId) redirect(runAnalysisLink(runId, true));
     }
     if (intent === "run" && currentRun && !task?.pending.length && task?.phase !== "running") redirect(runAnalysisLink(currentRun));

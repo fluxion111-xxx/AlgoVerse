@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import Link from "next/link";
+import { NavigationLink } from "@/components/NavigationLink";
 import { CatalogIcon } from "@/components/experiments/CatalogEffects";
 import { EditorialStory } from "@/components/experiments/EditorialStory";
 import { ExperimentCreator } from "@/components/experiments/ExperimentCreator";
@@ -55,8 +55,8 @@ export default function ExperimentsPage() {
           <h2 id="lab-creation-title">带个问题来。</h2>
           <p>写下想法，再选参数。</p>
           <nav className="lab-index-workflow-links" aria-label="实验入口">
-            <Link href={creatorRoute}>AI 智能创造 <CatalogIcon icon="lucide:arrow-up-right" width={17} /></Link>
-            <Link href="/experiments/create?mode=resume">继续当前任务 <CatalogIcon icon="lucide:arrow-up-right" width={17} /></Link>
+            <NavigationLink href={creatorRoute}>AI 智能创造 <CatalogIcon icon="lucide:arrow-up-right" width={17} /></NavigationLink>
+            <NavigationLink href="/experiments/create?mode=resume">继续当前任务 <CatalogIcon icon="lucide:arrow-up-right" width={17} /></NavigationLink>
           </nav>
         </div>
         <ExperimentCreator />

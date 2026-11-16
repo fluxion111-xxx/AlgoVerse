@@ -4,7 +4,7 @@ import { TutorConversation } from "@/components/experiments/TutorConversation";
 import { getExperimentEngine } from "@/lib/experimentEngines";
 import { evidenceLabels, experimentEvidence } from "@/lib/experiments/evidence";
 import { getExperimentTopic, getKnowledgeTopic, knowledgeTopicRoute } from "@/lib/knowledge";
-import { getActiveExperimentTask, getExperimentRun, getLearningProgress } from "@/lib/server/experimentRecords";
+import { getActiveExperimentTask, getExperimentRun, getRecentExperimentRuns } from "@/lib/server/experimentRecords";
 import { withExperimentTask, workflowRoute } from "@/lib/navigation";
 import "../home-editorial.css";
 import "../story-editorial.css";
@@ -15,16 +15,17 @@ export const metadata: Metadata = { title: "AI 助教｜AlgoVerse" };
 export default async function TutorPage({ searchParams }: { searchParams: Promise<{ runId?: string; from?: string; topic?: string }> }) {
   const { runId, from, topic } = await searchParams;
   const entry = getKnowledgeTopic(topic);
-  const [active, progress] = await Promise.all([
-    runId !== undefined || entry ? Promise.resolve(runId) : getActiveExperimentTask().then((task) => task?.runId),
-    getLearningProgress(),
+  const [run, recent] = await Promise.all([
+    runId !== undefined || entry
+      ? getExperimentRun(runId)
+      : getActiveExperimentTask().then((task) => getExperimentRun(task?.runId)),
+    getRecentExperimentRuns(),
   ]);
-  const run = await getExperimentRun(active);
   const engine = run && getExperimentEngine(run.session.engineId, run.session.engineVersion);
   const task = run ? { sessionId: run.session.id, runId: run.id } : null;
   const aiRun = run?.session.source?.type === "creator" || run?.session.source?.type === "quick-start";
   const runTopic = run && getExperimentTopic(run.topicId, run.session.engineId);
-  const choices = progress.recent.flatMap(({ id, engineId, completedAt }) => {
+  const choices = recent.flatMap(({ id, engineId, completedAt }) => {
     const option = getExperimentEngine(engineId);
     return option ? [{ id, title: option.creator.title, completedAt, href: `/experiments/runs/${id}` }] : [];
   });

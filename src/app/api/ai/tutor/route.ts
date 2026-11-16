@@ -1,10 +1,12 @@
 import { maxCreatorHistory, maxCreatorReplyLength, maxQuestionLength, type CreatorTurn } from "@/lib/experimentCreator";
+import { agentDialogueActive, type AgentFocus, type TutorContext } from "@/lib/experimentAgent";
 import { registeredEngines } from "@/lib/experimentEngines";
 import { experimentEvidence } from "@/lib/experiments/evidence";
 import { experimentReviewTopics, getExperimentTopic, getKnowledgeTopic, knowledgeTopicRoute } from "@/lib/knowledge";
 import { searchKnowledge } from "@/lib/knowledgeSearch";
-import { aiErrorResponse, aiJson, asObject, readAICredentials, requestAIJson } from "@/lib/server/aiProvider";
-import { getExperimentRun, getTopicPractice } from "@/lib/server/experimentRecords";
+import { AIRequestError, aiErrorResponse, aiJson, asObject, readAICredentials, requestAIJson, type AICredentials } from "@/lib/server/aiProvider";
+import { readTutorResolution, replyToAgentMessage, type TutorResolution } from "@/lib/server/experimentAgent";
+import { createAgentTask, getAgentTask, getExperimentRun, getTopicPractice, saveAgentTask } from "@/lib/server/experimentRecords";
 import { getDeepLesson } from "@/content/lessons/index";
 import { normalizeTutorFencedReply, normalizeTutorReplyJson, readTutorCodeBlocks, requestedPythonVerbatimLine, type TutorCodeBlock } from "@/lib/tutorReply";
 
@@ -21,6 +23,11 @@ const tutorCodeInstructions = [
   "用户直接给出的代码片段也按原文复制。追加顶层代码时不自行增加缩进。",
   "用户要求一段完整代码时，把所有对应的行放进同一个代码块。",
 ];
+const experimentIntent = [
+  '用户明确要设计、创建、修改、重试或优化实验时，返回 {"action":"plan","focus":{"topic":"从当前问题和历史找到的对象","goal":"完整的实验目标"}}。',
+  '追问「帮我设计一个实验」时，沿用上一轮已经讨论的主题。已知主题就生成 plan，样例数据可由平台选择。明确指定新主题时加 focus.switchTopic:true。修改参数可记录在 focus.constraints。',
+  '问概念、区别、代码或实测结果时正常回答。不要擅自创建实验，也不要编造实验数据。',
+];
 
 function citationId(citation: unknown) {
   if (typeof citation === "string") return citation;
@@ -32,12 +39,22 @@ function citationId(citation: unknown) {
 
 export async function POST(request: Request) {
   try {
-    const credentials = readAICredentials(request);
     const payload = asObject(await request.json().catch(() => null));
+    const shared = payload?.conversation === true;
+    const changingContext = shared && payload.action === "context";
+    const origin = request.headers.get("origin");
+    const site = request.headers.get("sec-fetch-site");
+    const url = new URL(request.url);
+    if (shared && ((site && site !== "same-origin" && site !== "none") || (origin && origin !== url.origin))) {
+      return aiJson({ status: "error", message: "请在本站操作。" }, 403);
+    }
+    let task = shared && payload.agentId !== undefined ? await getAgentTask(payload.agentId) : null;
+    if (shared && payload.agentId !== undefined && !task) return aiJson({ status: "error", message: "找不到这段对话。" }, 404);
+    if (task && task.revision !== payload?.revision) return aiJson({ status: "error", message: "对话已更新。请刷新。" }, 409);
     const rawQuestion = typeof payload?.question === "string" ? payload.question : "";
     const question = rawQuestion.trim();
-    const history = payload?.history ?? [];
-    if (!question || question.length > maxQuestionLength || !Array.isArray(history) || history.length > maxCreatorHistory) {
+    const history = shared ? [] : payload?.history ?? [];
+    if ((!changingContext && (!question || question.length > maxQuestionLength)) || !Array.isArray(history) || history.length > maxCreatorHistory) {
       return aiJson({ status: "error", message: "请输入 1–300 字。" }, 400);
     }
     const turns: (CreatorTurn & { codeBlocks?: TutorCodeBlock[] })[] = [];
@@ -50,26 +67,49 @@ export async function POST(request: Request) {
       turns.push({ question: turn.question, answer: turn.answer, ...(codeBlocks.length > 0 && { codeBlocks }) });
     }
 
-    const topic = getKnowledgeTopic(payload?.topicId);
-    if (payload?.topicId !== undefined && !topic) return aiJson({ status: "error", message: "找不到该知识点。" }, 404);
+    const topicId = payload?.topicId ?? (shared ? task?.tutorContext?.topicId : undefined);
+    const topic = getKnowledgeTopic(topicId);
+    if (topicId !== undefined && !topic) return aiJson({ status: "error", message: "找不到该知识点。" }, 404);
     if (payload?.includePractice !== undefined && (typeof payload.includePractice !== "boolean" || (payload.includePractice && !topic))) {
       return aiJson({ status: "error", message: "请选择要分享练习的知识点。" }, 400);
     }
+    if (shared && payload?.includeExperiment !== undefined && typeof payload.includeExperiment !== "boolean") {
+      return aiJson({ status: "error", message: "实验授权有误。" }, 400);
+    }
+    if (!shared && payload?.runId !== undefined && payload.includeExperiment !== true) {
+      return aiJson({ status: "error", message: "请先允许读取本轮实验。" }, 400);
+    }
+    const selected = payload?.runId == null ? null : await getExperimentRun(payload.runId);
+    if ((payload?.runId != null || payload?.includeExperiment === true) && !selected) return aiJson({ status: "error", message: "找不到本轮实验。" }, 404);
+    const access: TutorContext = {
+      topicId: topic?.topic.id, runId: selected?.id,
+      includeExperiment: payload?.includeExperiment === true, includePractice: payload?.includePractice === true,
+    };
+    if (changingContext) {
+      if (!task) return aiJson({ status: "error", message: "找不到这段对话。" }, 404);
+      if (agentDialogueActive(task) || task.phase === "running" || task.phase === "deciding") {
+        return aiJson({ status: "error", message: "当前请求还在处理。" }, 409);
+      }
+      const saved = await saveAgentTask(task, { tutorContext: access });
+      if (!saved) return aiJson({ status: "error", message: "对话已更新。请刷新。" }, 409);
+      return aiJson({ status: "context", task: saved });
+    }
+    const credentials = readAICredentials(request);
+    if (question.includes(credentials.apiKey) || (shared && /\bsk-[A-Za-z0-9_-]{16,}\b/i.test(question))) {
+      return aiJson({ status: "error", message: "请先移除问题里的 Key。" }, 400);
+    }
+    const run = access.includeExperiment ? selected : null;
     const lesson = topic && getDeepLesson(topic.topic.id);
     const exercises = topic ? [...(topic.topic.teaching?.exercises ?? []), ...(lesson?.exercises ?? [])] : [];
     const practice = topic && payload?.includePractice === true
       ? await getTopicPractice(topic.topic.id, exercises.map(({ id }) => id)) : undefined;
-    if (payload?.runId !== undefined && payload.includeExperiment !== true) {
-      return aiJson({ status: "error", message: "请先允许读取本轮实验。" }, 400);
-    }
-    const run = payload?.includeExperiment === true ? await getExperimentRun(payload.runId) : null;
-    if (payload?.includeExperiment === true && !run) return aiJson({ status: "error", message: "找不到本轮实验。" }, 404);
+    async function resolve(turns: (CreatorTurn & { codeBlocks?: TutorCodeBlock[] })[], context: { focus?: AgentFocus; pendingTool?: string }, credentials: AICredentials) {
     const runTopic = run && getExperimentTopic(run.topicId, run.session.engineId);
     const matched = searchKnowledge(question);
     const fallback = !matched.length && turns.length ? searchKnowledge(turns.at(-1)!.question) : [];
     const review = run ? experimentReviewTopics(run.session.engineId, run.topicId) : [];
     const sources = [...new Set([...(topic ? [topic] : []), ...review, ...matched, ...fallback])].slice(0, 4);
-    const input = { question, history: turns,
+    const input = { question, history: turns, ...(shared && { conversation: context }),
       ...(lesson && { lesson: { title: lesson.title, goals: lesson.goals, material: lesson.blocks.map((block) =>
         block.kind === "code" ? block.source : block.kind === "steps" ? block.steps.map(({ text }) => text).join("\n")
           : [block.formula, ...block.paragraphs].filter(Boolean).join("\n")).join("\n").slice(0, 2400) } }),
@@ -87,15 +127,16 @@ export async function POST(request: Request) {
       } }),
       excerpt: topic.sections.flatMap(({ paragraphs }) => paragraphs).join("\n").slice(0, 800),
     })), available: registeredEngines.map(({ id, creator }) => ({ id, title: creator.title })) };
-    if (JSON.stringify(input).includes(credentials.apiKey)) return aiJson({ status: "error", message: "请先移除问题里的 Key。" }, 400);
+    if (JSON.stringify(input).includes(credentials.apiKey)) throw new AIRequestError("请先移除问题里的 Key。", 400);
 
     const requestedLine = credentials.selection.provider === "siliconflow" && credentials.selection.model === "backup"
       ? requestedPythonVerbatimLine(rawQuestion) : null;
     const explainOriginal = "平台会显示用户给出的代码。answer 只写原理和解释，不要复述任何代码。";
-    const { result } = await requestAIJson(credentials, {
+    return requestAIJson<TutorResolution>(credentials, {
       operation: "tutor",
       instructions: [
         ...tutorInstructions,
+        ...(shared ? experimentIntent : []),
         ...(requestedLine !== null ? [explainOriginal, '只输出 JSON，例如 {"answer":"用中文解释代码的含义。","citations":[],"recommend":null}。'] : [
           ...tutorCodeInstructions,
           "只输出一个 JSON 对象。answer 只放解释，不复述代码。需要展示代码时用 codeBlocks，每个块用 language 标注语言，lines 每项是一行代码，保留行首缩进。无代码时省略 codeBlocks。",
@@ -111,6 +152,7 @@ export async function POST(request: Request) {
           "只用一行普通中文文字，固定以「说明：」开头。不要写 JSON、代码围栏、引用或额外段落。不要声称运行过代码。",
         ] : [
           ...tutorInstructions,
+          ...(shared ? experimentIntent : []),
           ...tutorCodeInstructions,
           '直接输出最终答复。第一行写单行 JSON，例如 {"answer":"解释。","citations":[],"recommend":null}。answer 只写解释。',
           "有代码时，紧接着用 Markdown 三反引号代码块，打开时紧跟语言名。把代码原样写在围栏内，保留引号、反斜杠、换行及缩进。",
@@ -120,6 +162,10 @@ export async function POST(request: Request) {
       },
       validate(value) {
         const output = asObject(value);
+        if (shared && output?.action === "plan") {
+          const focus = readTutorResolution(output);
+          return focus ? { action: "plan", focus } : null;
+        }
         if (typeof output?.answer !== "string" || output.answer.length > maxCreatorReplyLength) return null;
         const answer = output.answer.trim();
         const modelBlocks = readTutorCodeBlocks(output.codeBlocks, output.answer.length);
@@ -142,17 +188,30 @@ export async function POST(request: Request) {
           ? `${recommendation.route}?${new URLSearchParams({ topic: linked.topic.id })}#knowledge-lab`
           : recommendation.route);
         return {
-          answer,
-          ...(codeBlocks.length > 0 && { codeBlocks }),
-          sources: cited.flatMap((entry) => entry ? [{ title: entry.topic.title, href: knowledgeTopicRoute(entry) }] : []),
-          ...(recommendation && experimentHref && { recommendation: {
-            title: recommendation.creator.title,
-            href: experimentHref,
-          } }),
+          action: "answer", observation: answer,
+          tutor: {
+            ...(codeBlocks.length > 0 && { codeBlocks }),
+            sources: cited.flatMap((entry) => entry ? [{ title: entry.topic.title, href: knowledgeTopicRoute(entry) }] : []),
+            ...(recommendation && experimentHref && { recommendation: { title: recommendation.creator.title, href: experimentHref } }),
+          },
         };
       },
     });
-    return aiJson({ status: "answer", ...result });
+    }
+    if (!shared) {
+      const { result } = await resolve(turns, {}, credentials);
+      if (result.action !== "answer") throw new AIRequestError("AI 回复格式有误。", 502);
+      return aiJson({ status: "answer", answer: result.observation, ...result.tutor });
+    }
+    task ??= await createAgentTask(question, run?.session, run ?? undefined);
+    const operationId = typeof payload.operationId === "string" && /^[a-f0-9-]{36}$/i.test(payload.operationId) ? payload.operationId : undefined;
+    const next = await replyToAgentMessage(task, question, credentials, operationId, undefined, {
+      access, run,
+      resolve: (history, context, credentials) => resolve(history.slice(-maxCreatorHistory).map((turn) => ({
+        question: turn.message, answer: turn.reply ?? "", codeBlocks: turn.tutor?.codeBlocks,
+      })), context, credentials),
+    });
+    return aiJson(next.dialogue?.error ? { status: "error", message: next.dialogue.error, task: next } : { status: "shared", task: next });
   } catch (error) {
     return aiErrorResponse(error);
   }

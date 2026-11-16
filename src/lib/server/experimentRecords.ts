@@ -7,8 +7,7 @@ import { createPathfindingConfig, getExperimentEngine, pathfindingEngine, type E
 import type { CreatorPlanIntent } from "@/lib/experimentCreator";
 import type { AgentTask } from "@/lib/experimentAgent";
 import { experimentEvidence } from "@/lib/experiments/evidence";
-import { getExperimentTopic, getKnowledgeTopic } from "@/lib/knowledge";
-import { gradeKnowledgeExercise, hasPracticeExercise, type PracticeAttempts } from "@/lib/knowledgePractice";
+import type { PracticeAttempts } from "@/lib/knowledgePractice";
 import { quickStartQuestion, type Diagnosis, type QuickStartPlan } from "@/lib/quickStart";
 
 const visitorCookie = "algoverse_visitor";
@@ -218,10 +217,13 @@ async function collectionFiles(owner: string, collection: string) {
 
 export async function hasReadTopic(id: string) {
   const owner = await visitor();
-  return !!owner && !!getKnowledgeTopic(id) && !!await readRecord(recordPath(owner, "read-topics", id));
+  if (!owner) return false;
+  const { getKnowledgeTopic } = await import("@/lib/knowledge");
+  return !!getKnowledgeTopic(id) && !!await readRecord(recordPath(owner, "read-topics", id));
 }
 
 export async function setReadTopic(id: string, read: boolean) {
+  const { getKnowledgeTopic } = await import("@/lib/knowledge");
   if (!getKnowledgeTopic(id)) return;
   const owner = read ? await ensureVisitor() : await visitor();
   if (!owner) return;
@@ -231,6 +233,7 @@ export async function setReadTopic(id: string, read: boolean) {
 }
 
 export async function submitKnowledgeExercise(topicId: string, exerciseId: string, selection: unknown) {
+  const { gradeKnowledgeExercise } = await import("@/lib/knowledgePractice");
   const result = gradeKnowledgeExercise(topicId, exerciseId, selection);
   if (!result) return null;
   const owner = await ensureVisitor();
@@ -248,7 +251,8 @@ export async function submitKnowledgeExercise(topicId: string, exerciseId: strin
 
 export async function getTopicPractice(topicId: string, exerciseIds: readonly string[]) {
   const owner = await visitor();
-  if (!owner) return {};
+  if (!owner || !exerciseIds.length) return {};
+  const { hasPracticeExercise } = await import("@/lib/knowledgePractice");
   const entries = await Promise.all(exerciseIds.filter((id) => hasPracticeExercise(topicId, id)).map(async (id) => {
     const attempt = await readRecord<{ correct: boolean }>(recordPath(owner, "practice", `${topicId}.${id}`));
     return [id, attempt?.correct] as const;
@@ -261,39 +265,59 @@ function countRun(previous: Completion | undefined, run: RunSummary): Completion
   return { count: (previous?.count ?? 0) + 1, latest };
 }
 
+async function collectRecentRuns(owner: string, onRun?: (run: RunSummary, topicId?: string) => void) {
+  const files = await collectionFiles(owner, "runs");
+  const ids = files.filter((file) => file.endsWith(".json")).map((file) => file.slice(0, -5)).filter(isRecordId);
+  const recent: RunSummary[] = [];
+  for (let offset = 0; offset < ids.length; offset += 16) {
+    const runs = await Promise.all(ids.slice(offset, offset + 16).map((id) => readRecord<ExperimentRun>(recordPath(owner, "runs", id))));
+    for (const saved of runs) {
+      if (!saved || !getExperimentEngine(saved.session.engineId, saved.session.engineVersion)) continue;
+      const summary = { id: saved.id, completedAt: saved.completedAt, engineId: saved.session.engineId };
+      onRun?.(summary, saved.topicId);
+      recent.push(summary);
+    }
+    recent.sort((a, b) => b.completedAt.localeCompare(a.completedAt) || a.id.localeCompare(b.id));
+    recent.splice(12);
+  }
+  return recent;
+}
+
+export async function getRecentExperimentRuns() {
+  const owner = await visitor();
+  return owner ? collectRecentRuns(owner) : [];
+}
+
 export async function getLearningProgress(): Promise<LearningProgress> {
   const owner = await visitor();
   const progress: LearningProgress = { byEngine: {}, byTopic: {}, readTopics: new Set(), practice: {}, recent: [] };
   if (!owner) return progress;
-  const [files, readings, practiceFiles] = await Promise.all([
-    collectionFiles(owner, "runs"), collectionFiles(owner, "read-topics"), collectionFiles(owner, "practice"),
+  const { getExperimentTopic, getKnowledgeTopic } = await import("@/lib/knowledge");
+  const [recent, readings, practiceFiles] = await Promise.all([
+    collectRecentRuns(owner, (run, topicId) => {
+      const { engineId } = run;
+      progress.byEngine[engineId] = countRun(progress.byEngine[engineId], run);
+      const topic = getExperimentTopic(topicId, engineId)?.topic;
+      if (topic) progress.byTopic[topic.id] = countRun(progress.byTopic[topic.id], run);
+    }),
+    collectionFiles(owner, "read-topics"),
+    collectionFiles(owner, "practice"),
   ]);
+  progress.recent = recent;
   progress.readTopics = new Set(readings.filter((file) => file.endsWith(".json"))
     .map((file) => file.slice(0, -5)).filter((id) => getKnowledgeTopic(id)));
-  for (let offset = 0; offset < practiceFiles.length; offset += 16) {
-    await Promise.all(practiceFiles.slice(offset, offset + 16).map(async (filename) => {
-      const match = /^([a-z0-9-]+)\.([a-z0-9-]+)\.json$/.exec(filename);
-      if (!match) return;
-      const [, topicId, exerciseId] = match;
-      if (!hasPracticeExercise(topicId, exerciseId)) return;
-      const attempt = await readRecord<{ correct: boolean }>(recordPath(owner, "practice", `${topicId}.${exerciseId}`));
-      if (typeof attempt?.correct === "boolean") (progress.practice[topicId] ??= {})[exerciseId] = attempt.correct;
-    }));
-  }
-  const ids = files.filter((file) => file.endsWith(".json")).map((file) => file.slice(0, -5)).filter(isRecordId);
-  for (let offset = 0; offset < ids.length; offset += 16) {
-    const runs = await Promise.all(ids.slice(offset, offset + 16).map((id) => readRecord<ExperimentRun>(recordPath(owner, "runs", id))));
-    for (const run of runs) {
-      if (!run || !getExperimentEngine(run.session.engineId, run.session.engineVersion)) continue;
-      const { engineId } = run.session;
-      const summary = { id: run.id, completedAt: run.completedAt, engineId };
-      progress.byEngine[engineId] = countRun(progress.byEngine[engineId], summary);
-      const topic = getExperimentTopic(run.topicId, engineId)?.topic;
-      if (topic) progress.byTopic[topic.id] = countRun(progress.byTopic[topic.id], summary);
-      progress.recent.push(summary);
+  if (practiceFiles.length) {
+    const { hasPracticeExercise } = await import("@/lib/knowledgePractice");
+    for (let offset = 0; offset < practiceFiles.length; offset += 16) {
+      await Promise.all(practiceFiles.slice(offset, offset + 16).map(async (filename) => {
+        const match = /^([a-z0-9-]+)\.([a-z0-9-]+)\.json$/.exec(filename);
+        if (!match) return;
+        const [, topicId, exerciseId] = match;
+        if (!hasPracticeExercise(topicId, exerciseId)) return;
+        const attempt = await readRecord<{ correct: boolean }>(recordPath(owner, "practice", `${topicId}.${exerciseId}`));
+        if (typeof attempt?.correct === "boolean") (progress.practice[topicId] ??= {})[exerciseId] = attempt.correct;
+      }));
     }
-    progress.recent.sort((a, b) => b.completedAt.localeCompare(a.completedAt) || a.id.localeCompare(b.id));
-    progress.recent.splice(12);
   }
   return progress;
 }

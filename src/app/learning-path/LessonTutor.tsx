@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { TutorReply } from "@/components/experiments/TutorReply";
+import { LazyTutorReply } from "@/components/experiments/LazyTutorReply";
 import { canUseAITransport } from "@/lib/aiSettings";
 import { maxCreatorHistory, maxQuestionLength, type CreatorTurn } from "@/lib/experimentCreator";
 import { fetchWithTemporaryAI, useActiveAI } from "@/lib/temporaryAI";
@@ -85,7 +85,7 @@ export function LessonTutor({ topicId, returnTo, platformConfigured, attempts, h
     {error && <p role="alert">{error}</p>}
     {reply && <div className="lesson-ai-reply" aria-live="polite">
       <p className="lesson-ai-question">{reply.question}</p>
-      <TutorReply answer={reply.answer} codeBlocks={reply.codeBlocks} reveal={false} />
+      <LazyTutorReply answer={reply.answer} codeBlocks={reply.codeBlocks} reveal={false} />
       {reply.sources.map(({ title, href }) => <Link key={href} className="catalog-direct" href={href}>{title}</Link>)}
       {reply.recommendation && <Link className="catalog-direct" href={reply.recommendation.href}>{reply.recommendation.title}</Link>}
     </div>}

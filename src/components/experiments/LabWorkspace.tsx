@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import Link from "next/link";
+import { NavigationLink } from "@/components/NavigationLink";
 import { Header } from "@/components/Header";
 import { CatalogIcon } from "./CatalogEffects";
 import "@/app/home-editorial.css";
@@ -20,9 +20,9 @@ export function LabWorkspace({ children, className, back = { href: "/experiments
     <a className="editorial-skip" href="#lab-content">{skipLabel}</a>
     <Header action={back} />
     <div className="lab-workspace-frame" id="lab-content" tabIndex={-1}>
-      <Link className="lab-workspace-back" href={back.href}>
+      <NavigationLink className="lab-workspace-back" href={back.href}>
         <CatalogIcon icon="lucide:arrow-left" width={15} />{back.label}
-      </Link>
+      </NavigationLink>
       {children}
     </div>
   </main>;

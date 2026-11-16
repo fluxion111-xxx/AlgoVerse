@@ -1,5 +1,5 @@
 import Form from "next/form";
-import Link from "next/link";
+import { NavigationLink } from "@/components/NavigationLink";
 import { getDeepLesson } from "@/content/lessons/index";
 import { CourseCover, StudyChapter } from "@/app/learning-path/StudyChapter";
 import { StudyDirectory } from "@/app/learning-path/StudyDirectory";
@@ -27,12 +27,12 @@ function Lesson({ entry, progress, current, toTopic }: {
   const practice = practiceSummary(progress.practice[topic.id]);
   return <li className="study-topic" data-current={current}>
     <div>
-      <Link href={toTopic(entry)} aria-current={current ? "location" : undefined}>{topic.title}</Link>
+      <NavigationLink href={toTopic(entry)} aria-current={current ? "location" : undefined}>{topic.title}</NavigationLink>
       {getDeepLesson(topic.id) && <span className="study-deep-label">互动课程</span>}
       <p className="study-topic-summary">{topic.summary}</p>
       {topic.prerequisiteIds?.map((id) => {
         const prerequisite = getKnowledgeTopic(id);
-        return prerequisite && <small key={id}>先读 <Link href={toTopic(prerequisite)}>{prerequisite.topic.title}</Link></small>;
+        return prerequisite && <small key={id}>先读 <NavigationLink href={toTopic(prerequisite)}>{prerequisite.topic.title}</NavigationLink></small>;
       })}
     </div>
     <span>{[read && "已读", run && `已跑 ${run.count} 轮`,
@@ -106,7 +106,7 @@ export function KnowledgeMap({ progress, goal, params }: { progress: LearningPro
       {(scope.group || filter !== "all" || query) && <p className="study-scope">
         {scope.chapter?.title ?? scope.course?.title ?? scope.group?.title ?? "全部课程"}
         {" · "}{chapterFilters[filter]}
-        <Link className="catalog-direct" href={curriculumRoute({}, goal)}>清除筛选</Link>
+        <NavigationLink className="catalog-direct" href={curriculumRoute({}, goal)}>清除筛选</NavigationLink>
       </p>}
       </div>
     </header>
@@ -114,41 +114,41 @@ export function KnowledgeMap({ progress, goal, params }: { progress: LearningPro
       <p className="study-results-count">找到 {lessons.length} 个知识点、{chapterMatches.length} 章。</p>
       {!total && <p className="study-empty">没找到。换个词试试。</p>}
       {visibleLessons.length > 0 && <ul className="study-matches">{visibleLessons.map((entry) => <li key={entry.topic.id}>
-        <Link className="catalog-direct" href={toTopic(entry)}>{entry.topic.title}</Link>
+        <NavigationLink className="catalog-direct" href={toTopic(entry)}>{entry.topic.title}</NavigationLink>
         <small>{entry.domain.title} / {entry.course.title} / {entry.chapter.title}</small>
         <p>{entry.topic.summary}</p>
       </li>)}</ul>}
       {visibleChapters.length > 0 && <ul className="study-matches study-chapter-matches">{visibleChapters.map((match) => <li key={match.key}>
-        <Link className="catalog-direct" href={curriculumRoute({ module: match.group.id, course: match.course.id, chapter: match.id }, goal).replace("#knowledge-map", "#study-chapter-title")}>{match.title}</Link>
+        <NavigationLink className="catalog-direct" href={curriculumRoute({ module: match.group.id, course: match.course.id, chapter: match.id }, goal).replace("#knowledge-map", "#study-chapter-title")}>{match.title}</NavigationLink>
         <small>{match.group.title} / {match.course.title} · {chapterFilters[match.status]}{match.hasLab && " · 可运行实验"}</small>
         <p>{match.coverage}</p>
       </li>)}</ul>}
       {pageCount > 1 && <nav className="study-pagination" aria-label="搜索结果分页">
-        {page > 1 && <Link href={route(selected, { q: query, page: page - 1 })}>上一页</Link>}
+        {page > 1 && <NavigationLink href={route(selected, { q: query, page: page - 1 })}>上一页</NavigationLink>}
         <span>{page} / {pageCount}</span>
-        {page < pageCount && <Link href={route(selected, { q: query, page: page + 1 })}>下一页</Link>}
+        {page < pageCount && <NavigationLink href={route(selected, { q: query, page: page + 1 })}>下一页</NavigationLink>}
       </nav>}
     </div> : <div className="study-contents">
       <StudyDirectory chapter={chapter?.title}>
       <nav className="study-domains" aria-label="专业模块">
         <h3>专业领域</h3>
-        {curriculumGroups.map((item, index) => <Link key={item.id} href={route({ module: item.id })}
+        {curriculumGroups.map((item, index) => <NavigationLink key={item.id} href={route({ module: item.id })}
           aria-current={item.id === group.id ? "location" : undefined}>
           <span aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
           {item.title}<CatalogIcon icon="lucide:arrow-up-right" width={15} />
-        </Link>)}
+        </NavigationLink>)}
       </nav>
         <nav className="study-course-list" aria-label="课程">
           <h4>课程目录</h4>
-          {groupCourses.map((item) => <Link key={item.id} href={route({ module: group.id, course: item.id })}
-            aria-current={item === course ? "location" : undefined}>{item.title} <small>{item.chapters.length} 章</small></Link>)}
+          {groupCourses.map((item) => <NavigationLink key={item.id} href={route({ module: group.id, course: item.id })}
+            aria-current={item === course ? "location" : undefined}>{item.title} <small>{item.chapters.length} 章</small></NavigationLink>)}
         </nav>
         {!groupCourses.length && <p className="study-empty">这个模块没有符合条件的章节。</p>}
       {course && chapters.length > 0 && <nav className="study-chapter-list" aria-label="章节">
           <h4>{course.title} · 章节</h4>
           <ol>{chapters.map((item) => <li key={item.key}>
-            <Link href={chapterLink(item).href} data-study-chapter
-              aria-current={item === chapter ? "location" : undefined}>{item.title}</Link>
+            <NavigationLink href={chapterLink(item).href} data-study-chapter
+              aria-current={item === chapter ? "location" : undefined}>{item.title}</NavigationLink>
           </li>)}</ol>
         </nav>}
       </StudyDirectory>
@@ -161,7 +161,7 @@ export function KnowledgeMap({ progress, goal, params }: { progress: LearningPro
           {chapter ? <section className="study-chapter" aria-labelledby="study-topic-list-title">
             <h5 id="study-topic-list-title">本章知识点</h5>
             {linkedChapters.length > 0 && <p className="study-prerequisites">相关基础{linkedChapters.map((item) =>
-              <Link className="catalog-direct" key={item.key} href={curriculumRoute({ module: item.group.id, course: item.course.id, chapter: item.id }, goal)}>{item.title}</Link>)}</p>}
+              <NavigationLink className="catalog-direct" key={item.key} href={curriculumRoute({ module: item.group.id, course: item.course.id, chapter: item.id }, goal)}>{item.title}</NavigationLink>)}</p>}
             {chapter.lessons.length ? <ul className="study-topic-list">{chapter.lessons.map((entry) =>
               <Lesson key={entry.topic.id} entry={entry} progress={progress} current={activeTopic === entry} toTopic={toTopic} />)}</ul>
               : <p className="study-empty">本章正文待编写。</p>}

@@ -1,5 +1,6 @@
 import Image from "next/image";
-import Link from "next/link";
+import { NavigationLink } from "@/components/NavigationLink";
+import { Suspense } from "react";
 import { Header } from "@/components/Header";
 import { CatalogIcon } from "@/components/experiments/CatalogEffects";
 import { EditorialStory } from "@/components/experiments/EditorialStory";
@@ -18,9 +19,15 @@ const workflowImages = {
   diagnosis: { photo: "/phase-two/storage.webp", position: "center 53%", label: "复盘", description: "从本轮数据找原因。" },
 } satisfies Record<keyof typeof workflowSteps, { photo: string; position: string; label: string; description: string }>;
 
-export default async function Home() {
+async function ResumeExperiment() {
   const [agent, task] = await Promise.all([getActiveAgentTask(), getActiveAIWorkflow()]);
+  if (!agent && !task) return null;
+  return <NavigationLink className="editorial-resume" href={agentWorkbenchLink({ agentId: agent?.id })}>
+    继续上次实验 <CatalogIcon icon="lucide:arrow-up-right" width={16} />
+  </NavigationLink>;
+}
 
+export default function Home() {
   return <div className="editorial-home editorial-dynamic editorial-landing">
     <a className="editorial-skip" href="#main-content">跳到正文</a>
     <Header action={{ href: "#home-ask", label: "发起实验" }} />
@@ -34,8 +41,8 @@ export default async function Home() {
           <h1 id="home-heading"><span><span>把问题</span></span><span><span>跑一遍。</span></span></h1>
           <p className="editorial-hero-deck">带一个问题来。<br />改参数，看结果。</p>
           <div className="editorial-actions">
-            <Link className="editorial-button editorial-button-primary" href="/experiments">开始实验 <CatalogIcon icon="lucide:arrow-up-right" width={18} /></Link>
-            <Link className="editorial-button" href={quickStartRoute}><CatalogIcon icon="lucide:play" width={17} />一分钟上手</Link>
+            <NavigationLink className="editorial-button editorial-button-primary" href="/experiments">开始实验 <CatalogIcon icon="lucide:arrow-up-right" width={18} /></NavigationLink>
+            <NavigationLink className="editorial-button" href={quickStartRoute}><CatalogIcon icon="lucide:play" width={17} />一分钟上手</NavigationLink>
           </div>
           <a className="editorial-scroll" href="#atlas-title">向下探索 <CatalogIcon icon="lucide:arrow-down" width={16} /></a>
         </div>
@@ -50,14 +57,14 @@ export default async function Home() {
             <p className="editorial-kicker">AI 实验创造台</p>
             <h3>带个问题来。</h3>
             <p>先问，再动手。</p>
-            {(agent || task) && <Link className="editorial-resume" href={agentWorkbenchLink({ agentId: agent?.id })}>继续上次实验 <CatalogIcon icon="lucide:arrow-up-right" width={16} /></Link>}
+            <Suspense fallback={null}><ResumeExperiment /></Suspense>
           </div>
           <div className="editorial-studio-form">
             <ExperimentPrompt appearance="editorial" />
             <nav className="editorial-domains" aria-label="六大实验方向">
               <p>从课程开始</p>
               <ul>{courses.map((course) => <li key={course.slug}>
-                <Link href={courseRoute(course)}>{course.title}<CatalogIcon icon="lucide:arrow-up-right" width={15} /></Link>
+                <NavigationLink href={courseRoute(course)}>{course.title}<CatalogIcon icon="lucide:arrow-up-right" width={15} /></NavigationLink>
               </li>)}</ul>
             </nav>
           </div>
