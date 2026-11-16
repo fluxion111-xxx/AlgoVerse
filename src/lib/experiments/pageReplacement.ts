@@ -13,7 +13,7 @@ function configure(value: unknown): PageReplacementConfig | null {
     ? { goalLabel: goal, frameCount, references: [...references] } : null;
 }
 
-function simulate({ frameCount, references }: PageReplacementConfig, policy: Policy) {
+export function simulatePageReplacement({ frameCount, references }: PageReplacementConfig, policy: Policy) {
   const frames = Array<number | null>(frameCount).fill(null);
   const loadedAt = Array<number>(frameCount).fill(-1);
   const lastUsedAt = [...loadedAt];
@@ -59,5 +59,5 @@ export const pageReplacementEngine = defineEngine({
   }),
   configure,
   validate: (value): value is PageReplacementConfig => configure(value) !== null,
-  run: (config: PageReplacementConfig) => ({ kind: "page-replacement" as const, policies: pagePolicies.map((policy) => simulate(config, policy)) }),
+  run: (config: PageReplacementConfig) => ({ kind: "page-replacement" as const, policies: pagePolicies.map((policy) => simulatePageReplacement(config, policy)) }),
 });

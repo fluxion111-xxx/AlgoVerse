@@ -343,8 +343,8 @@ test("a greeting still uses the configured model with instructions for concise r
   assert.deepEqual(done.pending, []);
 });
 
-test("all 30 advertised tools execute their real engine and expose verified metrics", () => {
-  assert.equal(agentTools.length, 30);
+test("all 66 advertised tools execute their real engine and expose verified metrics", () => {
+  assert.equal(agentTools.length, 66);
   for (const engine of registeredEngines) {
     const tool = agentTools.find((entry) => entry.tool === engine.id);
     const config = engine.preset(1234);
@@ -406,7 +406,7 @@ test("manual reports compare saved rounds in scope and expand a cached diagnosis
 test("FCFS and RR run only after approval, then adaptive RR uses real observations and saves an evidence report", async (t) => {
   const { post, values } = await setup(t, "192.0.2.10", ({ message, runs, tools }) => {
     if (message) return { action: "plan", focus: { topic: "FCFS 和 RR 调度", goal: "比较等待时间并优化时间片" } };
-    assert.equal(tools.length, 30);
+    assert.equal(tools.length, 66);
     if (!runs.length) return { ...first, autoContinue: true };
     if (runs.length === 2) {
       assert.deepEqual(runs.map(({ metrics }) => metrics.waiting), ["4.33", "6.00"]);

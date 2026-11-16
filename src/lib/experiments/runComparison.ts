@@ -114,13 +114,21 @@ function changedParameters(before: ComparisonRun, after: ComparisonRun) {
 
 function otherChanges(before: ComparisonRun, after: ComparisonRun) {
   const parameters = changedParameters(before, after);
-  const metrics = Object.entries(after.metrics).flatMap(([key, value]) => {
+  const comparable = Object.entries(after.metrics).filter(([key]) => before.metrics[key] !== undefined);
+  const metrics = comparable.flatMap(([key, value]) => {
     const previous = before.metrics[key];
-    return previous !== undefined && previous !== value ? [{ key, label: evidenceLabels[key] ?? key, previous, value,
+    return previous !== value ? [{ key, label: evidenceLabels[key] ?? key, previous, value,
       deltas: metricDeltas(key, previous, value) }] : [];
   });
+  const focus = getCurriculumLab(after.tool)?.curriculum.focusMetric;
+  const stableFocus = focus && before.metrics[focus] !== undefined && before.metrics[focus] === after.metrics[focus];
+  const inputNote = parameters.length === 1 ? `只改了${parameters[0].label}。` :
+    parameters.length ? `改了 ${parameters.length} 项参数。` : "两轮使用相同输入。";
+  const stableCount = comparable.length - metrics.length;
   return {
-    detail: `${parameters.length ? `改了 ${parameters.length} 项参数。` : "两轮使用相同输入。"}${metrics.length ? `有 ${metrics.length} 项指标变化。` : "共同记录的指标相同。"}` +
+    detail: inputNote + (metrics.length ? `有 ${metrics.length} 项指标变化。` : "共同记录的指标相同。") +
+      (focus && metrics.length && stableCount ? `另有 ${stableCount} 项相同。` : "") +
+      (stableFocus && metrics.length ? `${evidenceLabels[focus]}仍为 ${after.metrics[focus]}。` : "") +
       (parameters.length > 1 ? "各项影响要分开复测。" : after.tool === "pathfinding" && metrics.some(({ key }) => key === "elapsedMs") ? "单次耗时会有波动。" : ""),
     parameters,
     metrics,

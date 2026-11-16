@@ -237,7 +237,8 @@ test("catalog search distinguishes outlines, teaching and registered labs", () =
   assert.equal(searchCurriculum("Transformer", {}, "readable")[0].id, "transformer");
   assert.deepEqual(searchCurriculum("Transformer", {}, "outline"), []);
   assert.equal(searchCurriculum("B+ 树", {}, "lab")[0].id, "index-structures");
-  assert.deepEqual(searchCurriculum("C++", {}, "lab"), []);
+  assert.equal(searchCurriculum("C++", {}, "lab")[0].id, "classes-and-raii");
+  assert.deepEqual(searchCurriculum("Transformer", {}, "lab"), []);
   assert.equal(searchCurriculum("切块", { module: "ai", course: "large-language-models", chapter: "rag" })[0].id, "rag");
   assert.ok(searchKnowledge("Transformer").some(({ topic }) => topic.id === "causal-attention-mask"));
   const { teaching, ...topic } = getKnowledgeTopic("segment-tree").topic;
@@ -511,8 +512,19 @@ test("learning advice uses the target and exact topic activity without inferring
   assert.equal(learningSuggestion(read, "networks")?.entry.topic.id, "packet-routing");
   assert.equal(learningSuggestion({ ...read, byTopic: practiced.byTopic }, "networks")?.entry.topic.id, "per-hop-delivery-probability");
   const practicedOriginalLabs = { ...practiced.byTopic, "per-hop-delivery-probability": { count: 1 } };
-  assert.equal(learningSuggestion({ ...read, byTopic: practicedOriginalLabs }, "networks")?.entry.topic.id, "cidr-prefix-match");
-  const practicedSubnetLabs = { ...practicedOriginalLabs, "cidr-prefix-match": { count: 1 },
+  assert.equal(learningSuggestion({ ...read, byTopic: practicedOriginalLabs }, "networks")?.entry.topic.id, "ipv4-df-fragment-needed");
+  const practicedFragmentLab = { ...practicedOriginalLabs, "ipv4-df-fragment-needed": { count: 1 } };
+  assert.equal(learningSuggestion({ ...read, byTopic: practicedFragmentLab }, "networks")?.entry.topic.id, "tcp-sequence-ack");
+  const practicedWindowLabs = { ...practicedFragmentLab, "tcp-sequence-ack": { count: 1 },
+    "tcp-receive-window": { count: 1 }, "ethernet-crc-detection": { count: 1 } };
+  assert.equal(learningSuggestion({ ...read, byTopic: practicedWindowLabs }, "networks")?.entry.topic.id, "tcp-rto-backoff");
+  const practicedRetryLab = { ...practicedWindowLabs, "tcp-rto-backoff": { count: 1 } };
+  assert.equal(learningSuggestion({ ...read, byTopic: practicedRetryLab }, "networks")?.entry.topic.id, "arp-next-hop-resolution");
+  const practicedArpLab = { ...practicedRetryLab, "arp-next-hop-resolution": { count: 1 } };
+  assert.equal(learningSuggestion({ ...read, byTopic: practicedArpLab }, "networks")?.entry.topic.id, "dns-negative-cache");
+  const practicedDnsLab = { ...practicedArpLab, "dns-negative-cache": { count: 1 } };
+  assert.equal(learningSuggestion({ ...read, byTopic: practicedDnsLab }, "networks")?.entry.topic.id, "cidr-prefix-match");
+  const practicedSubnetLabs = { ...practicedDnsLab, "cidr-prefix-match": { count: 1 },
     "ipv4-subnet-network-host": { count: 1 }, "cidr-aggregate-alignment": { count: 1 } };
   assert.equal(learningSuggestion({ ...read, byTopic: practicedSubnetLabs }, "networks")?.entry.topic.id, "link-state-routing");
   const beforeCaptureLab = { ...practicedSubnetLabs, "link-state-routing": { count: 1 } };

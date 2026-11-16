@@ -17,6 +17,89 @@ const { getCourse } = await import("../src/lib/courses.ts");
 const { getExperimentTopic, knowledgeTopicRoute } = await import("../src/lib/knowledge.ts");
 const { experimentEvidence, evidenceLabels } = await import("../src/lib/experiments/evidence.ts");
 
+test("Bellman–Ford traces a reachable negative self-loop without marking an unrelated target", () => {
+  const engine = getExperimentEngine("bellman-ford");
+  const config = { ...engine.preset(), bellmanNodes: 6, bellmanTarget: 3,
+    bellmanEdges: [[0, 1, 1], [1, 1, -1], [1, 2, 1], [0, 2, -10], [0, 3, 5], [4, 5, -3], [5, 4, 1]] };
+  const { metrics, steps } = engine.execute(config);
+  assert.equal(metrics.bellmanAffected, "2");
+  assert.equal(metrics.bellmanDistance, "5");
+  assert.equal(metrics.bellmanUnreachable, "2");
+  assert.ok(steps.some((row) => row[0] === "沿边传播" && row[1] === "1→2"));
+  assert.equal(engine.execute({ ...config, bellmanTarget: 2 }).metrics.bellmanDistance, "无有限下界");
+  assert.equal(engine.execute({ ...config, bellmanTarget: 4 }).metrics.bellmanDistance, "不可达");
+});
+
+test("TCP timeout handles an ACK on the deadline and runs both retry timelines to completion", () => {
+  const engine = getExperimentEngine("tcp-timeout");
+  const config = engine.preset();
+  const atDeadline = engine.execute({ ...config, rtoAckAt: 2, rtoRetryLimit: 0 });
+  assert.equal(atDeadline.metrics.fixedAck, "收到确认");
+  assert.deepEqual(atDeadline.steps.at(-1), [2, "收到 ACK，停表", "收到 ACK，停表"]);
+  const noAck = engine.execute({ ...config, rtoAckAt: -1, rtoRetryLimit: 2 });
+  assert.equal(noAck.metrics.fixedStopTick, "6");
+  assert.equal(noAck.metrics.backoffStopTick, "14");
+  assert.deepEqual(noAck.steps.at(-1), [14, "—", "超时 · 重试用尽"]);
+});
+
+test("DNS negative cache expires at the smaller SOA value and publication is visible after expiry", () => {
+  const engine = getExperimentEngine("dns-negative-cache");
+  const config = { ...engine.preset(), dnsSoaTtl: 2, dnsSoaMinimum: 4, dnsPublishAt: 1, dnsQueryTicks: [0, 0, 1, 2, 2] };
+  const { metrics, steps } = engine.execute(config);
+  assert.equal(metrics.dnsCachedFirstVisible, "2");
+  assert.equal(metrics.dnsStaleNegative, "1");
+  assert.match(steps[2][2], /缓存.*第 2 拍到期/);
+  assert.match(steps[3][2], /上游.*查到记录/);
+  assert.match(steps[4][2], /缓存.*查到记录/);
+  assert.equal(engine.execute({ ...config, dnsQueryTicks: [1, 0] }), null);
+});
+
+test("stratification holds out every row once and reports scarce labels", () => {
+  const engine = getExperimentEngine("stratified-validation");
+  const config = { ...engine.preset(), validationFolds: 3, validationSamples: [[6, 0], [0, 0], [2, 1], [1, 0], [3, 0]] };
+  const { steps, metrics, report } = engine.execute(config);
+  assert.equal(metrics.stratifiedMissingFolds, "2");
+  assert.match(report.explanation, /少数类样本不够每折一份/);
+  for (const method of ["顺序分块", "按标签分层"]) {
+    const heldOut = steps.filter((row) => row[0] === method).flatMap((row) => row[2].split("、").map(Number));
+    assert.deepEqual(heldOut.sort((left, right) => left - right), [1, 2, 3, 4, 5]);
+  }
+});
+
+test("IPv4 fragments conserve payload and honor MTU, DF and empty payloads", () => {
+  const engine = getExperimentEngine("ipv4-fragmentation");
+  const preset = engine.preset();
+  const maximum = engine.execute({ ...preset, fragmentPayload: 65_515, fragmentMtu: 68 });
+  assert.ok(maximum.steps.every(([, , data, size, , more]) => size <= 68 && (!more || data % 8 === 0)));
+  assert.equal(maximum.steps.reduce((sum, row) => sum + row[2], 0), 65_515);
+  assert.deepEqual(maximum.steps.at(-1), [1365, "65472–65514", 43, 63, 8184, 0]);
+  const exact = engine.execute({ ...preset, fragmentMtu: 1_500, fragmentDf: 1 });
+  assert.deepEqual(exact.steps, [[1, "0–1479", 1480, 1500, 0, 0]]);
+  const empty = engine.execute({ ...preset, fragmentPayload: 0 });
+  assert.deepEqual(empty.steps, [[1, "空", 0, 20, 0, 0]]);
+});
+
+test("removing the unreachable cycle lets both collectors reclaim its downstream object", () => {
+  const engine = getExperimentEngine("gc-cycles");
+  const result = engine.execute({ ...engine.preset(), gcLinks: [[0, 1], [1, 2], [3, 4]] });
+  assert.deepEqual(result.metrics, { rcCollected: "3", markCollected: "3", unreachableRetained: "0", reachableCount: "2" });
+  assert.deepEqual(result.steps.filter((step) => step[1] === "计数为零，回收").map((step) => step[2]), [0, 1, 2]);
+});
+
+test("linear regression and PCA report degenerate samples without inventing a unique direction", () => {
+  const regression = getExperimentEngine("linear-regression");
+  const line = regression.execute({ ...regression.preset(), regressionPoints: [[1, 10], [1, 20]] });
+  assert.match(line.report.explanation, /斜率不唯一/);
+  assert.deepEqual(line.metrics, { regSlope: "0", regIntercept: "15", regMse: "25", regBaselineMse: "25", regPrediction: "15" });
+  const pca = getExperimentEngine("pca-projection");
+  const point = pca.execute({ ...pca.preset(), pcaSamples: [[1, 2], [1, 2]] });
+  assert.deepEqual(point.metrics, { manualVariance: "0", principalVariance: "0", principalAngle: "任意方向",
+    principalRetained: "无定义", manualRetained: "无定义" });
+  const circle = pca.execute({ ...pca.preset(), pcaSamples: [[1, 0], [-1, 0], [0, 1], [0, -1]], pcaAngle: 37 });
+  assert.equal(circle.metrics.manualRetained, "50.0%");
+  assert.equal(circle.metrics.principalRetained, "50.0%");
+});
+
 test("page replacement reproduces Belady's anomaly and records hits and evictions", () => {
   const engine = getExperimentEngine("page-replacement");
   const preset = engine.preset(0);
@@ -161,8 +244,8 @@ test("expanded engines resolve through their catalog, knowledge links and diagno
     "deadlock-avoidance": "banker-safe-sequence", "tcp-congestion": "tcp-cwnd-rwnd",
     "dynamic-routing": "link-state-routing", "memory-allocation": "heap-fit-fragmentation", "transaction-concurrency": "mvcc-row-versions",
   };
-  assert.equal(new Set(registeredEngines.map(({ id }) => id)).size, 30);
-  assert.equal(new Set(registeredEngines.map(({ route }) => route)).size, 30);
+  assert.equal(new Set(registeredEngines.map(({ id }) => id)).size, 66);
+  assert.equal(new Set(registeredEngines.map(({ route }) => route)).size, 66);
   for (const [id, topic] of Object.entries(topics)) {
     const engine = getExperimentEngine(id, 1);
     assert.ok(getCourse(engine.domain).experiments.some(({ href }) => href === engine.route));
@@ -198,6 +281,33 @@ test("new simulations preserve IPv4 boundaries, empty outcomes, and seeded repla
   const first = bandit.execute(initial);
   assert.deepEqual(bandit.execute(initial), first);
   assert.deepEqual(bandit.execute({ ...initial, banditTurns: 40 }).steps.slice(0, initial.banditTurns), first.steps);
+});
+
+test("curriculum edge cases preserve cycle, CRC, index, and constant-feature behavior", () => {
+  const topo = getExperimentEngine("topological-sort");
+  assert.equal(topo.execute({ ...topo.preset(), taskNodes: 1, taskDependencies: [[0, 0]] }).metrics.topoCycle, "有环");
+  assert.equal(topo.execute({ ...topo.preset(), taskDependencies: [[0, 1], [0, 1]] }), null);
+
+  const crc = getExperimentEngine("crc-detection");
+  const frame = crc.preset();
+  assert.equal(crc.execute({ ...frame, crcFlips: [13, 15, 16] }).metrics.crcOutcome, "未检出翻转");
+  assert.equal(crc.execute({ ...frame, crcFlips: [17] }), null);
+
+  const index = getExperimentEngine("composite-index");
+  const data = index.preset();
+  for (const lead of [0, 1, 2, 3, 4]) {
+    for (const bound of [10, 22, 25, 30]) {
+      const report = index.execute({ ...data, indexLeading: lead, indexLower: bound, indexUpper: bound });
+      assert.equal(report.metrics.compositeRange, report.metrics.compositeMatches);
+    }
+  }
+
+  const split = getExperimentEngine("tree-split");
+  assert.equal(split.execute({ ...split.preset(), giniCutA: -1, giniCutB: 99 }).metrics.giniWinner, "均无有效切分");
+  const scaling = getExperimentEngine("knn-scaling");
+  const constant = scaling.execute({ ...scaling.preset(), scaleSamples: [[1, 4, 0], [1, 4, 1]] });
+  assert.equal(constant.metrics.scaledClass, "A");
+  assert.match(constant.report.explanation, /跨度为零的维度忽略/);
 });
 
 test("link-state recalculation selects a detour and detects a partition", () => {
