@@ -1,17 +1,17 @@
 import type { Metadata } from "next";
-import Form from "next/form";
 import Image from "next/image";
 import Link from "next/link";
 import { Header } from "@/components/Header";
 import { CatalogIcon } from "@/components/experiments/CatalogEffects";
 import { KnowledgeMap } from "@/components/KnowledgeMap";
 import { StudyAdvice } from "@/components/StudyAdvice";
+import { StudyGoal } from "@/components/StudyGoal";
+import { StudyRecommendation } from "@/components/StudyRecommendation";
 import { StudySectionNav } from "@/components/StudySectionNav";
-import { getDeepLesson } from "@/content/lessons/index";
-import { curriculumGroups, learningTopicRoute } from "@/lib/curriculum";
+import { curriculumGroups } from "@/lib/curriculum";
 import { getExperimentEngine } from "@/lib/experimentEngines";
-import { knowledgeEntries, knowledgeTopicRoute } from "@/lib/knowledge";
-import { learningSuggestion, topicTouched } from "@/lib/learningPath";
+import { knowledgeEntries } from "@/lib/knowledge";
+import { learningSuggestion, suggestionStep, topicTouched } from "@/lib/learningPath";
 import { practiceSummary } from "@/lib/knowledgePractice";
 import { getLearningProgress } from "@/lib/server/experimentRecords";
 import "../home-editorial.css";
@@ -20,7 +20,7 @@ import "./study-editorial.css";
 
 export const metadata: Metadata = { title: "学习路径｜AlgoVerse" };
 
-type StudyParams = { [key in "goal" | "module" | "course" | "chapter" | "q" | "status" | "page" | "topic"]?: string | string[] };
+type StudyParams = { [key in "goal" | "module" | "course" | "chapter" | "q" | "status" | "page" | "topic" | "suggestion"]?: string | string[] };
 
 export default async function LearningPathPage({ searchParams }: { searchParams: Promise<StudyParams> }) {
   const params = await searchParams;
@@ -29,7 +29,8 @@ export default async function LearningPathPage({ searchParams }: { searchParams:
   const progress = await getLearningProgress();
   const count = Object.values(progress.byEngine).reduce((total, entry) => total + entry.count, 0);
   const touched = knowledgeEntries.filter(({ topic }) => topicTouched(topic.id, progress)).length;
-  const suggestion = learningSuggestion(progress, target?.id);
+  const step = suggestionStep(params.suggestion);
+  const suggestion = learningSuggestion(progress, target?.id, step);
   const practice = Object.values(progress.practice).reduce((total, attempts) => total + practiceSummary(attempts).answered, 0);
 
   return <div className="editorial-home editorial-study">
@@ -62,20 +63,11 @@ export default async function LearningPathPage({ searchParams }: { searchParams:
         <div className="study-next">
           <p className="editorial-kicker" lang="en">NEXT LESSON</p>
           <h2 id="study-guide-title">下一步</h2>
-          <Form className="study-goal" action="/learning-path#study-guide">
-            <label htmlFor="learning-goal">学习目标</label>
-            <select id="learning-goal" name="goal" defaultValue={target?.id ?? ""}>
-              <option value="">全部方向</option>
-              {curriculumGroups.map(({ id, title }) => <option key={id} value={id}>{title}</option>)}
-            </select>
-            <button className="editorial-button editorial-button-primary" type="submit">更新建议</button>
-          </Form>
-          {suggestion ? <>
-            <p>{suggestion.reason}</p>
-            <Link className="study-guide-link" href={getDeepLesson(suggestion.entry.topic.id)
-              ? learningTopicRoute(suggestion.entry, target?.id)
-              : knowledgeTopicRoute(suggestion.entry)}>{suggestion.entry.topic.title}<CatalogIcon icon="lucide:arrow-up-right" width={16} /></Link>
-          </> : <p>这个方向的内容都学过了。</p>}
+          <StudyGoal key={target?.id ?? "all"} goal={target?.id} step={step}
+            options={curriculumGroups.map(({ id, title }) => ({ id, title }))} />
+          {suggestion ? <StudyRecommendation advice={{ ...suggestion,
+            topic: { title: suggestion.entry.topic.title, href: suggestion.href } }} />
+            : <p>这个方向可以回顾了。</p>}
         </div>
         <StudyAdvice key={target?.id ?? "all"} goal={target?.id} />
       </section>

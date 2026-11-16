@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 
 const scope = Symbol.for("algoverse.test.agentCookies");
-const hooks = registerHooks({
+registerHooks({
   resolve(specifier, context, next) {
     if (specifier === "server-only") return { shortCircuit: true, url: "data:text/javascript,export {}" };
     if (specifier === "next/headers") return { shortCircuit: true,
@@ -21,13 +21,14 @@ const hooks = registerHooks({
 });
 const { POST } = await import("../src/app/api/experiments/agent/route.ts");
 const { POST: tutorPOST } = await import("../src/app/api/ai/tutor/route.ts");
+const { POST: learningPOST } = await import("../src/app/api/ai/learning/route.ts");
 const { agentTools, prepareToolCall } = await import("../src/lib/server/agentTools.ts");
-const { createAIExperimentSession, getActiveAgentTask, getExperimentRun, getExperimentSession, runConfirmedAgentCall, getAgentTask, getTutorHistory, saveDiagnosis } = await import("../src/lib/server/experimentRecords.ts");
+const { createAIExperimentSession, getActiveAgentTask, getExperimentRun, getExperimentSession, runConfirmedAgentCall, getAgentTask, getTutorHistory, saveDiagnosis,
+  getLearningProgress, submitKnowledgeExercise } = await import("../src/lib/server/experimentRecords.ts");
+const { learningSuggestion } = await import("../src/lib/learningPath.ts");
 const { getExperimentEngine, registeredEngines } = await import("../src/lib/experimentEngines.ts");
 const { experimentEvidence } = await import("../src/lib/experiments/evidence.ts");
 const { schedulingWaitReport } = await import("../src/lib/experimentAgent.ts");
-hooks.deregister();
-
 const model = "Qwen/Qwen3.5-4B";
 const key = "sk-agent-fixture-secret-key";
 const tool = "cpu-scheduling";
@@ -67,7 +68,8 @@ async function setup(t, ip, respond) {
     const upstream = JSON.parse(init.body);
     assert.equal(upstream.model, url.includes("deepseek") ? "deepseek-flash" : model);
     const input = JSON.parse(upstream.messages[1].content);
-    const expectedTokens = Object.hasOwn(input, "question") ? 1100 : Object.hasOwn(input, "message") || input.stage === "plan" ? 1200 : 1000;
+    const expectedTokens = Object.hasOwn(input, "angle") ? 600
+      : Object.hasOwn(input, "question") ? 1100 : Object.hasOwn(input, "message") || input.stage === "plan" ? 1200 : 1000;
     assert.equal(upstream.max_tokens, expectedTokens);
     if (Object.hasOwn(input, "message")) {
       assert.deepEqual(upstream.messages.slice(2), [
@@ -111,6 +113,41 @@ function modelReply(content, finishReason = "stop") {
 
 const sortingPlan = { action: "run", plan: ["比较两种排序"], observation: "用同一组数比较。",
   calls: [{ tool: "sorting", parameters: { goalLabel: "比较排序", values: [5, 2, 9, 1] } }] };
+
+test("learning advice uses the saved wrong choice and varies even when the model repeats", async (t) => {
+  const ip = "192.0.2.43";
+  const angles = [];
+  await setup(t, ip, (input) => {
+    angles.push(input.angle);
+    assert.deepEqual(input.mistake.selected, ["让 C 随 n 增长"]);
+    assert.match(input.mistake.explanation, /常数固定/);
+    return { reason: "要固定常数。", practice: "写出两条界。", check: "核对同一尾段。" };
+  });
+  const topic = "asymptotic-bounds";
+  assert.equal((await submitKnowledgeExercise(topic, "deep-theta", ["2"])).correct, false);
+  const progress = await getLearningProgress();
+  const cards = [0, 1, 2].map((step) => learningSuggestion(progress, "algorithms", step));
+  assert.equal(new Set(cards.map(({ angle }) => angle)).size, 3);
+  assert.deepEqual(cards[0].mistake.selected, ["让 C 随 n 增长"]);
+  assert.match(cards[2].href, /#lesson-exercise-deep-theta$/);
+  const generate = async (step, previous = []) => {
+    const response = await learningPOST(new Request("https://algoverse.test/api/ai/learning", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-AI-Provider": "siliconflow", "CF-Connecting-IP": ip },
+      body: JSON.stringify({ goal: "algorithms", includeProgress: true, step, previous }),
+    }));
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  const first = await generate(0);
+  const next = await generate(1, [first.key]);
+  assert.deepEqual(angles, cards.slice(0, 2).map(({ angle }) => angle));
+  assert.equal(next.basedOnRecords, true);
+  assert.notEqual(first.practice, next.practice);
+  assert.deepEqual(next.mistake.selected, ["让 C 随 n 增长"]);
+
+  assert.equal((await submitKnowledgeExercise(topic, "deep-theta", ["0", "1"])).correct, true);
+  assert.equal(learningSuggestion(await getLearningProgress(), "algorithms", 0)?.mistake, undefined);
+});
 
 test("tutor history lists saved conversations for the current visitor", async (t) => {
   const { ask, post, values } = await setup(t, "192.0.2.40", () => ({ answer: "可以继续聊。" }));

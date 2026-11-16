@@ -499,6 +499,8 @@ test("measurement practice is indexed and distinguishes local exercises from pla
 test("learning advice uses the target and exact topic activity without inferring mastery", () => {
   const empty = { readTopics: new Set(), byTopic: {} };
   assert.equal(learningSuggestion(empty, "networks")?.entry.topic.id, "network-encapsulation");
+  assert.notEqual(learningSuggestion(empty, "networks", 1)?.entry.topic.id, "network-encapsulation");
+  assert.notEqual(learningSuggestion(empty, "networks", 1)?.practice, learningSuggestion(empty, "networks")?.practice);
   assert.equal(learningSuggestion({ ...empty, readTopics: new Set(["network-encapsulation"]) }, "networks")?.entry.topic.id, "packet-routing");
   const practiced = { ...empty, byTopic: { "packet-routing": { count: 1 } } };
   assert.equal(topicTouched("tcp-udp", practiced), false);

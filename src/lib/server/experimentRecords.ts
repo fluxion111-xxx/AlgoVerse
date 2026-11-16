@@ -7,7 +7,7 @@ import { createPathfindingConfig, getExperimentEngine, pathfindingEngine, type E
 import type { CreatorPlanIntent } from "@/lib/experimentCreator";
 import type { AgentTask, TutorContext, TutorConversationSummary } from "@/lib/experimentAgent";
 import { experimentEvidence } from "@/lib/experiments/evidence";
-import type { PracticeAttempts } from "@/lib/knowledgePractice";
+import type { PracticeAttempts, PracticeDetail, PracticeDetails } from "@/lib/knowledgePractice";
 import { quickStartQuestion, type Diagnosis, type QuickStartPlan } from "@/lib/quickStart";
 
 const visitorCookie = "algoverse_visitor";
@@ -204,6 +204,7 @@ export type LearningProgress = {
   byTopic: Partial<Record<string, Completion>>;
   readTopics: ReadonlySet<string>;
   practice: PracticeAttempts;
+  practiceDetails: PracticeDetails;
   recent: RunSummary[];
 };
 
@@ -233,7 +234,7 @@ export async function setReadTopic(id: string, read: boolean) {
 }
 
 export async function submitKnowledgeExercise(topicId: string, exerciseId: string, selection: unknown) {
-  const { gradeKnowledgeExercise } = await import("@/lib/knowledgePractice");
+  const { gradeKnowledgeExercise, practiceSelection } = await import("@/lib/knowledgePractice");
   const result = gradeKnowledgeExercise(topicId, exerciseId, selection);
   if (!result) return null;
   const owner = await ensureVisitor();
@@ -241,7 +242,10 @@ export async function submitKnowledgeExercise(topicId: string, exerciseId: strin
   const temporary = `${file}.${randomUUID()}.tmp`;
   await mkdir(dirname(file), { recursive: true });
   try {
-    await writeFile(temporary, JSON.stringify({ correct: result.correct }), { flag: "wx", mode: 0o600 });
+    await writeFile(temporary, JSON.stringify({
+      correct: result.correct, attemptedAt: new Date().toISOString(),
+      ...(!result.correct && { selectedOptions: practiceSelection(topicId, exerciseId, selection) }),
+    }), { flag: "wx", mode: 0o600 });
     await rename(temporary, file);
   } finally {
     await rm(temporary, { force: true });
@@ -290,7 +294,7 @@ export async function getRecentExperimentRuns() {
 
 export async function getLearningProgress(): Promise<LearningProgress> {
   const owner = await visitor();
-  const progress: LearningProgress = { byEngine: {}, byTopic: {}, readTopics: new Set(), practice: {}, recent: [] };
+  const progress: LearningProgress = { byEngine: {}, byTopic: {}, readTopics: new Set(), practice: {}, practiceDetails: {}, recent: [] };
   if (!owner) return progress;
   const { getExperimentTopic, getKnowledgeTopic } = await import("@/lib/knowledge");
   const [recent, readings, practiceFiles] = await Promise.all([
@@ -314,8 +318,14 @@ export async function getLearningProgress(): Promise<LearningProgress> {
         if (!match) return;
         const [, topicId, exerciseId] = match;
         if (!hasPracticeExercise(topicId, exerciseId)) return;
-        const attempt = await readRecord<{ correct: boolean }>(recordPath(owner, "practice", `${topicId}.${exerciseId}`));
-        if (typeof attempt?.correct === "boolean") (progress.practice[topicId] ??= {})[exerciseId] = attempt.correct;
+        const attempt = await readRecord<PracticeDetail & { correct: boolean }>(recordPath(owner, "practice", `${topicId}.${exerciseId}`));
+        if (typeof attempt?.correct !== "boolean") return;
+        (progress.practice[topicId] ??= {})[exerciseId] = attempt.correct;
+        if (!attempt.correct && (attempt.attemptedAt || attempt.selectedOptions)) {
+          (progress.practiceDetails[topicId] ??= {})[exerciseId] = {
+            attemptedAt: attempt.attemptedAt, selectedOptions: attempt.selectedOptions,
+          };
+        }
       }));
     }
   }

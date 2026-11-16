@@ -1,10 +1,26 @@
+import { createHash } from "node:crypto";
 import { curriculumGroups } from "@/lib/curriculum";
-import { registeredEngines } from "@/lib/experimentEngines";
-import { getKnowledgeTopic, knowledgeEntries, knowledgeTopicRoute } from "@/lib/knowledge";
-import { learningSuggestion } from "@/lib/learningPath";
+import { learningSuggestion, suggestionStep } from "@/lib/learningPath";
 import { practiceSummary } from "@/lib/knowledgePractice";
 import { aiErrorResponse, aiJson, asObject, readAICredentials, requestAIJson } from "@/lib/server/aiProvider";
 import { getLearningProgress } from "@/lib/server/experimentRecords";
+
+type Advice = { reason: string; practice: string; check: string };
+
+function adviceKey({ reason, practice, check }: Advice) {
+  const fields = [reason, practice, check].map((field) => field.normalize("NFKC").toLowerCase().replace(/[\p{P}\s]+/gu, ""));
+  return createHash("sha256").update(JSON.stringify(fields)).digest("hex").slice(0, 24);
+}
+
+function validateAdvice(value: unknown): Advice | null {
+  const answer = asObject(value);
+  if (!answer || Object.keys(answer).length !== 3) return null;
+  const { reason, practice, check } = answer;
+  if (typeof reason !== "string" || !reason.trim() || reason.length > 220
+    || typeof practice !== "string" || !practice.trim() || practice.length > 150
+    || typeof check !== "string" || !check.trim() || check.length > 150) return null;
+  return { reason: reason.trim(), practice: practice.trim(), check: check.trim() };
+}
 
 export async function POST(request: Request) {
   try {
@@ -14,43 +30,41 @@ export async function POST(request: Request) {
     if (body?.includeProgress !== true || (body.goal !== undefined && !goal)) {
       return aiJson({ status: "error", message: "请确认学习目标和记录授权。" }, 400);
     }
-
+    const previous = Array.isArray(body.previous) ? body.previous.slice(-6).filter((key): key is string =>
+      typeof key === "string" && /^[a-f0-9]{24}$/.test(key)) : [];
     const progress = await getLearningProgress();
-    const suggested = learningSuggestion(progress, goal?.id)?.entry;
-    const inScope = knowledgeEntries.filter(({ domain }) => !goal || domain.id === goal.id);
-    const reviewed = inScope.filter(({ topic }) => {
-      const { answered, correct } = practiceSummary(progress.practice[topic.id]);
-      return answered > correct;
-    });
-    const entries = [...new Set([...(suggested ? [suggested] : []), ...reviewed, ...inScope])].slice(0, 20);
-    const input = {
-      goal: goal?.title ?? "全部方向",
-      topics: entries.map(({ domain, topic }) => ({
-        id: topic.id, title: topic.title, domain: domain.title, summary: topic.summary,
-        read: progress.readTopics.has(topic.id), runs: progress.byTopic[topic.id]?.count ?? 0,
-        practice: practiceSummary(progress.practice[topic.id]),
-        prerequisites: (topic.prerequisiteIds ?? []).map((id) => ({
-          title: getKnowledgeTopic(id)?.topic.title, read: progress.readTopics.has(id), runs: progress.byTopic[id]?.count ?? 0,
-          practice: practiceSummary(progress.practice[id]),
-        })),
-      })),
-      experiments: registeredEngines.filter((engine) => !goal || engine.domain === goal.id)
-        .map(({ id, creator }) => ({ title: creator.title, runs: progress.byEngine[id]?.count ?? 0 })),
-    };
+    const suggestion = learningSuggestion(progress, goal?.id, suggestionStep(body.step));
+    if (!suggestion) return aiJson({ status: "complete", message: "可以换个方向复习。" });
+
+    const { entry, angle, mistake, reason, practice, check, href } = suggestion;
+    const { topic } = entry;
     const { result } = await requestAIJson(credentials, {
       operation: "learning_advice",
-      instructions: '你是计算机学习教练。按学习目标、先修关系、已读状态、实际答题和实验轮数给一条建议。答题统计按每题最近一次计算。answered 大于 correct 时优先复习或补先修。零记录时按目标和先修建议。学习活动不能证明掌握。只输出 JSON {"topicId":"topics 中的一个 id","advice":"说明理由和下一步操作"}。',
-      input,
-      maxTokens: 650,
-      validate(value) {
-        const answer = asObject(value);
-        const entry = entries.find(({ topic }) => topic.id === answer?.topicId);
-        if (!entry || typeof answer?.advice !== "string" || !answer.advice.trim() || answer.advice.length > 500
-          || Object.keys(answer).length !== 2) return null;
-        return { advice: answer.advice.trim(), topic: { title: entry.topic.title, href: knowledgeTopicRoute(entry) } };
+      retryFormat: true,
+      instructions: [
+        "你是计算机学习教练。按 angle 给一条具体建议，聚焦给定的错题或知识点。",
+        "有 mistake 时，从题目、已记录的选项和解析判断卡点。没有保存选项时，只说可能卡在哪，不能猜测选了什么。",
+        "用 reason 说明判断依据。用 practice 给一个可以立刻做的小验证，最好有两组对照。用 check 写出能自己检查的标准。",
+        "没有错题时，从知识点出一道入门自查。已读、做过或答对一次都不能证明掌握。禁止编造答题或实验结果。",
+        '只输出 JSON {"reason":"为什么","practice":"做什么","check":"如何核对"}。每句尽量不超过 15 字。',
+      ].join("\n"),
+      input: {
+        goal: goal?.title ?? "全部方向", angle, mistake,
+        topic: { title: topic.title, summary: topic.summary, read: progress.readTopics.has(topic.id),
+          runs: progress.byTopic[topic.id]?.count ?? 0, practice: practiceSummary(progress.practice[topic.id]) },
+        example: practice,
       },
+      maxTokens: 600,
+      validate: validateAdvice,
     });
-    return aiJson({ status: "advice", ...result });
+    const key = adviceKey(result);
+    const repeated = previous.includes(key);
+    const advice = repeated ? { reason, practice, check } : result;
+    return aiJson({
+      status: "advice", ...advice, angle, key: adviceKey(advice), basedOnRecords: repeated,
+      topic: { title: topic.title, href },
+      mistake: mistake && { topic: mistake.topic, prompt: mistake.prompt, selected: mistake.selected },
+    });
   } catch (error) {
     return aiErrorResponse(error);
   }
