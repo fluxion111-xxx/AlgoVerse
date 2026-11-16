@@ -61,6 +61,8 @@ export class AIRequestError extends Error {
   }
 }
 
+export class AIUnverifiedError extends AIRequestError {}
+
 type Limits = { secret: Buffer; keys: Map<string, number>; expiresAt: number; count: number; active: number };
 const processState = globalThis as typeof globalThis & { algoVerseAILimits?: Limits };
 const pendingRequestSecret = randomBytes(32);
@@ -143,7 +145,7 @@ export function readAICredentials(request: Request): AICredentials {
     const apiKey = process.env.SILICONFLOW_API_KEY?.trim();
     if (!apiKey || !platformQuotaConfigured()) {
       console.warn("AlgoVerse platform AI configuration is incomplete.");
-      throw new AIRequestError("平台免费 AI 待管理员配置。", 503);
+      throw new AIUnverifiedError("平台免费 AI 待管理员配置。", 503);
     }
     return { apiKey, selection: { provider, model: chosen }, signal: request.signal, visitor: platformVisitor(request) };
   }
@@ -224,7 +226,7 @@ function repairInstructions(instructions: string) {
   return `${instructions}\n上次回复为空、未写完或未通过格式校验。请重新作答。只输出一个完整的 JSON 对象。保留用户的要求，缩短解释，按上面的字段和类型输出。省略用不到的可选字段。`;
 }
 
-async function providerError(provider: AIProvider | "siliconflow", response: Response) {
+async function providerError(provider: AIProvider | "siliconflow", response: Response, testing: boolean) {
   const { status } = response;
   if (provider === "siliconflow") {
     void response.body?.cancel().catch(() => {});
@@ -254,6 +256,7 @@ async function providerError(provider: AIProvider | "siliconflow", response: Res
   if (status === 402) return new AIRequestError("余额不足，请充值后重试。", 402);
   if (status === 404) return new AIRequestError(modelSelectionMessage, 404);
   if (status === 429) return new AIRequestError("AI 请求过多。请稍后重试。", 429);
+  if (testing && (status === 408 || status === 504)) return new AIRequestError("AI 响应超时，请重试。", 504);
   if (status === 503) return new AIRequestError("AI 服务正忙。请稍后重试。", 503);
   return new AIRequestError("AI 请求失败。请稍后重试。", 502);
 }
@@ -307,6 +310,10 @@ async function requestPlatformAI<T>(credentials: PlatformCredentials, options: R
     } catch (error) {
       if (!(error instanceof PlatformUpstreamError) || !error.retryable) throw error;
       if (choice === choices.at(-1)) {
+        if (options.operation === "connection_test") {
+          if (error.status === 429) throw new AIRequestError("服务商限流。请稍后重试。", 429);
+          if (error.status === 504) throw new AIRequestError("AI 响应超时，请重试。", 504);
+        }
         const message = choices.length === 2 ? "两个免费模型暂不可用。" : "所选免费模型暂不可用。";
         throw new AIRequestError(message, error.status);
       }
@@ -324,7 +331,7 @@ async function requestPlatformCompletion<T>(credentials: PlatformCredentials, op
   catch {
     if (signal.aborted) throw new AIRequestError("请求已取消。", 499);
     console.warn("AlgoVerse platform AI quota unavailable.");
-    throw new AIRequestError("免费额度校验失败。请联系管理员。", 503);
+    throw new AIUnverifiedError("免费额度校验失败。请联系管理员。", 503);
   }
   if (limit) throw new AIRequestError(limit.blocked === "daily" ? "今日免费额度已用完。" : "免费请求过多。请稍后再试。", 429, limit.retryAfter);
   const price = await confirmZeroSiliconFlowPrice(model.id, signal).catch((error: unknown) => {
@@ -333,7 +340,7 @@ async function requestPlatformCompletion<T>(credentials: PlatformCredentials, op
   });
   if (!price.ok) {
     console.warn("AlgoVerse SiliconFlow zero-price check failed.", { model: model.id, reason: price.reason, status: price.status });
-    throw new AIRequestError("免费价格未确认。请联系管理员。", 503);
+    throw new AIUnverifiedError("免费价格未确认。请联系管理员。", 503);
   }
   const tutorFormat = retryFormat && choice === "backup" ? options.backupTutorFormat : undefined;
   const completion = tutorFormat ? { ...options, ...tutorFormat }
@@ -369,7 +376,8 @@ async function requestCompletion<T>({ apiKey, selection: { provider }, signal }:
         ...(output === "json-object" && { response_format: { type: "json_object" } }),
       }),
     });
-    if (!response.ok) throw await providerError(provider, response);
+    const testing = options.operation === "connection_test";
+    if (!response.ok) throw await providerError(provider, response, testing);
 
     const body = asObject(await response.json().catch((error: unknown) => {
       if (error instanceof SyntaxError) return null;
@@ -387,6 +395,9 @@ async function requestCompletion<T>({ apiKey, selection: { provider }, signal }:
     if (provider === "siliconflow" && body?.model !== model) {
       console.warn("AlgoVerse SiliconFlow returned an unexpected model.", { model });
       throw new AIRequestError("免费模型异常。请联系管理员。", 503);
+    }
+    if (testing && body?.model !== model) {
+      throw new AIRequestError("服务商未确认所选模型。", 502);
     }
 
     const canRepair = options.retryFormat || (provider === "siliconflow" && model === siliconFlowModels.backup.id && options.backupTutorFormat);

@@ -5,13 +5,15 @@ import { aiRequestHeaders, modelSelectionMessage, parseAISelection, type AIProvi
 import type { AgentTask } from "./experimentAgent";
 import type { PlatformModel } from "./platformAI";
 
-type Connection = { apiKey: string; selection: AISelection; usage?: TokenUsage };
+export type ConnectionVerification = { model: string; usage: TokenUsage };
+type Connection = { apiKey: string; selection: AISelection; verification?: ConnectionVerification };
 type ActiveConnection = Connection | { platformModel: PlatformModel };
 type RetainedKey = { apiKey: string; region?: string };
 type TemporaryAI = {
   provider: AIProvider;
   mode: "platform" | "byok";
   platformModel: PlatformModel;
+  platformVerification?: ConnectionVerification;
   connections: Partial<Record<AIProvider, Connection>>;
   keys: Partial<Record<AIProvider, RetainedKey>>;
 };
@@ -30,7 +32,12 @@ function updateState(next: TemporaryAI) {
 }
 
 export function selectTemporaryAIProvider(provider: AIProvider) {
-  if (provider !== state.provider) updateState({ ...state, provider });
+  if (provider === state.provider) return;
+  const previous = state.connections[state.provider];
+  const connections = previous?.verification
+    ? { ...state.connections, [state.provider]: { ...previous, verification: undefined } }
+    : state.connections;
+  updateState({ ...state, provider, connections });
 }
 
 export function selectAIMode(mode: TemporaryAI["mode"]) {
@@ -38,7 +45,11 @@ export function selectAIMode(mode: TemporaryAI["mode"]) {
 }
 
 export function selectPlatformAIModel(platformModel: PlatformModel) {
-  if (platformModel !== state.platformModel) updateState({ ...state, platformModel });
+  if (platformModel !== state.platformModel) updateState({ ...state, platformModel, platformVerification: undefined });
+}
+
+export function setPlatformAIVerification(model: PlatformModel, verification?: ConnectionVerification) {
+  if (model === state.platformModel) updateState({ ...state, platformVerification: verification });
 }
 
 const platformConnections = { primary: { platformModel: "primary" }, backup: { platformModel: "backup" } } as const;

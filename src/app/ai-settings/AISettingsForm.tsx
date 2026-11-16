@@ -1,24 +1,25 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent, type RefObject } from "react";
 import { CatalogIcon } from "@/components/experiments/CatalogEffects";
-import { aiProviders, aiRequestHeaders, availableAIModels, billingLabels, canUseAITransport, isApiKey, maxApiKeyLength, modelSelectionMessage, parseAISelection, qwenRegions, type AIProvider, type TokenUsage } from "@/lib/aiSettings";
+import { aiProviders, aiRequestHeaders, availableAIModels, billingLabels, isApiKey, maxApiKeyLength, modelSelectionMessage, parseAISelection, qwenRegions, type AIProvider, type TokenUsage } from "@/lib/aiSettings";
 import { isPlatformModel, platformModels, platformQuota } from "@/lib/platformAI";
-import { retainTemporaryAIKey, selectAIMode, selectPlatformAIModel, selectTemporaryAIProvider, setTemporaryAI, useTemporaryAI } from "@/lib/temporaryAI";
+import { retainTemporaryAIKey, selectAIMode, selectPlatformAIModel, selectTemporaryAIProvider, setPlatformAIVerification, setTemporaryAI, useTemporaryAI } from "@/lib/temporaryAI";
+import { ConnectionResult, useConnectionTest, type ConnectionTest } from "./ConnectionFeedback";
 
-type ConnectionResponse = { status: "connected"; model: string; usage: TokenUsage } | { status: "error"; message: string };
-type ConnectionState = "unconfigured" | "idle" | "pending" | "connected" | "error";
-const httpsHint = "请通过 HTTPS 打开此页。";
+type ConnectionState = "unconfigured" | "unverified" | "pending" | "connected" | "error";
 const modeOptions = [
   { value: "platform", label: "平台免费 AI", detail: "无需填写 Key。", icon: "lucide:sparkles" },
   { value: "byok", label: "自定义 API Key", detail: "使用自己的服务商账户。", icon: "lucide:key-round" },
 ] as const;
 const connectionLabels: Record<ConnectionState, string> = {
-  unconfigured: "待管理员配置", idle: "尚未测试", pending: "连接中", connected: "连接成功", error: "连接失败",
+  unconfigured: "未配置", unverified: "未验证", pending: "验证中", connected: "已验证", error: "验证失败",
 };
 
 export function AISettingsForm({ configured }: { configured: boolean }) {
   const { mode } = useTemporaryAI();
+  const test = useConnectionTest();
+  const form = useRef<HTMLFormElement>(null);
   return (
     <div className="ai-settings-layout">
       <section className="ai-settings-index" aria-labelledby="ai-settings-title">
@@ -27,7 +28,7 @@ export function AISettingsForm({ configured }: { configured: boolean }) {
           <legend>使用方式</legend>
           {modeOptions.map(({ value, label, detail, icon }) => <label key={value} className="ai-settings-mode">
             <input className="sr-only" type="radio" name="ai-service-mode" value={value} checked={mode === value}
-              onChange={() => selectAIMode(value)} />
+              onChange={() => { test.reset(); selectAIMode(value); }} />
             <span className="ai-settings-mode-body">
               <CatalogIcon icon={icon} width={20} />
               <span><strong>{label}</strong><small>{detail}</small></span>
@@ -37,8 +38,9 @@ export function AISettingsForm({ configured }: { configured: boolean }) {
         </fieldset>
       </section>
       <section className="ai-settings-console" aria-labelledby="ai-connection-title">
-        {mode === "platform" ? <PlatformConnectionForm configured={configured} /> : <CustomConnection />}
+        {mode === "platform" ? <PlatformConnectionForm configured={configured} test={test} form={form} /> : <CustomConnection test={test} form={form} />}
       </section>
+      {test.result && <ConnectionResult result={test.result} dismiss={test.dismiss} retry={() => form.current?.requestSubmit()} />}
     </div>
   );
 }
@@ -53,80 +55,56 @@ function ConnectionSummary({ provider, model, state, usage }: { provider: string
       <div><dt>服务商</dt><dd>{provider}</dd></div>
       <div><dt>当前模型</dt><dd>{model ? <span lang="en">{model}</span> : "请选择模型"}</dd></div>
     </dl>
-    {usage && <p className="ai-settings-usage">测试用量 <b>{usage.totalTokens}</b> tokens</p>}
+    {usage && <p className="ai-settings-usage">上次测试 <b>{usage.totalTokens}</b> tokens</p>}
   </header>;
 }
 
-function CustomConnection() {
+type FormProps = { test: ConnectionTest; form: RefObject<HTMLFormElement | null> };
+
+function CustomConnection({ test, form }: FormProps) {
   const { provider } = useTemporaryAI();
-  return <ProviderConnectionForm key={provider} provider={provider} />;
+  return <ProviderConnectionForm key={provider} provider={provider} test={test} form={form} />;
 }
 
-function PlatformConnectionForm({ configured }: { configured: boolean }) {
-  const { platformModel } = useTemporaryAI();
-  const [status, setStatus] = useState<ConnectionState>("idle");
-  const [usage, setUsage] = useState<TokenUsage>();
-  const [canTest, setCanTest] = useState<boolean | null>(null);
-  const [error, setError] = useState("");
-  const pending = useRef<AbortController | null>(null);
+function TestButton({ test, disabled, label }: { test: ConnectionTest; disabled: boolean; label: string }) {
+  const testing = test.attempt?.kind === "pending";
+  return <button className="ai-settings-test" type="submit" disabled={disabled || testing}>
+    {testing ? <span className="ai-settings-spinner" aria-hidden="true" /> : <CatalogIcon icon="lucide:plug-zap" width={18} />}
+    {testing ? "正在验证连接…" : test.attempt?.kind === "error" ? "重新测试" : label}
+  </button>;
+}
 
-  useEffect(() => {
-    setCanTest(canUseAITransport(window.location));
-    return () => { pending.current?.abort(); pending.current = null; };
-  }, []);
+function PlatformConnectionForm({ configured, test, form }: FormProps & { configured: boolean }) {
+  const { platformModel, platformVerification } = useTemporaryAI();
 
-  async function testConnection(event: FormEvent<HTMLFormElement>) {
+  function testConnection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!configured || pending.current) return;
-    if (!canUseAITransport(window.location)) { setError(httpsHint); setStatus("error"); return; }
-    const controller = new AbortController();
-    pending.current = controller;
-    setStatus("pending");
-    setError("");
-    setUsage(undefined);
-    try {
-      const response = await fetch("/api/ai/connection", {
-        method: "POST", cache: "no-store", redirect: "error", signal: controller.signal,
-        headers: { "Content-Type": "application/json", "X-AI-Provider": "siliconflow", "X-AI-Platform-Model": platformModel },
-        body: "{}",
-      });
-      const result: ConnectionResponse | null = await response.json().catch(() => null);
-      if (pending.current !== controller) return;
-      if (response.ok && result?.status === "connected") { setUsage(result.usage); setStatus("connected"); return; }
-      setError(result?.status === "error" ? result.message : "测试失败，请重试。");
-      setStatus("error");
-    } catch {
-      if (pending.current !== controller) return;
-      setError("请求失败，请重试。");
-      setStatus("error");
-    } finally {
-      if (pending.current === controller) pending.current = null;
-    }
+    if (!configured || !test.canTest || test.isPending()) return;
+    setPlatformAIVerification(platformModel);
+    void test.run({
+      headers: { "X-AI-Provider": "siliconflow", "X-AI-Platform-Model": platformModel },
+      provider: "硅基流动", onVerified: (value) => setPlatformAIVerification(platformModel, value),
+    });
   }
 
-  const visibleError = error || (configured && canTest === false ? httpsHint : "");
+  const state = !configured ? "unconfigured" : test.attempt?.kind ?? (platformVerification && test.canTest ? "connected" : "unverified");
+  const message = configured ? test.message : "等待管理员配置。";
   return <>
-    <ConnectionSummary provider="硅基流动" model={platformModels[platformModel]} state={!configured ? "unconfigured" : visibleError ? "error" : status} usage={usage} />
-    <form className="ai-settings-fields" onSubmit={testConnection}>
+    <ConnectionSummary provider="硅基流动" model={platformModels[platformModel]} state={state} usage={state === "connected" ? platformVerification?.usage : undefined} />
+    <form className="ai-settings-fields" ref={form} onSubmit={testConnection}>
       <label htmlFor="ai-platform-model">模型</label>
       <select id="ai-platform-model" value={platformModel} aria-describedby="ai-platform-help" onChange={(event) => {
         const model = event.target.value;
         if (!isPlatformModel(model)) return;
-        pending.current?.abort();
-        pending.current = null;
+        test.reset();
         selectPlatformAIModel(model);
-        setStatus("idle");
-        setError("");
-        setUsage(undefined);
       }}>
         {Object.entries(platformModels).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
       </select>
       <p className="ai-settings-help" id="ai-platform-help">每次调用前核验免费价格。</p>
-      {visibleError && <p className="ai-settings-error" role="alert">{visibleError}</p>}
+      {message && <p className="ai-settings-feedback" data-state={state} role="status">{message}</p>}
       <div className="ai-settings-actions">
-        <button className="ai-settings-test" type="submit" disabled={!configured || !canTest || status === "pending"}>
-          <CatalogIcon icon="lucide:plug-zap" width={18} />{status === "pending" ? "正在测试…" : "测试连接"}
-        </button>
+        <TestButton test={test} disabled={!configured || !test.canTest} label="测试连接" />
       </div>
     </form>
     <footer className="ai-settings-policy">
@@ -136,7 +114,7 @@ function PlatformConnectionForm({ configured }: { configured: boolean }) {
   </>;
 }
 
-function ProviderConnectionForm({ provider }: { provider: AIProvider }) {
+function ProviderConnectionForm({ provider, test, form }: FormProps & { provider: AIProvider }) {
   const { connections, keys } = useTemporaryAI();
   const connected = connections[provider];
   const savedKey = keys[provider];
@@ -148,108 +126,63 @@ function ProviderConnectionForm({ provider }: { provider: AIProvider }) {
   const models = availableAIModels(provider, region);
   const selected = models.find(({ apiId }) => apiId === model);
   const modelValue = selected?.apiId ?? "";
-  const [testing, setTesting] = useState(false);
-  const [error, setError] = useState("");
-  const [canTest, setCanTest] = useState<boolean | null>(null);
   const [announcement, setAnnouncement] = useState("");
-  const pending = useRef<AbortController | null>(null);
   const keyInput = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    setCanTest(canUseAITransport(window.location));
-    function clearDraft() {
-      pending.current?.abort();
-      pending.current = null;
-      setDraft("");
-      setTesting(false);
-    }
+    function clearDraft() { setDraft(""); }
     window.addEventListener("pagehide", clearDraft);
-    return () => {
-      pending.current?.abort();
-      pending.current = null;
-      window.removeEventListener("pagehide", clearDraft);
-    };
+    return () => window.removeEventListener("pagehide", clearDraft);
   }, []);
 
   function resetConnection(removeKey = false) {
-    pending.current?.abort();
-    pending.current = null;
+    test.reset();
     retainTemporaryAIKey(provider, removeKey ? undefined : savedKey);
-    setTesting(false);
-    setError("");
     setAnnouncement("");
   }
 
-  async function testConnection(event: FormEvent<HTMLFormElement>) {
+  function testConnection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (pending.current) return;
-    if (!canUseAITransport(window.location)) {
-      setError(httpsHint);
-      return;
-    }
+    if (test.isPending() || !test.canTest) return;
     const apiKey = draft.trim() || retainedKey || "";
     const selection = parseAISelection(provider, modelValue, provider === "qwen" ? region : undefined);
     if (!selection) {
-      setError(modelSelectionMessage);
+      test.unverified(modelSelectionMessage);
       return;
     }
     if (!isApiKey(apiKey)) {
-      setError(apiKey ? "请检查 Key 格式。" : "请填写你的 API Key。");
+      test.unverified(apiKey ? "请检查 Key 格式。" : "请填写你的 API Key。");
       keyInput.current?.focus();
       return;
     }
 
-    const controller = new AbortController();
-    pending.current = controller;
-    setTesting(true);
-    setError("");
     setAnnouncement("");
     retainTemporaryAIKey(provider, { apiKey, region: selection.provider === "qwen" ? selection.region : undefined });
-    setModel(selection.model);
     setDraft("");
-    try {
-      const response = await fetch("/api/ai/connection", {
-        method: "POST",
-        cache: "no-store",
-        redirect: "error",
-        signal: controller.signal,
-        headers: {
-          ...aiRequestHeaders(selection, apiKey),
-          "Content-Type": "application/json",
-        },
-        body: "{}",
-      });
-      const result: ConnectionResponse | null = await response.json().catch(() => null);
-      if (pending.current !== controller) return;
-      if (response.ok && result?.status === "connected" && result.model === selection.model) {
-        setTemporaryAI({ apiKey, selection, usage: result.usage });
-        setDraft("");
-      } else {
-        setError(result?.status === "error" ? result.message : "测试失败，请重试。");
-        if (response.status === 404 && result?.status === "error" && result.message === modelSelectionMessage) setModel("");
-      }
-    } catch {
-      if (pending.current === controller) setError("请求失败，请重试。");
-    } finally {
-      if (pending.current === controller) {
-        pending.current = null;
-        setTesting(false);
-      }
-    }
+    void test.run({
+      headers: aiRequestHeaders(selection, apiKey), provider: aiProviders[provider].label, model: selection.model,
+      onVerified: (verification) => setTemporaryAI({ apiKey, selection, verification }),
+    });
   }
 
-  const visibleError = error || (canTest === false ? httpsHint : "");
+  const hasKey = !!(draft.trim() || retainedKey);
+  const verification = !draft && connected?.apiKey === retainedKey && connected?.selection.model === modelValue
+    ? connected?.verification : undefined;
+  const state = !hasKey ? "unconfigured" : test.attempt?.kind ?? (verification && test.canTest ? "connected" : "unverified");
   return (
     <>
       <ConnectionSummary provider={aiProviders[provider].label} model={selected?.label}
-        state={testing ? "pending" : visibleError ? "error" : connected?.usage ? "connected" : "idle"} usage={connected?.usage} />
-      <form className="ai-settings-fields" onSubmit={testConnection} autoComplete="off">
+        state={state} usage={state === "connected" ? verification?.usage : undefined} />
+      <form className="ai-settings-fields" ref={form} onSubmit={testConnection} autoComplete="off">
         <div className="ai-settings-provider-fields">
           <div>
             <label htmlFor="ai-provider">选择服务商</label>
             <select id="ai-provider" value={provider} onChange={(event) => {
               const selected = event.target.value;
-              if (Object.hasOwn(aiProviders, selected)) selectTemporaryAIProvider(selected as AIProvider);
+              if (Object.hasOwn(aiProviders, selected)) {
+                test.reset();
+                selectTemporaryAIProvider(selected as AIProvider);
+              }
             }}>
               {Object.entries(aiProviders).map(([id, option]) => <option key={id} value={id}>{option.label}</option>)}
             </select>
@@ -283,16 +216,14 @@ function ProviderConnectionForm({ provider }: { provider: AIProvider }) {
 
         <label htmlFor="ai-key">API Key</label>
         <input id="ai-key" ref={keyInput} type="password" value={draft} maxLength={maxApiKeyLength}
-          autoComplete="off" spellCheck={false} autoCapitalize="none" disabled={!canTest} aria-describedby="ai-key-help"
-          placeholder={connected?.usage ? "已验证。可输入新 Key。" : connected ? "已切换模型。可测试连接。" : retainedKey ? "Key 已保留，请测试。" : "粘贴你的 API Key"}
+          autoComplete="off" spellCheck={false} autoCapitalize="none" disabled={!test.canTest} aria-describedby="ai-key-help"
+          placeholder={state === "connected" ? "已验证。可输入新 Key。" : retainedKey ? "已保留 Key" : "粘贴你的 API Key"}
           onChange={(event) => { resetConnection(); setDraft(event.target.value); }} />
         <p className="ai-settings-help" id="ai-key-help">只在当前标签页有效。</p>
-        {visibleError && <p className="ai-settings-error" role="alert">{visibleError}</p>}
+        {test.message && <p className="ai-settings-feedback" data-state={state} role="status">{test.message}</p>}
 
         <div className="ai-settings-actions">
-          <button className="ai-settings-test" type="submit" disabled={testing || !canTest || !modelValue || (!draft.trim() && !retainedKey)}>
-            <CatalogIcon icon="lucide:plug-zap" width={18} />{testing ? "正在测试…" : "测试连接"}
-          </button>
+          <TestButton test={test} disabled={!test.canTest || !modelValue || !hasKey} label="保存并测试连接" />
           <button className="ai-settings-clear" type="button" disabled={!draft && !savedKey} onClick={() => {
             resetConnection(true);
             setDraft("");

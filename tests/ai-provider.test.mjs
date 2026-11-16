@@ -654,6 +654,12 @@ function completion(content = '{"ok":true}', model) {
   });
 }
 
+function isolatePersonalLimits(t) {
+  const previous = globalThis.algoVerseAILimits;
+  delete globalThis.algoVerseAILimits;
+  t.after(() => { globalThis.algoVerseAILimits = previous; });
+}
+
 test("deep lessons keep real topic links and validate each published answer", () => {
   const fixtures = {
     "asymptotic-bounds": ["0", ["1", "0"], "1", "７", ["3", "1"], "n²"],
@@ -1659,12 +1665,14 @@ test("platform requests fail closed without production quota or confirmed prices
   const fetch = t.mock.method(globalThis, "fetch", async () => new Response(pricePage({ paid: primaryModel })));
   const response = await POST(request({ ...platformHeaders("primary"), "CF-Connecting-IP": "192.0.2.1" }, ""));
   assert.equal(response.status, 503);
-  assert.match((await response.json()).message, /价格未确认/);
+  assert.deepEqual(await response.json(), { status: "unverified", message: "免费价格未确认。请联系管理员。" });
   assert.deepEqual(fetch.mock.calls.map(({ arguments: args }) => args[0]), [pricingUrl]);
 
   setTestEnv(t, "NODE_ENV", "production");
   setTestEnv(t, "PLATFORM_AI_QUOTA_URL", "");
-  assert.equal((await POST(request(platformHeaders("primary"), ""))).status, 503);
+  const unconfigured = await POST(request(platformHeaders("primary"), ""));
+  assert.equal(unconfigured.status, 503);
+  assert.equal((await unconfigured.json()).status, "unverified");
   assert.equal(fetch.mock.callCount(), 1);
 });
 
@@ -1888,7 +1896,7 @@ test("platform retries only the free backup on upstream failure and validates it
 });
 
 test("connection tests route each model and regional key to its official endpoint", async (t) => {
-  const fetch = t.mock.method(globalThis, "fetch", async () => completion());
+  const fetch = t.mock.method(globalThis, "fetch", async (_url, init) => completion(undefined, JSON.parse(init.body).model));
   const beijing = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions";
   const singapore = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions";
   const deepseekEndpoint = "https://api.deepseek.com/chat/completions";
@@ -1957,18 +1965,21 @@ test("invalid, mixed, and missing credentials never reach a provider", async (t)
 });
 
 test("Qwen failures and malformed completions never show connected or echo provider errors", async (t) => {
-  const key = "sk-fixture-private";
+  isolatePersonalLimits(t);
   const fetch = t.mock.method(globalThis, "fetch", async () => completion());
   const cases = [
-    [() => Response.json({ error: { code: "invalid_api_key", message: key } }, { status: 401 }), 401, /地域/],
-    [() => Response.json({ error: { code: "Arrearage", message: key } }, { status: 403 }), 402, /余额不足/],
-    [() => Response.json({ error: { code: "ModelNotFound" } }, { status: 404 }), 404, /请选择当前可用模型/],
+    [(key) => Response.json({ error: { code: "invalid_api_key", message: key } }, { status: 401 }), 401, /地域/],
+    [(key) => Response.json({ error: { code: "Arrearage", message: key } }, { status: 403 }), 402, /余额不足/],
+    [() => Response.json({ error: { code: "ModelNotFound" } }, { status: 400 }), 404, /所选模型不可用/],
     [() => Response.json({ error: { code: "insufficient_quota" } }, { status: 429 }), 429, /额度不足/],
-    [() => completion('{"ok":false}'), 502, /格式有误/],
+    [() => completion('{"ok":false}', "qwen3.7-plus"), 502, /格式有误/],
+    [() => completion(undefined, "qwen3.8-flash"), 502, /未确认所选模型/],
+    [() => completion(), 502, /未确认所选模型/],
     [() => Response.json({ choices: [] }), 502, /格式有误/],
   ];
-  for (const [reply, status, message] of cases) {
-    fetch.mock.mockImplementation(async () => reply());
+  for (const [index, [reply, status, message]] of cases.entries()) {
+    const key = `sk-fixture-private-${index}`;
+    fetch.mock.mockImplementation(async () => reply(key));
     const response = await POST(request(qwen("qwen3.7-plus", "cn-beijing"), key));
     assert.equal(response.status, status);
     const body = await response.json();
@@ -1976,6 +1987,41 @@ test("Qwen failures and malformed completions never show connected or echo provi
     assert.match(body.message, message);
     assert.ok(!JSON.stringify(body).includes(key));
   }
+  assert.equal(fetch.mock.callCount(), cases.length);
+});
+
+test("connection tests reject custom URLs without reaching a provider", async (t) => {
+  const fetch = t.mock.method(globalThis, "fetch", async () => completion());
+  const headers = { ...deepseek(), Authorization: "Bearer sk-fixture", "Content-Type": "application/json" };
+  const url = "https://algoverse.test/api/ai/connection";
+  const target = "http://169.254.169.254/latest/meta-data";
+  const attempts = [
+    new Request(url, { method: "POST", headers, body: JSON.stringify({ baseUrl: target }) }),
+    new Request(url, { method: "POST", headers: { ...headers, "X-AI-Base-URL": target }, body: "{}" }),
+    new Request(url + "?base_url=" + encodeURIComponent(target), { method: "POST", headers, body: "{}" }),
+    new Request(url, { method: "POST", headers, body: " ".repeat(600) + "{}" }),
+  ];
+  for (const attempt of attempts) {
+    const response = await POST(attempt);
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), { status: "unverified", message: "请使用预设服务地址。" });
+  }
+  assert.equal(fetch.mock.callCount(), 0);
+});
+
+test("connection tests report provider outages and enforce the existing per-key limit", async (t) => {
+  isolatePersonalLimits(t);
+  const fetch = t.mock.method(globalThis, "fetch", async () => Response.json({ error: "private upstream details" }, { status: 503 }));
+  const key = "sk-connection-limit-fixture";
+  for (let count = 0; count < 6; count++) {
+    const response = await POST(request(deepseek(), key));
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { status: "error", message: "AI 服务正忙。请稍后重试。" });
+  }
+  const limited = await POST(request(deepseek(), key));
+  assert.equal(limited.status, 429);
+  assert.ok(Number(limited.headers.get("retry-after")) > 0);
+  assert.equal(fetch.mock.callCount(), 6);
 });
 
 test("timeouts use the same safe response for both providers", async (t) => {
