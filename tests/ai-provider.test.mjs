@@ -1,6 +1,22 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { registerHooks } from "node:module";
-import { test } from "node:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, before, test } from "node:test";
+
+const originalDataDir = process.env.ALGOVERSE_DATA_DIR;
+let dataDir;
+before(async () => {
+  dataDir = await mkdtemp(join(tmpdir(), "algoverse-ai-provider-test-"));
+  process.env.ALGOVERSE_DATA_DIR = dataDir;
+});
+after(async () => {
+  if (originalDataDir === undefined) delete process.env.ALGOVERSE_DATA_DIR;
+  else process.env.ALGOVERSE_DATA_DIR = originalDataDir;
+  if (dataDir) await rm(dataDir, { recursive: true, force: true });
+});
 
 // Load the same TypeScript route as Next.js, with its alias and server-only marker.
 const hooks = registerHooks({
@@ -24,7 +40,7 @@ const { confirmZeroSiliconFlowPrice, hasZeroSiliconFlowPrice } = await import(".
 const { reservePlatformCall } = await import("../src/lib/platformQuota.ts");
 const { platformQuota } = await import("../src/lib/platformAI.ts");
 const { aiKeyProviderMessage, aiProviders, aiRequestHeaders, availableAIModels, containsPossibleAIKey, isApiKey, isMaskedApiKey, modelSelectionMessage, normalizeApiKeyDraft, parseAISelection, parseQwenWorkspace, qwenRegions } = await import("../src/lib/aiSettings.ts");
-const { getAIModelChoices } = await import("../src/lib/temporaryAI.ts");
+const { getAIModelChoices, selectPlatformAIModel, setAIConfiguration } = await import("../src/lib/temporaryAI.ts");
 const { interpretCreatorRequest } = await import("../src/lib/server/creatorAI.ts");
 const { diagnoseExperimentRun } = await import("../src/lib/server/experimentAI.ts");
 const { getExperimentEngine, registeredEngines } = await import("../src/lib/experimentEngines.ts");
@@ -662,7 +678,7 @@ function isolatePersonalLimits(t) {
   t.after(() => { globalThis.algoVerseAILimits = previous; });
 }
 
-test("verified keys survive reload, stay isolated by browser and Qwen region, and expire", async (t) => {
+test("verified keys survive another server process, stay isolated by browser and Qwen region, and expire", async (t) => {
   isolatePersonalLimits(t);
   const deepseekKey = "sk-test-session-deepseek";
   const qwenKey = "sk-test-session-qwen";
@@ -694,6 +710,25 @@ test("verified keys survive reload, stay isolated by browser and Qwen region, an
   assert.equal(config(cookie, { Origin: "https://foreign.test" }).status, 403);
   assert.equal(config().headers.get("Cache-Control"), "private, no-store");
 
+  const worker = spawnSync(process.execPath, ["--disable-warning=MODULE_TYPELESS_PACKAGE_JSON", "--input-type=module", "--eval", `
+    import { registerHooks } from "node:module";
+    registerHooks({ resolve(specifier, context, next) {
+      if (specifier === "server-only") return { shortCircuit: true, url: "data:text/javascript,export {}" };
+      if (specifier.startsWith("@/")) return next(new URL("./src/" + specifier.slice(2) + ".ts", import.meta.url).href, context);
+      return next(specifier, context);
+    } });
+    const { readCredentialSession } = await import("./src/lib/server/aiCredentialSession.ts");
+    const session = readCredentialSession(new Request("https://algoverse.test", { headers: { Cookie: process.env.AI_TEST_COOKIE } }));
+    process.stdout.write(JSON.stringify(Object.keys(session?.providers ?? {})));
+  `], { cwd: new URL("..", import.meta.url), env: { ...process.env, AI_TEST_COOKIE: cookie }, encoding: "utf8" });
+  assert.equal(worker.status, 0, worker.stderr);
+  assert.deepEqual(JSON.parse(worker.stdout), ["deepseek", "qwen"]);
+  const directory = join(dataDir, "ai-credentials");
+  for (const name of await readdir(directory)) {
+    const record = await readFile(join(directory, name));
+    assert.ok(![deepseekKey, qwenKey, cookie.split("=")[1]].some((secret) => name.includes(secret) || record.includes(secret)));
+  }
+
   assert.ok(readAICredentials(request({ ...deepseek("deepseek-v4-pro"), Cookie: cookie }, "")).apiKey === deepseekKey);
   assert.ok(readAICredentials(request({ ...qwen("qwen3.8-flash", "ap-southeast-1"), Cookie: cookie }, "")).apiKey === qwenKey);
   assert.throws(() => readAICredentials(request({ ...qwen("qwen3.8-flash", "cn-beijing"), Cookie: cookie }, "")), { status: 400 });
@@ -704,6 +739,51 @@ test("verified keys survive reload, stay isolated by browser and Qwen region, an
   t.mock.method(Date, "now", () => expired);
   assert.deepEqual((await config().json()).providers, {});
   assert.throws(() => readAICredentials(request({ ...deepseek(), Cookie: cookie }, "")), { status: 400 });
+  assert.throws(() => readAICredentials(request({
+    ...deepseek(), Cookie: cookie, "X-AI-Credential-Version": publicConfig.providers.deepseek.credentialVersion,
+  }, "")), { status: 400, code: "credential_missing" });
+});
+
+test("model preferences preserve both surfaces when another tab updates settings", async (t) => {
+  const storageKey = "algoverse-ai-model-preferences";
+  const selection = { provider: "deepseek", model: "deepseek-v4-pro" };
+  const tutor = { selection: { provider: "qianwen", model: "qwen3.8-flash" } };
+  const initial = { mode: "byok", provider: "deepseek", platformModel: "primary", choices: { tutor } };
+  let stored = JSON.stringify(initial);
+  globalThis.window = {
+    clearTimeout,
+    localStorage: {
+      getItem(name) { assert.equal(name, storageKey); return stored; },
+      setItem(name, value) { assert.equal(name, storageKey); stored = value; },
+    },
+  };
+  t.after(() => { delete globalThis.window; });
+
+  setAIConfiguration({ platformConfigured: true, providers: {} }, selection);
+  await navigator.locks?.request(storageKey, () => {});
+  assert.deepEqual(JSON.parse(stored).personalModels.deepseek, selection);
+  stored = JSON.stringify({ ...JSON.parse(stored), choices: { tutor, workbench: { selection } } });
+  selectPlatformAIModel("backup");
+  await navigator.locks?.request(storageKey, () => {});
+  const saved = JSON.parse(stored);
+  assert.deepEqual(saved.choices, { tutor, workbench: { selection } });
+  assert.equal(saved.mode, "byok");
+  for (const surface of ["tutor", "workbench"]) {
+    const { current } = getAIModelChoices({ ...saved, configuration: { platformConfigured: true, providers: {} } }, surface);
+    assert.deepEqual(current.choice, saved.choices[surface]);
+    assert.match(current.reason, /验证 Key/);
+  }
+  const { current } = getAIModelChoices({
+    ...saved, choices: {}, configuration: { platformConfigured: true, providers: {} },
+  }, "workbench");
+  assert.deepEqual(current.choice, { selection });
+  assert.match(current.reason, /验证 Key/);
+  const inherited = getAIModelChoices({
+    ...saved, mode: "platform", choices: { tutor }, surfaceSelection: tutor.selection,
+    configuration: { platformConfigured: true, providers: {} },
+  }, "workbench");
+  assert.deepEqual(inherited.current.choice, tutor);
+  assert.match(inherited.current.reason, /验证 Key/);
 });
 
 test("Tutor and Workbench omit legacy DashScope models even with saved credentials and preferences", () => {
@@ -711,7 +791,7 @@ test("Tutor and Workbench omit legacy DashScope models even with saved credentia
   const legacy = { provider: "qwen", model, region: "cn-beijing" };
   const qianwen = { provider: "qianwen", model };
   const snapshot = {
-    mode: "byok", provider: "qwen", platformModel: "primary", choices: { tutor: { selection: legacy } },
+    mode: "byok", provider: "qwen", platformModel: "primary", choices: { tutor: { selection: legacy } }, personalModels: {},
     configuration: { platformConfigured: true, providers: {
       qwen: { selection: legacy, credentialVersion: "dashscope-version", verifications: [] },
       qianwen: { selection: qianwen, credentialVersion: "qianwen-version", verifications: [] },

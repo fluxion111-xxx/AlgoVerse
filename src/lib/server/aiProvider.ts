@@ -200,12 +200,12 @@ export function readAICredentials(request: Request, workbench = false, configuri
 
   if (authorization === null) {
     const saved = savedAICredential(request, selection);
-    if (credentialVersion !== null && credentialVersion !== saved?.credentialVersion) {
+    if (!saved) throw new AIRequestError("API 连接已失效。请重新验证 Key。", 400, undefined, "credential_missing");
+    if (credentialVersion !== null && credentialVersion !== saved.credentialVersion) {
       throw new AIRequestError("AI 配置已变更。请重试。", 409, undefined, "credential_changed");
     }
-    if (!saved) throw new AIRequestError("请在 AI 设置中配置此服务商的 Key。", 400, undefined, "credential_missing");
     return { apiKey: saved.apiKey, credentialVersion: saved.credentialVersion, workspaceId: saved.workspaceId, selection,
-      signal: request.signal, onAuthFailure: credentialAuthFailure(request, selection.provider) };
+      signal: request.signal, onAuthFailure: credentialAuthFailure(request, saved) };
   }
   const apiKey = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
   const providerMessage = aiKeyProviderMessage(selection.provider, apiKey);

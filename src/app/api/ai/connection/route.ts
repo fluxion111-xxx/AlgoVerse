@@ -24,11 +24,10 @@ export async function DELETE(request: Request) {
     }
     const session = readCredentialSession(request);
     const version = request.headers.get("x-ai-credential-version");
-    if (version !== null && version !== session?.providers[provider]?.credentialVersion) {
+    if (!clearSavedCredential(session, provider, version)) {
       throw new AIRequestError("AI 配置已变更。请重试。", 409, undefined, "credential_changed");
     }
-    clearSavedCredential(session, provider);
-    return aiJson(configuration(session));
+    return aiJson(configuration(readCredentialSession(request)));
   } catch (error) {
     return aiErrorResponse(error);
   }
@@ -65,8 +64,9 @@ export async function POST(request: Request) {
     const credentials = readAICredentials(request, false, true);
     const original = readCredentialSession(request);
     const previous = credentials.visitor === undefined ? original?.providers[credentials.selection.provider] : undefined;
-    const expected = request.headers.get("x-ai-credential-version");
-    if (credentials.visitor === undefined && expected !== null && expected !== previous?.credentialVersion) {
+    const expected = request.headers.get("x-ai-credential-version")
+      ?? (credentials.visitor === undefined ? credentials.credentialVersion : undefined);
+    if (credentials.visitor === undefined && expected !== undefined && expected !== previous?.credentialVersion) {
       throw new AIRequestError("AI 配置已变更。请重试。", 409, undefined, "credential_changed");
     }
 

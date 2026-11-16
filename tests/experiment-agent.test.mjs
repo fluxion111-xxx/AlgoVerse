@@ -359,6 +359,7 @@ test("BYOK settings drive Tutor and real workbench runs for current and legacy p
     { provider: "qianwen", model: "qwen3.7-plus", endpoint: "maas.qianwenaiapi.com", key: "sk-ws-byok-integration-qianwen" },
   ];
   const calls = [];
+  let interrupted = false;
   upstreamFetch.mock.mockImplementation(async (endpoint, init) => {
     const profile = profiles.find((entry) => new URL(endpoint).hostname === entry.endpoint);
     assert.ok(profile && init.headers.Authorization === `Bearer ${profile.key}`);
@@ -367,6 +368,10 @@ test("BYOK settings drive Tutor and real workbench runs for current and legacy p
     assert.ok(!init.body.includes(profile.key));
     const input = JSON.parse(body.messages[1].content);
     calls.push({ model: body.model, input, roles: body.messages.map(({ role }) => role) });
+    if (profile.provider === "qianwen" && input.message?.includes("解释实测") && !interrupted) {
+      interrupted = true;
+      throw new TypeError("socket closed");
+    }
     const output = input === "连接测试" ? { ok: true }
       : input.stage === "plan" ? sortingPlan
       : input.message?.includes("解释实测") ? { action: "explain", observation: "收到实测。", evidence: ["r1-r1-comparisons"] }
@@ -427,7 +432,10 @@ test("BYOK settings drive Tutor and real workbench runs for current and legacy p
     assert.equal(analyzed.dialogue.turns.at(-1).action, "explain");
     assert.equal(calls.at(-1).input.selectedRound, 1);
     assert.ok(calls.at(-1).roles.includes("assistant"));
+    assert.equal(analyzed.dialogue.turns.at(-1).model, model);
   }
+  assert.equal(interrupted, true);
+  assert.equal(calls.filter(({ model, input }) => model === "qwen3.7-plus" && input.message?.includes("解释实测")).length, 2);
   assert.deepEqual(tutorTask.dialogue.turns.map((turn) => turn.model),
     ["deepseek-flash", "deepseek-flash", "qwen3.8-flash", "qwen3.8-flash", "qwen3.7-plus", "qwen3.7-plus"]);
 });

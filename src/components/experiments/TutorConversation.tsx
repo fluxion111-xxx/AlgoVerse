@@ -318,7 +318,8 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
     } catch (error) {
       if (pending.current !== request) return;
       setFeedback({ kind: "error", text: error instanceof AIResponseError ? error.message : "请求失败，请重试。" });
-      if (request.taskId && error instanceof AIResponseError && (error.status === 0 || error.status === 408 || error.status === 409 || error.status >= 500)) {
+      if (request.taskId && error instanceof AIResponseError && error.code !== "credential_changed"
+        && (error.status === 0 || error.status === 408 || error.status === 409 || error.status >= 500)) {
         const snapshot = await recoverAgentTask(request.taskId, (next) => hasAgentOperation(next, request.operationId) === true,
           request.controller.signal);
         if (pending.current !== request || !snapshot) return;

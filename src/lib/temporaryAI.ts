@@ -17,6 +17,8 @@ type Preferences = {
   mode: "platform" | "byok";
   platformModel: PlatformModel;
   choices: Partial<Record<Surface, ModelChoice>>;
+  personalModels: Partial<Record<AIProvider, AISelection>>;
+  surfaceSelection: AISelection | null;
 };
 type TemporaryAI = Preferences & {
   configuration?: AIConfiguration;
@@ -26,7 +28,9 @@ type TemporaryAI = Preferences & {
 
 const storageKey = "algoverse-ai-model-preferences";
 const connectionRoute = "/api/ai/connection";
-const defaults: Preferences = { provider: "deepseek", mode: "platform", platformModel: "primary", choices: {} };
+const defaults: Preferences = {
+  provider: "deepseek", mode: "platform", platformModel: "primary", choices: {}, personalModels: {}, surfaceSelection: null,
+};
 let state: TemporaryAI = defaults;
 let loading: Promise<void> | undefined;
 let expiry: number | undefined;
@@ -48,9 +52,11 @@ function updateState(next: TemporaryAI) {
   for (const listener of listeners) listener();
 }
 
-function restorePreferences() {
+function readPreferences(): Preferences | undefined {
   try {
-    const saved = JSON.parse(window.localStorage.getItem(storageKey) ?? "{}");
+    const stored = window.localStorage.getItem(storageKey);
+    if (!stored) return undefined;
+    const saved = JSON.parse(stored);
     const choices: Preferences["choices"] = {};
     for (const surface of ["tutor", "workbench"] as const) {
       const item = saved.choices?.[surface];
@@ -58,24 +64,54 @@ function restorePreferences() {
       if (isPlatformModel(item?.platformModel)) choices[surface] = { platformModel: item.platformModel };
       else if (selection) choices[surface] = { selection };
     }
-    updateState({
-      ...state, mode: saved.mode === "byok" ? "byok" : "platform", provider: isAIProvider(saved.provider) ? saved.provider : "deepseek",
-      platformModel: isPlatformModel(saved.platformModel) ? saved.platformModel : "primary", choices,
-    });
+    const personalModels: Preferences["personalModels"] = {};
+    for (const provider of aiProviderIds) {
+      const entry = saved.personalModels?.[provider];
+      const selection = parseAISelection(provider, entry?.model, entry?.region);
+      if (selection) personalModels[provider] = selection;
+    }
+    const shared = saved.surfaceSelection;
+    const surfaceSelection = parseAISelection(shared?.provider, shared?.model, shared?.region);
+    return {
+      mode: saved.mode === "byok" ? "byok" : "platform", provider: isAIProvider(saved.provider) ? saved.provider : "deepseek",
+      platformModel: isPlatformModel(saved.platformModel) ? saved.platformModel : "primary", choices, personalModels, surfaceSelection,
+    };
   } catch { /* An unavailable or invalid preference does not affect credentials. */ }
 }
 
 function updatePreferences(change: Partial<Preferences>) {
-  const { provider, mode, platformModel, choices } = { ...state, ...change };
-  updateState({ ...state, provider, mode, platformModel, choices });
-  try { window.localStorage.setItem(storageKey, JSON.stringify({ provider, mode, platformModel, choices })); }
-  catch { /* The selection still applies in this tab. */ }
+  function merge({ provider, mode, platformModel, choices, personalModels, surfaceSelection }: Preferences): Preferences {
+    return {
+      provider: change.provider ?? provider, mode: change.mode ?? mode, platformModel: change.platformModel ?? platformModel,
+      choices: { ...choices, ...change.choices }, personalModels: { ...personalModels, ...change.personalModels },
+      surfaceSelection: change.surfaceSelection === undefined ? surfaceSelection : change.surfaceSelection,
+    };
+  }
+  const previous = state;
+  updateState({ ...state, ...merge(state) });
+  function persist() {
+    try {
+      const saved = merge(readPreferences() ?? previous);
+      window.localStorage.setItem(storageKey, JSON.stringify(saved));
+    } catch { /* The selection still applies in this tab. */ }
+  }
+  // Tabs share preferences, but an edit on one surface must not overwrite another.
+  if (navigator.locks) void navigator.locks.request(storageKey, persist).catch(persist);
+  else persist();
 }
 
-export function setAIConfiguration(configuration: AIConfiguration) {
+export function setAIConfiguration(configuration: AIConfiguration, verifiedSelection?: AISelection) {
   revision += 1;
   refreshedAt = Date.now();
   window.clearTimeout(expiry);
+  const remembered = readPreferences()?.personalModels;
+  const personalModels: Preferences["personalModels"] = {};
+  for (const provider of aiProviderIds) {
+    const selection = state.personalModels[provider] ?? remembered?.[provider] ?? configuration.providers[provider]?.selection;
+    if (!state.personalModels[provider] && selection) personalModels[provider] = selection;
+  }
+  if (verifiedSelection) personalModels[verifiedSelection.provider] = verifiedSelection;
+  if (Object.keys(personalModels).length) updatePreferences({ personalModels, ...(verifiedSelection && { surfaceSelection: null }) });
   updateState({ ...state, configuration, configurationError: undefined });
   const expiresInMs = configuration.expiresInMs;
   if (expiresInMs) {
@@ -140,11 +176,11 @@ export async function clearAIProvider(provider: AIProvider, credentialVersion: s
 }
 
 export function selectTemporaryAIProvider(provider: AIProvider) {
-  updatePreferences({ provider });
+  updatePreferences({ provider, surfaceSelection: null });
 }
 
 export function selectAIMode(mode: Preferences["mode"]) {
-  updatePreferences({ mode });
+  updatePreferences({ mode, surfaceSelection: null });
 }
 
 export function selectPlatformAIModel(platformModel: PlatformModel) {
@@ -158,14 +194,14 @@ export function setPlatformAIVerification(model: PlatformModel, verification: Co
   if (model === state.platformModel) updateState({ ...state, platformVerification: verification });
 }
 
-function defaultChoice(snapshot: TemporaryAI): ModelChoice {
+function defaultChoice(snapshot: TemporaryAI, remembered?: AISelection): ModelChoice {
   if (snapshot.mode === "platform") return { platformModel: snapshot.platformModel };
-  const saved = snapshot.configuration?.providers[snapshot.provider];
-  if (saved) return { selection: saved.selection };
   const { provider } = snapshot;
-  const model = aiProviders[provider].models[0].apiId;
-  const selection = parseAISelection(provider, model, provider === "qwen" ? qwenRegions[0].id : undefined);
-  return selection ? { selection } : { platformModel: snapshot.platformModel };
+  const saved = remembered ?? snapshot.configuration?.providers[provider]?.selection;
+  if (saved) return { selection: saved };
+  if (provider === "qwen") return { selection: { provider, model: aiProviders[provider].models[0].apiId, region: qwenRegions[0].id } };
+  if (provider === "qianwen") return { selection: { provider, model: aiProviders[provider].models[0].apiId } };
+  return { selection: { provider, model: aiProviders[provider].models[0].apiId } };
 }
 
 function choiceId(choice: ModelChoice) {
@@ -190,7 +226,7 @@ function modelOption(choice: ModelChoice, { configuration, configurationError }:
   const hasKey = selection.provider === "qwen"
     ? saved?.selection.provider === "qwen" && saved.selection.region === selection.region : !!saved;
   if (surface === "workbench" && !profile.workbench) reason = workbenchModelMessage;
-  else if (!hasKey) reason ||= "未配置 Key，或凭据已过期。";
+  else if (!hasKey) reason ||= "请到 AI 设置验证 Key。";
   else reason = saved?.authenticationFailed ? "认证失败，请检查 Key。" : "";
   const provider = aiProviders[selection.provider].label;
   return {
@@ -207,11 +243,14 @@ export function useActiveAI(): ActiveConnection | undefined {
 
 export function getAIModelChoices(snapshot: TemporaryAI, surface: Surface) {
   const preferred = snapshot.choices[surface];
+  const { surfaceSelection } = snapshot;
   const provider = snapshot.provider === "qwen"
-    ? snapshot.configuration?.providers.qianwen ? "qianwen" : "deepseek"
+    ? (snapshot.personalModels.qianwen || snapshot.configuration?.providers.qianwen) ? "qianwen" : "deepseek"
     : snapshot.provider;
   const choice = preferred && !("selection" in preferred && preferred.selection.provider === "qwen")
-    ? preferred : defaultChoice({ ...snapshot, provider });
+    ? preferred : surfaceSelection && surfaceSelection.provider !== "qwen"
+      ? { selection: surfaceSelection }
+      : defaultChoice({ ...snapshot, provider }, snapshot.personalModels[provider]);
   const current = modelOption(choice, snapshot, surface);
   const options = (["primary", "backup"] as const).map((platformModel) => modelOption({ platformModel }, snapshot, surface));
   for (const provider of selectableAIProviderIds) {
@@ -230,7 +269,13 @@ export function useAIModelChoices(surface: Surface) {
     active: current.reason ? undefined : { ...current.choice, credentialVersion: current.credentialVersion, exactModel: true },
     select(id: string) {
       const picked = options.find((entry) => entry.id === id && !entry.reason);
-      if (picked) updatePreferences({ choices: { ...state.choices, [surface]: picked.choice } });
+      if (!picked) return;
+      const choices = { [surface]: picked.choice };
+      if ("selection" in picked.choice) {
+        updatePreferences({ choices, surfaceSelection: picked.choice.selection });
+      } else {
+        updatePreferences({ choices });
+      }
     },
   };
 }
@@ -289,7 +334,7 @@ export function useTemporaryAI() {
   useEffect(() => {
     if (!initialized) {
       initialized = true;
-      restorePreferences();
+      updateState({ ...state, ...readPreferences() });
       document.addEventListener("visibilitychange", () => {
         if (document.visibilityState === "visible" && Date.now() - refreshedAt > 15_000) void refreshAIConfiguration();
       });

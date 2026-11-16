@@ -216,7 +216,7 @@ function ProviderConnectionForm({ provider, test }: FormProps & { provider: AIPr
         ...(provider === "qwen" && apiKey && workspaceId && { "X-AI-Qwen-Workspace": workspaceId }) },
       provider: aiProviders[provider].label, model: selection.model,
       onVerified: (_verification, configuration) => {
-        if (configuration) setAIConfiguration(configuration);
+        if (configuration) setAIConfiguration(configuration, selection);
         setDraft("");
       },
       onConfigurationChanged: () => void refreshAIConfiguration(),

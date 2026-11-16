@@ -106,7 +106,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
   const workBusy = !!task && (task.phase === "running" || task.phase === "deciding") && !expired;
   const activeUntil = dialogueBusy ? task?.dialogue?.activeUntil : workBusy ? task?.leaseUntil : undefined;
   const blocked = !!busy || dialogueBusy || workBusy;
-  const provider = connection && ("selection" in connection ? connection.selection.provider : "siliconflow");
+  const provider = "selection" in models.current.choice ? models.current.choice.selection.provider : "siliconflow";
   const savedCooldown = agentCooldown(task, provider, 0);
   const cooldown = requestCooldown && requestCooldown.provider === provider && requestCooldown.until > (savedCooldown?.until ?? 0)
     ? requestCooldown : savedCooldown;
@@ -289,15 +289,17 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
           setTask(analyzed);
           if (analyzed.phase !== "deciding") uncertainOperation.current = null;
         }
+      } else if (running && next.phase === "observe" && next.autoContinue === true && !connection) {
+        setError(models.current.reason);
       }
       return !signal.aborted && !next.dialogue?.error;
     } catch (failure) {
       if (!signal.aborted) {
-        if (provider && failure instanceof AIResponseError && failure.retryAfter) {
+        if (failure instanceof AIResponseError && failure.retryAfter) {
           setRequestCooldown({ provider, until: Date.now() + failure.retryAfter * 1000, message: failure.message });
         }
         setError(failure instanceof Error ? failure.message : "请求失败。请重试。");
-        if (request.taskId && action !== "status" && failure instanceof AIResponseError && !failure.retryAfter
+        if (request.taskId && action !== "status" && failure instanceof AIResponseError && !failure.retryAfter && failure.code !== "credential_changed"
           && (failure.status === 0 || failure.status === 408 || failure.status === 409 || failure.status >= 500)) {
           const snapshot = await recoverAgentTask(request.taskId, (next) =>
             autoAnalysis || action === "decide" || action === "adopt-exploration" ? next.operationId === request.operationId
@@ -479,7 +481,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
       if (!controller.signal.aborted) setReports((current) => ({ ...current, [runId]: diagnosis }));
     } catch (failure) {
       if (!controller.signal.aborted) {
-        if (provider && failure instanceof AIResponseError && failure.retryAfter) {
+        if (failure instanceof AIResponseError && failure.retryAfter) {
           setRequestCooldown({ provider, until: Date.now() + failure.retryAfter * 1000, message: failure.message });
         }
         setDiagnosisError({ id: runId, message: failure instanceof Error ? failure.message : "诊断失败。请重试。" });
@@ -511,7 +513,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
       }
       return result;
     } catch (failure) {
-      if (!controller.signal.aborted && provider && failure instanceof AIResponseError && failure.retryAfter) {
+      if (!controller.signal.aborted && failure instanceof AIResponseError && failure.retryAfter) {
         setRequestCooldown({ provider, until: Date.now() + failure.retryAfter * 1000, message: failure.message });
       }
       throw failure;
@@ -538,7 +540,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
       if (!Array.isArray(suggestions)) throw new Error("未收到建议。请重试。");
       return suggestions;
     } catch (failure) {
-      if (!controller.signal.aborted && provider && failure instanceof AIResponseError && failure.retryAfter) {
+      if (!controller.signal.aborted && failure instanceof AIResponseError && failure.retryAfter) {
         setRequestCooldown({ provider, until: Date.now() + failure.retryAfter * 1000, message: failure.message });
       }
       throw failure;
