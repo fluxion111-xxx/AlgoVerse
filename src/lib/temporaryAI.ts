@@ -60,6 +60,10 @@ export function useActiveAI() {
   return mode === "platform" ? platformConnections[platformModel] : connections[provider];
 }
 
+export function containsTemporaryAIKey(text: string) {
+  return Object.values(state.keys).some(({ apiKey }) => !!apiKey && text.includes(apiKey));
+}
+
 export function setTemporaryAI(connection: Connection) {
   const provider = connection.selection.provider;
   updateState({

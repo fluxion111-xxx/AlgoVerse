@@ -1,16 +1,19 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { agentCooldown, agentDialogueActive, isAgentConfirmation, type AgentRun, type AgentTask } from "@/lib/experimentAgent";
 import { AIResponseError, readAIResponse } from "@/lib/aiHttp";
 import { formatAIRetryTime, type AICooldown } from "@/lib/aiRateLimit";
 import { maxQuestionLength } from "@/lib/experimentCreator";
+import { getExperimentEngine } from "@/lib/experimentEngines";
 import { agentWorkbenchLink, workbenchFocus, workflowAISettingsRoute, workflowSteps, type ExperimentTask, type WorkbenchFocus, type WorkflowStep } from "@/lib/navigation";
 import type { Diagnosis } from "@/lib/quickStart";
-import { fetchWithTemporaryAI, requestAgentTask as agentRequest, useActiveAI } from "@/lib/temporaryAI";
+import { containsTemporaryAIKey, fetchWithTemporaryAI, requestAgentTask as agentRequest, useActiveAI } from "@/lib/temporaryAI";
 import { WorkbenchIcon } from "./WorkbenchIcon";
 import { WorkbenchActivity, agentPhases } from "./WorkbenchActivity";
+import { useWorkbenchView, WorkbenchHistory, workbenchHistoryRequest } from "./WorkbenchHistory";
 import { AnalysisStage, PlanStage, ResearchStage, RoundPicker, RunStage, StageEmpty, proposalHypothesis, type Plan, type RunDetails } from "./WorkbenchStages";
 
 const steps = Object.keys(workflowSteps) as WorkflowStep[];
@@ -26,10 +29,12 @@ type ActiveRequest = { controller: AbortController; operationId: string; taskId?
 
 const statusReadError = "读取状态失败。请刷新状态。";
 
-export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, reference, referenceRun, savedPlan, fresh, selectedRunId, diagnoses = {} }: {
+export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, initialGuess, reference, referenceRun, savedPlan, fresh, selectedRunId, diagnoses = {}, restoreError }: {
   initial: AgentTask | null;
   initialQuestion?: string;
   initialFocus?: WorkbenchFocus;
+  initialGuess?: string;
+  restoreError?: string;
   reference?: ExperimentTask;
   referenceRun?: AgentRun;
   savedPlan?: Plan;
@@ -37,14 +42,19 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, re
   selectedRunId?: string;
   diagnoses?: Record<string, Diagnosis>;
 }) {
+  const router = useRouter();
   const startFocus = initialFocus ?? (initial?.pending.length || savedPlan ? "plan" : initial?.runs.length || referenceRun ? "run" : "idea");
   const [task, setTask] = useState(initial);
   const [focus, setFocus] = useState<WorkbenchFocus>(startFocus);
   const [message, setMessage] = useState(initialQuestion);
-  const [guess, setGuess] = useState<string>();
+  const [guess, setGuess] = useState(initialGuess);
   const [selectedRun, setSelectedRun] = useState(selectedRunId);
   const [collapsed, setCollapsed] = useState(false);
   const [drawer, setDrawer] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [creationError, setCreationError] = useState("");
+  const historyToggle = useRef<HTMLButtonElement>(null);
   const [busy, setBusy] = useState<"deciding" | "running" | "status" | null>(null);
   const [error, setError] = useState("");
   const [recovery, setRecovery] = useState("");
@@ -70,9 +80,11 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, re
   const explicitRun = runs.find(({ id }) => id === selectedRun);
   const run = explicitRun ?? latest;
   const number = run ? runs.indexOf(run) + 1 : 0;
-  const question = (task?.goal ?? initialQuestion).split("\n我的猜想：")[0];
+  const draftQuestion = reference && !referenceRun && !savedPlan ? message : initialQuestion;
+  const originalQuestion = task?.goal ?? draftQuestion;
+  const question = originalQuestion.split("\n我的猜想：")[0];
   const target = task?.dialogue?.focus?.goal ?? task?.experimentGoal ?? task?.dialogue?.focus?.topic ?? "";
-  const hasResearch = !!(initialQuestion || target);
+  const hasResearch = !!(question || target);
   const activePlan = !!task?.pending.length || (!task && !!savedPlan);
   const savedGuess = proposalHypothesis(task, task?.pending[0] ?? latest);
   const hypothesis = guess ?? savedGuess ?? "";
@@ -112,6 +124,38 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, re
     analysis: !!latest && (!!reports[latest.id] || !!task?.decisions.at(-1)?.evidence.length && task.phase === "finished"
       || !!task?.dialogue?.turns.some((turn) => turn.action === "explain" && turn.evidence.some(({ from, to }) => from === runs.length || to === runs.length))),
   };
+  const researchId = task?.id ?? reference?.sessionId;
+  const storage = useWorkbenchView(researchId, { focus, runId: explicitRun?.id, hypothesis: guess,
+    draftQuestion: task || referenceRun || savedPlan ? undefined : message });
+
+  async function leave(href: string) {
+    await storage.flush();
+    router.push(href);
+  }
+
+  async function newResearch() {
+    if (blocked || creating) return;
+    setCreating(true);
+    setCreationError("");
+    try {
+      await storage.flush();
+      const question = researchId ? "" : message;
+      const hypothesis = researchId ? undefined : guess;
+      if (containsTemporaryAIKey(question) || containsTemporaryAIKey(hypothesis ?? "")) throw new Error("请先移除草稿里的 Key。");
+      const { id } = await workbenchHistoryRequest<{ id: string }>("POST", { question });
+      await workbenchHistoryRequest("PUT", { id, focus: "idea", hypothesis });
+      router.push(agentWorkbenchLink({ sessionId: id, focus: "idea" }));
+    } catch (failure) {
+      setCreationError(failure instanceof Error ? failure.message : "新建失败。请重试。");
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  function closeHistory() {
+    setHistoryOpen(false);
+    requestAnimationFrame(() => historyToggle.current?.focus());
+  }
 
   function workbenchHref(nextFocus: WorkbenchFocus, id?: string, picked?: AgentRun) {
     return agentWorkbenchLink({
@@ -172,7 +216,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, re
       let current = task;
       if (!current && (action === "message" || action === "import")) {
         current = await agentRequest({
-          action: "start", goal: startingGoal ?? (initialQuestion || (action === "import" ? savedPlan?.config.goalLabel : text)),
+          action: "start", goal: startingGoal ?? (draftQuestion || (action === "import" ? savedPlan?.config.goalLabel : text)),
           ...reference, ...(action === "import" && { importPlan: true }),
         }, connection, signal);
         if (signal.aborted) return false;
@@ -329,7 +373,10 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, re
     return () => controller.abort();
   }, [details, taskId, visibleRunId]);
 
-  useEffect(() => () => diagnosisRequest.current?.abort(), []);
+  useEffect(() => () => {
+    active.current?.controller.abort();
+    diagnosisRequest.current?.abort();
+  }, []);
 
   useEffect(() => {
     if (!drawer) return;
@@ -398,37 +445,47 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, re
   }
 
   const stage = steps.find((step) => workbenchFocus[step] === focus)!;
-  const displayTitle = target || question || "未命名研究";
+  const experiment = task?.pending[0] ?? savedPlan ?? latest;
+  const experimentName = experiment && !task?.pending.some(({ tool }) => tool !== experiment.tool)
+    ? getExperimentEngine(experiment.tool, experiment.version)?.creator.title : undefined;
+  const displayTitle = focus === "idea" ? experimentName ?? "实验会话" : target || question || "未命名研究";
   return <main className="algoverse-workbench" onKeyDown={(event) => {
     if (drawer && event.key === "Escape") { event.preventDefault(); closeDrawer(); }
   }}>
     <header className="wb-top" inert={drawer}>
       <div className="wb-brand-row">
-        <Link className="wb-brand" href="/" aria-label="AlgoVerse 智算万象，首页"><WorkbenchIcon icon="triangle" width={21} /><b>AlgoVerse</b></Link>
+        <Link className="wb-brand" href="/" aria-label="AlgoVerse 智算万象，首页" onNavigate={(event) => { event.preventDefault(); void leave("/"); }}><WorkbenchIcon icon="triangle" width={21} /><b>AlgoVerse</b></Link>
         <span className="wb-brand-divider" aria-hidden="true" />
         <span className="wb-product">动态实验工作台</span>
       </div>
       <nav className="wb-top-tools" aria-label="工作台操作">
-        <Link className="wb-button wb-top-link" href="/experiments" title="实验中心" aria-label="实验中心"><WorkbenchIcon icon="layout-grid" width={16} /><span>实验中心</span></Link>
-        <Link className="wb-button wb-top-link" href={settingsHref} title="AI 设置" aria-label="AI 设置"><WorkbenchIcon icon="settings-2" width={16} /><span>AI 设置</span></Link>
+        <button type="button" className="wb-button wb-top-link" title="实验历史" aria-label="实验历史" aria-haspopup="dialog"
+          aria-expanded={historyOpen} ref={historyToggle} onClick={() => setHistoryOpen(true)}>
+          <WorkbenchIcon icon="history" width={16} /><span>实验历史</span>
+        </button>
+        <Link className="wb-button wb-top-link" href="/experiments" title="实验中心" aria-label="实验中心"
+          onNavigate={(event) => { event.preventDefault(); void leave("/experiments"); }}><WorkbenchIcon icon="layout-grid" width={16} /><span>实验中心</span></Link>
+        <Link className="wb-button wb-top-link" href={settingsHref} title="AI 设置" aria-label="AI 设置"
+          onNavigate={(event) => { event.preventDefault(); void leave(settingsHref); }}><WorkbenchIcon icon="settings-2" width={16} /><span>AI 设置</span></Link>
       </nav>
     </header>
     <div className="wb-frame">
       <div className="wb-session" inert={drawer}>
-        <div className="wb-session-name">
+        <div className="wb-session-name" data-research-heading={focus === "idea" || undefined}>
           <span className="wb-session-icon"><WorkbenchIcon icon="folder-open" width={19} /></span>
           <div>
-            <p>实验会话</p>
+            {(focus !== "idea" || experimentName) && <p>实验会话</p>}
             <h1 title={displayTitle}>{displayTitle}</h1>
           </div>
         </div>
         <div className="wb-session-actions">
-          <span className="wb-chip" data-tone={task || reference ? "good" : undefined}><i aria-hidden="true" />{task || reference ? "已保存" : "未开始"}</span>
+          <span className="wb-chip" data-tone={storage.saved && !restoreError ? "good" : undefined}><i aria-hidden="true" />
+            {storage.error || creationError ? "保存失败" : restoreError ? "恢复异常" : storage.saved ? "已保存" : researchId || creating ? "保存中" : "未开始"}</span>
           {runs.length > 0 && <button type="button" className="wb-button wb-history" onClick={() => show("run", selectedRun || latest?.id || runs.at(-1)?.id)}>
             <WorkbenchIcon icon="history" width={16} />{runs.length} 轮记录
           </button>}
-          {(task || reference) && <Link className="wb-button wb-new" href={agentWorkbenchLink({ fresh: true, focus: "idea" })} aria-label="新建会话" title="新建会话"
-            aria-disabled={blocked || undefined} onClick={(event) => { if (blocked) event.preventDefault(); }}><WorkbenchIcon icon="plus" width={16} /><span>新建</span></Link>}
+          <button type="button" className="wb-button wb-new" aria-label="新建会话" title="新建会话"
+            disabled={blocked || creating} onClick={() => void newResearch()}><WorkbenchIcon icon="plus" width={16} /><span>新建</span></button>
         </div>
       </div>
       <nav className="wb-steps" data-focus={focus} aria-label="实验阶段" inert={drawer}>
@@ -449,7 +506,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, re
               <div><h2 id="wb-stage-title">{workflowSteps[stage]}</h2><p>{stageDetails[focus].description}</p></div>
             </div>
             <div className="wb-stage-actions">
-              {(focus === "run" || focus === "analysis") && <RoundPicker runs={runs} run={run} select={selectRound} />}
+              {(focus === "analysis" || (focus === "run" && !run)) && <RoundPicker runs={runs} run={run} select={selectRound} />}
               <button type="button" className="wb-button wb-open-drawer" ref={drawerToggle} aria-expanded={drawer} aria-controls="wb-activity" onClick={() => setDrawer(true)}>
                 <WorkbenchIcon icon="panel-right-open" width={17} /><span>{hasReply ? "回复" : "活动"}</span>
                 {(hasReply || activityStatus || visibleError) && <i aria-hidden="true" />}
@@ -457,13 +514,14 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, re
             </div>
           </header>
           <div className="wb-canvas-body" ref={canvas}>
-            {focus === "idea" && <ResearchStage question={question} target={target} hypothesis={hypothesis} onHypothesis={setGuess}
+            {focus === "idea" && <ResearchStage question={originalQuestion} target={target} hypothesis={hypothesis} onHypothesis={setGuess}
               prefill={prefill} submit={planResearch} blocked={blocked} canSubmit={!modelBlocked && !!(message.trim() || question)} hasPlan={activePlan || !!latest}
               showPlan={() => show("plan")} />}
             {focus === "plan" && <PlanStage task={task} savedPlan={!task ? savedPlan : undefined} lastRun={latest} hasResearch={hasResearch} blocked={blocked} modelBlocked={modelBlocked} canApprove={canApprove}
               retry={retryRun} approve={() => void send("approve")} edit={() => prefill("把实验参数改为：")} importPlan={() => void send("import")}
               showRun={() => show("run", latest?.id)} ask={hasResearch ? planResearch : promptForQuestion} />}
-            {focus === "run" && (run ? <RunStage key={run.id} run={run} details={details} number={number} retry={retryDetails} showAnalysis={() => show("analysis")} />
+            {focus === "run" && (run ? <RunStage run={run} runs={runs} details={details} number={number} selectRound={selectRound}
+              retry={retryDetails} showAnalysis={() => show("analysis")} />
               : <StageEmpty icon="chart-no-axes-column" title={runningNow ? "正在运行实验" : "这里还没有实测"}
                 description={runningNow ? "结果就绪后会显示在这里。" : activePlan ? "先确认方案，再运行。" : "先设计方案，再确认运行。"}>
                 <button type="button" className="wb-button" onClick={() => show("plan")}>查看实验方案 <WorkbenchIcon icon="arrow-right" width={16} /></button>
@@ -503,6 +561,10 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, re
             : recovery ? <span className="wb-dock-context" role="status">{recovery}</span>
             : explicitRun && <span className="wb-dock-context">引用第 {number} 轮</span>}
         </div>
+        {(storage.error || creationError || restoreError) && <div className="wb-save-feedback wb-dock-error" role="alert">
+          {storage.error || creationError || restoreError}
+          {storage.error && <button type="button" className="wb-button" onClick={storage.retry}>重试保存</button>}
+        </div>}
         <form className="wb-composer" onSubmit={(event) => { event.preventDefault(); void send("message"); }}>
           <textarea id="agent-message" ref={input} value={message} onChange={(event) => setMessage(event.target.value)}
             rows={1} maxLength={maxQuestionLength} placeholder="提问、改参数，或分析本轮。"
@@ -518,5 +580,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, re
         <p className="wb-keyboard"><kbd>Enter</kbd> 发送 <span /> <kbd>Shift + Enter</kbd> 换行</p>
       </footer>
     </div>
+    {historyOpen && <WorkbenchHistory currentId={researchId} blocked={blocked || creating} close={closeHistory}
+      open={(href) => { closeHistory(); void leave(href); }} />}
   </main>;
 }

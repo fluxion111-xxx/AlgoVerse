@@ -2,12 +2,13 @@
 
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import type { ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { AgentCall, AgentRun, AgentTask, AgentTurn } from "@/lib/experimentAgent";
 import { creatorObservations } from "@/lib/creatorCapabilities";
 import { getExperimentEngine, type ExperimentResults } from "@/lib/experimentEngines";
 import { evidenceLabels } from "@/lib/experiments/evidence";
 import { experimentReport } from "@/lib/experiments/report";
+import { parameterLabels } from "@/lib/experiments/runComparison";
 import { runAnalysisLink } from "@/lib/navigation";
 import type { Diagnosis } from "@/lib/quickStart";
 import { WorkbenchIcon, type WorkbenchIconName } from "./WorkbenchIcon";
@@ -62,13 +63,29 @@ export function ResearchStage({ question, target, hypothesis, onHypothesis, bloc
   question: string; target: string; hypothesis: string; onHypothesis: (value: string) => void;
   blocked: boolean; prefill: (text: string) => void; submit: () => void; canSubmit: boolean; hasPlan: boolean; showPlan: () => void;
 }) {
+  const questionText = useRef<HTMLParagraphElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [clipped, setClipped] = useState(false);
+
+  useEffect(() => {
+    if (expanded || !questionText.current) return;
+    const element = questionText.current;
+    const measure = () => setClipped(element.scrollHeight > element.clientHeight + 1);
+    measure();
+    const resize = new ResizeObserver(measure);
+    resize.observe(element);
+    return () => resize.disconnect();
+  }, [expanded, question]);
+
   return <div className="wb-research">
     <div className="wb-research-main">
       <section className="wb-research-question" aria-labelledby="wb-question-title">
-        <p className="wb-field-name">研究问题</p>
-        <h2 id="wb-question-title">{question || "你想验证什么？"}</h2>
-        {target && target !== question ? <div className="wb-research-target"><span>研究目标</span><p>{target}</p></div>
-          : !question && <p>在下方输入问题，或选个示例。</p>}
+        <h3 className="wb-field-name" id="wb-question-title">研究问题</h3>
+        <p className="wb-question-text" id="wb-question-text" data-expanded={expanded} ref={questionText}>{question || "你想验证什么？"}</p>
+        {(clipped || expanded) && <button className="wb-question-toggle" type="button" aria-expanded={expanded} aria-controls="wb-question-text"
+          onClick={() => setExpanded(!expanded)}>{expanded ? "收起全文" : "展开全文"}</button>}
+        {target && target !== question && <div className="wb-research-target"><span>研究目标</span><p>{target}</p></div>}
+        {!question && <p className="wb-muted">在下方输入问题，或选个示例。</p>}
         <div className="wb-actions">
           {hasPlan && <button type="button" className="wb-button wb-primary" onClick={showPlan}>
             查看方案 <WorkbenchIcon icon="arrow-right" width={16} />
@@ -98,26 +115,60 @@ export function ResearchStage({ question, target, hypothesis, onHypothesis, bloc
 
 export type Plan = Pick<AgentCall, "tool" | "version" | "config">;
 
-function PlanParameters({ plan }: { plan: Plan }) {
+const planParameterLabels: Readonly<Record<string, string>> = { values: "共用输入", difficulty: "地图难度", nodes: "树节点" };
+const mapDifficulties: Readonly<Record<string, string>> = { easy: "简单", normal: "普通", hard: "困难" };
+
+function planValue(key: string, value: unknown, config: Plan["config"]) {
+  if (key === "policy") return value === "rr" ? "时间片轮转" : "先来先服务";
+  if (key === "directed") return value ? "有向" : "无向";
+  if (key === "difficulty" && typeof value === "string") return mapDifficulties[value] ?? value;
+  if (key === "walls" && "walls" in config) return `${config.walls.length} 格障碍`;
+  if (key === "processes" && "processes" in config) {
+    return config.processes.map(({ arrival, burst }, index) => `P${index + 1} (${arrival}, ${burst})`).join("、");
+  }
+  if (Array.isArray(value)) {
+    if (value.length > 20 || value.some((item) => item !== null && typeof item === "object")) return `${value.length} 项`;
+    return value.map((item) => item ?? "空").join("、") || "空";
+  }
+  if (value && typeof value === "object") return `${Object.keys(value).length} 项`;
+  if (typeof value === "boolean") return value ? "是" : "否";
+  return String(value ?? "空");
+}
+
+function PlanParameters({ plan, group }: { plan: Plan; group?: number }) {
   const { config, tool, version } = plan;
   const engine = getExperimentEngine(tool, version);
+  const observations = engine && creatorObservations[tool];
+  const fields = engine && "curriculum" in engine ? engine.curriculum.fields : undefined;
+  const parameters = Object.entries(config).filter(([key]) => key !== "goalLabel" && key !== "algorithms"
+    && !(key === "quantum" && "policy" in config && config.policy === "fcfs"));
+
   return <article className="wb-plan-tool">
-    <header><WorkbenchIcon icon="flask-conical" width={19} /><h3>{engine?.creator.title ?? tool}</h3><code>{tool}</code></header>
-    <dl className="wb-list">
-      <div><dt>实验目标</dt><dd>{config.goalLabel}</dd></div>
-      {"values" in config && <>
-        <div><dt>算法</dt><dd>冒泡排序 / 快速排序</dd></div>
-        <div><dt>共用输入</dt><dd>{config.values.join("、")}</dd></div>
-      </>}
-      {"walls" in config && <div><dt>共用地图</dt><dd>{config.walls.length} 格障碍</dd></div>}
-      {"processes" in config && <>
-        <div><dt>调度策略</dt><dd>{config.policy === "fcfs" ? "先来先服务" : `时间片轮转 · ${config.quantum}`}</dd></div>
-        <div><dt>进程配置</dt><dd>{config.processes.map(({ arrival, burst }, index) => `P${index + 1} (${arrival}, ${burst})`).join("、")}</dd></div>
-      </>}
-      {"nodes" in config && <div><dt>树节点</dt><dd>{config.nodes.map((node) => node ?? "空").join("、")}</dd></div>}
-      {engine && <div><dt>观察指标</dt><dd>{creatorObservations[tool].metrics}</dd></div>}
-    </dl>
-    <details className="wb-details"><summary>完整参数</summary><pre className="wb-config" tabIndex={0}>{JSON.stringify(config, null, 2)}</pre></details>
+    <header>
+      <WorkbenchIcon icon="flask-conical" width={19} />
+      <h3>{group === undefined ? engine?.creator.title ?? tool : `第 ${group} 组 · ${engine?.creator.title ?? tool}`}</h3>
+      <code>{tool}</code>
+    </header>
+    <div className="wb-plan-columns">
+      <div className="wb-plan-context">
+        <h4>目标与观测</h4>
+        <dl className="wb-list">
+          <div><dt>实验目标</dt><dd>{config.goalLabel}</dd></div>
+          {observations?.comparison && <div><dt>对照条件</dt><dd>{observations.comparison}</dd></div>}
+          {observations && <div><dt>观察指标</dt><dd>{observations.metrics}</dd></div>}
+        </dl>
+      </div>
+      <div className="wb-plan-parameters">
+        <h4>实验参数</h4>
+        <dl className="wb-list">
+          {parameters.map(([key, value]) => <div key={key}>
+            <dt>{fields?.find(([name]) => name === key)?.[1].label ?? planParameterLabels[key] ?? parameterLabels[key] ?? key}</dt>
+            <dd>{planValue(key, value, config)}</dd>
+          </div>)}
+        </dl>
+        <details className="wb-details"><summary>完整参数</summary><pre className="wb-config" tabIndex={0}>{JSON.stringify(config, null, 2)}</pre></details>
+      </div>
+    </div>
   </article>;
 }
 
@@ -134,17 +185,23 @@ export function PlanStage({ task, savedPlan, lastRun, hasResearch, blocked, mode
     </button>
   </StageEmpty>;
 
-  return <div className="wb-content-stack">
-    <section className="wb-panel">
-      <header className="wb-panel-head">
-        <h2>{pending.length ? "本轮方案" : savedPlan ? "保存的方案" : "本轮运行配置"}</h2>
-        {pending.length > 0 && <span className="wb-chip" data-tone="good"><WorkbenchIcon icon="shield-check" width={14} /> 参数校验通过</span>}
-      </header>
-      {decision?.observation && <p className="wb-panel-copy">{decision.observation}</p>}
-      {decision?.plan?.length ? <ol className="wb-plan-steps">{decision.plan.map((step, index) => <li key={index}>{step}</li>)}</ol> : null}
-      {pending.length ? pending.map((call) => <PlanParameters key={call.id} plan={call} />)
+  return <section className="wb-panel wb-plan" aria-labelledby="wb-plan-title">
+    <header className="wb-panel-head">
+      <h2 id="wb-plan-title">{pending.length ? "本轮方案" : savedPlan ? "保存的方案" : "本轮运行配置"}</h2>
+      {pending.length > 0 && <span className="wb-chip" data-tone="good"><WorkbenchIcon icon="shield-check" width={14} /> 参数校验通过</span>}
+    </header>
+    <div className="wb-plan-scroll" tabIndex={0} role="region" aria-label="方案详情">
+      {(decision?.observation || !!decision?.plan?.length) && <section className="wb-plan-overview">
+        <h3>方案说明</h3>
+        {decision.observation && <p>{decision.observation}</p>}
+        {!!decision.plan?.length && <ol className="wb-plan-steps">{decision.plan.map((step, index) => <li key={index}>{step}</li>)}</ol>}
+      </section>}
+      {pending.length ? pending.map((call, index) => <PlanParameters key={call.id} plan={call} group={pending.length > 1 ? index + 1 : undefined} />)
         : <PlanParameters plan={(savedPlan ?? lastRun)!} />}
-      <footer className="wb-panel-foot">
+    </div>
+    <footer className="wb-panel-foot wb-plan-actions">
+      {pending.length > 0 && <p className="wb-muted">{pending.length > 1 ? `本次确认包含 ${pending.length} 组方案。` : "核对参数后再运行。"}</p>}
+      <div className="wb-actions">
         {pending.length > 0 && <>
           <button type="button" className="wb-button" onClick={edit} disabled={blocked}><WorkbenchIcon icon="sliders-horizontal" width={16} /> 修改参数</button>
           <button type="button" className="wb-button wb-primary" onClick={approve} disabled={!canApprove}>
@@ -156,9 +213,9 @@ export function PlanStage({ task, savedPlan, lastRun, hasResearch, blocked, mode
           <button type="button" className="wb-button" onClick={edit} disabled={blocked}>修改后再试</button>
           <button type="button" className="wb-button" onClick={showRun}>查看本轮实测</button>
         </>}
-      </footer>
-    </section>
-  </div>;
+      </div>
+    </footer>
+  </section>;
 }
 
 export type RunDetails = { results: ExperimentResults } | null | undefined;
@@ -175,33 +232,75 @@ export function RoundPicker({ runs, run, select }: { runs: AgentRun[]; run?: Age
   </label>;
 }
 
-export function RunStage({ run, details, number, retry, showAnalysis }: {
-  run: AgentRun; details: RunDetails; number: number; retry: () => void; showAnalysis: () => void;
+const pairedRunMetrics: Partial<Record<AgentRun["tool"], { columns: [string, string]; metrics: string[] }>> = {
+  sorting: { columns: ["冒泡排序", "快速排序"], metrics: ["comparisons", "swaps"] },
+  pathfinding: { columns: ["Dijkstra", "A*"], metrics: ["visited", "pathLength", "elapsedMs"] },
+};
+
+function RunMetrics({ run }: { run: AgentRun }) {
+  const group = pairedRunMetrics[run.tool];
+  const metrics = Object.entries(run.metrics);
+  const pairs = group ? metrics.flatMap(([metric, value]) => {
+    if (!group.metrics.includes(metric)) return [];
+    const [left, right, extra] = value.split(" / ");
+    if (!left || !right || extra !== undefined) return [];
+    const timed = metric === "elapsedMs" && right.endsWith(" ms");
+    return [{ metric, label: timed ? `${evidenceLabels[metric]}（ms）` : evidenceLabels[metric], left, right: timed ? right.slice(0, -3) : right }];
+  }) : [];
+  const remaining = metrics.filter(([key]) => !pairs.some(({ metric }) => metric === key));
+
+  return <div className="wb-run-metric-data">
+    {group && pairs.length > 0 && <table className="wb-run-comparison" aria-label="本轮算法对比">
+      <thead><tr><th scope="col">指标</th>{group.columns.map((name) => <th key={name} scope="col">{name}</th>)}</tr></thead>
+      <tbody>{pairs.map(({ metric, label, left, right }) => <tr key={metric}>
+        <th scope="row">{label}</th><td>{left}</td><td>{right}</td>
+      </tr>)}</tbody>
+    </table>}
+    {remaining.length > 0 && <dl className="wb-metrics">{remaining.map(([metric, value]) => <div key={metric}>
+      <dt>{evidenceLabels[metric]}</dt><dd>{value}</dd>
+    </div>)}</dl>}
+  </div>;
+}
+
+export function RunStage({ run, runs, details, number, selectRound, retry, showAnalysis }: {
+  run: AgentRun; runs: AgentRun[]; details: RunDetails; number: number; selectRound: (id: string) => void;
+  retry: () => void; showAnalysis: () => void;
 }) {
   const engine = getExperimentEngine(run.tool, run.version);
-  return <div className="wb-content-stack wb-run" id={`agent-run-${run.id}`}>
+  const metrics = useRef<HTMLElement>(null);
+  return <div className="wb-run" id={`agent-run-${run.id}`}>
     <header className="wb-panel-head wb-run-title">
-      <div><p className="wb-field-name">第 {number} 轮 · 实测</p><h2>{engine?.creator.title ?? run.tool}</h2></div>
-      <div className="wb-run-links">
-        <Link className="wb-button wb-link" href={runAnalysisLink(run.id)}>打开详情 <WorkbenchIcon icon="arrow-up-right" width={15} /></Link>
-        <button type="button" className="wb-button" onClick={showAnalysis}>查看诊断 <WorkbenchIcon icon="arrow-right" width={16} /></button>
+      <div>
+        {runs.length < 2 && <p className="wb-field-name">第 {number} 轮 · 实测</p>}
+        <h2>{engine?.creator.title ?? run.tool}</h2>
+      </div>
+      <div className="wb-run-toolbar">
+        <RoundPicker runs={runs} run={run} select={selectRound} />
+        <button type="button" className="wb-button wb-link wb-run-metrics-link" onClick={() => {
+          metrics.current?.focus({ preventScroll: true });
+          metrics.current?.scrollIntoView({ block: "start", behavior: "instant" });
+        }}>实测指标 <WorkbenchIcon icon="chevron-down" width={15} /></button>
       </div>
     </header>
-    <section className="wb-panel" aria-labelledby="wb-run-playback-title">
-      <h3 className="sr-only" id="wb-run-playback-title">运行回放</h3>
-      <div className="wb-replay">
-        {details ? <Replay run={run} results={details.results} />
-          : details === null ? <p role="alert">回放加载失败。 <button className="wb-button" type="button" onClick={retry}>重试</button></p>
-          : <p role="status">正在读取运行记录。</p>}
-      </div>
-      <p className="wb-panel-copy wb-muted">AI 关键帧讲解尚未开放。</p>
-    </section>
-    <section className="wb-panel wb-run-summary" aria-label="实测指标">
-      <dl className="wb-metrics">{Object.entries(run.metrics).map(([metric, value]) => <div key={metric}>
-        <dt>{evidenceLabels[metric]}</dt><dd>{value}</dd>
-      </div>)}</dl>
-      {run.tool === "sorting" && <p className="wb-panel-copy wb-muted">指标顺序 · 冒泡 / 快排</p>}
-    </section>
+    <div className="wb-run-grid">
+      <section className="wb-run-playback" aria-labelledby="wb-run-playback-title">
+        <h3 className="sr-only" id="wb-run-playback-title">运行回放</h3>
+        <div className="wb-replay">
+          {details ? <Replay key={run.id} run={run} results={details.results} />
+            : details === null ? <p role="alert">回放加载失败。 <button className="wb-button" type="button" onClick={retry}>重试</button></p>
+            : <p role="status">正在读取运行记录。</p>}
+        </div>
+        <p className="wb-panel-copy wb-muted">AI 关键帧讲解尚未开放。</p>
+      </section>
+      <section className="wb-run-summary" ref={metrics} tabIndex={-1} aria-labelledby="wb-run-metrics-title">
+        <h3 id="wb-run-metrics-title">实测指标</h3>
+        <RunMetrics key={run.id} run={run} />
+        <div className="wb-run-links">
+          <button type="button" className="wb-button" onClick={showAnalysis}>查看诊断 <WorkbenchIcon icon="arrow-right" width={16} /></button>
+          <Link className="wb-button wb-link" href={runAnalysisLink(run.id)}>打开详情 <WorkbenchIcon icon="arrow-up-right" width={15} /></Link>
+        </div>
+      </section>
+    </div>
   </div>;
 }
 

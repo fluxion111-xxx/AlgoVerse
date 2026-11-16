@@ -10,6 +10,8 @@ import { experimentEvidence } from "@/lib/experiments/evidence";
 import type { ComparisonRun } from "@/lib/experiments/runComparison";
 import type { PracticeAttempts, PracticeDetail, PracticeDetails } from "@/lib/knowledgePractice";
 import { quickStartQuestion, type Diagnosis, type QuickStartPlan } from "@/lib/quickStart";
+import { agentWorkbenchLink } from "@/lib/navigation";
+import { isWorkbenchFocus, type WorkbenchHistoryItem, type WorkbenchView } from "@/lib/workbenchHistory";
 
 const visitorCookie = "algoverse_visitor";
 const taskCookie = "algoverse_task";
@@ -485,7 +487,15 @@ export async function getAgentTask(id: unknown): Promise<AgentTask | null> {
   const owner = await visitor();
   if (!owner || !isRecordId(id)) return null;
   const path = await latestAgentRevision(owner, id);
-  return path ? readRecord<AgentTask>(path) : null;
+  return path ? readAgentRevision(path, id) : null;
+}
+
+async function readAgentRevision(path: string, id: string) {
+  const task = await readRecord<AgentTask>(path);
+  if (task && (task.id !== id || typeof task.goal !== "string" || typeof task.phase !== "string" || !Number.isSafeInteger(task.revision)
+    || !Array.isArray(task.pending) || !Array.isArray(task.runs) || !Array.isArray(task.decisions)
+    || (task.dialogue && !Array.isArray(task.dialogue.turns)))) throw new Error("Invalid agent record");
+  return task;
 }
 
 export async function getTutorHistory(): Promise<TutorConversationSummary[]> {
@@ -518,9 +528,13 @@ async function rememberAgentTask(task: AgentTask) {
 }
 
 export async function createAgentTask(goal: string, reference?: ExperimentSession, run?: ExperimentRun,
-  { importPlan = false, tutorContext }: { importPlan?: boolean; tutorContext?: TutorContext } = {}) {
+  { importPlan = false, tutorContext, researchId }: { importPlan?: boolean; tutorContext?: TutorContext; researchId?: string } = {}) {
   const owner = await ensureVisitor();
-  const id = randomUUID();
+  const id = researchId ?? randomUUID();
+  if (researchId) {
+    const existing = await getAgentTask(id);
+    if (existing) return rememberAgentTask(existing);
+  }
   const pending = importPlan && reference ? [{ id: randomUUID(), sessionId: randomUUID(), tool: reference.engineId,
     version: reference.engineVersion, config: reference.config }] : [];
   const task = await writeOnce<AgentTask>(agentRevisionPath(owner, id, 0), {
@@ -569,4 +583,133 @@ export async function saveDiagnosis(diagnosis: Diagnosis) {
   const owner = await visitor();
   if (!owner || !isRecordId(diagnosis.runId)) return null;
   return writeOnce(recordPath(owner, "diagnoses", diagnosis.runId), diagnosis);
+}
+
+async function replaceWorkbenchRecord(path: string, value: object) {
+  await mkdir(dirname(path), { recursive: true });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, JSON.stringify(value), { flag: "wx", mode: 0o600 });
+    await rename(temporary, path);
+  } finally {
+    await rm(temporary, { force: true });
+  }
+}
+
+async function readWorkbenchView(owner: string, id: string) {
+  const view = await readRecord<WorkbenchView>(recordPath(owner, "workbench-views", id));
+  if (view && (!isWorkbenchFocus(view.focus) || (view.runId !== undefined && !isRecordId(view.runId))
+    || (view.hypothesis !== undefined && typeof view.hypothesis !== "string")
+    || (view.draftQuestion !== undefined && typeof view.draftQuestion !== "string"))) throw new Error("Invalid workbench view");
+  return view;
+}
+
+export async function getWorkbenchView(id: string | undefined) {
+  const owner = await visitor();
+  return owner && isRecordId(id) ? readWorkbenchView(owner, id) : null;
+}
+
+export async function hasWorkbenchVisitor() {
+  return !!await visitor();
+}
+
+export async function saveWorkbenchView(id: unknown, view: WorkbenchView) {
+  const owner = await visitor();
+  if (!owner) return "cookie";
+  if (!isRecordId(id)) return "missing";
+  const task = await getAgentTask(id);
+  const workflow = task ? null : await getExperimentWorkflow(id);
+  if (!task && !workflow) return "missing";
+  const runId = view.runId;
+  if (runId && !(task ? task.runs.some(({ id }) => id === runId) : (await getExperimentRun(runId))?.session.id === id)) return "missing";
+  await replaceWorkbenchRecord(recordPath(owner, "workbench-views", id), {
+    ...view, draftQuestion: task ? undefined : view.draftQuestion,
+  });
+  await replaceWorkbenchRecord(recordPath(owner, "workbench-active", "current"), { id });
+  return "saved";
+}
+
+function workbenchHistoryEntry(id: string, task: AgentTask | null, view: WorkbenchView | null,
+  updatedAt: string, workflow?: Awaited<ReturnType<typeof getExperimentWorkflow>>, runs: ExperimentRun[] = []): WorkbenchHistoryItem {
+  const last = runs.find((run) => run.id === view?.runId) ?? runs.find((run) => (run.session.revision ?? 0) === workflow?.revision);
+  const runId = task ? task.runs.find(({ id }) => id === view?.runId)?.id : last?.id;
+  const question = task?.goal ?? view?.draftQuestion ?? workflow?.question ?? "";
+  const title = task?.dialogue?.focus?.goal || task?.experimentGoal || workflow?.plan?.config.goalLabel || question || "未命名研究";
+  return {
+    id, title, question, updatedAt, rounds: task?.runs.length ?? runs.length,
+    phase: task?.phase ?? (last ? "observe" : workflow?.plan ? "confirm" : "draft"),
+    href: agentWorkbenchLink({ agentId: task?.id, sessionId: task ? undefined : id, focus: view?.focus, runId }),
+  };
+}
+
+export async function getWorkbenchHistory() {
+  const owner = await visitor();
+  if (!owner) return { items: [], partial: false };
+  const [agents, drafts, sessions] = await Promise.all(["agent-tasks", "workflow-drafts", "sessions"].map((name) => collectionFiles(owner, name)));
+  const asId = (name: string) => name.endsWith(".json") ? name.slice(0, -5) : "";
+  const ids = [...new Set([...agents, ...drafts.map(asId), ...sessions.map(asId)].filter(isRecordId))];
+  const legacyRuns = new Map<string, ExperimentRun[]>();
+  let partial = false;
+  const agentIds = new Set(agents);
+  const candidates = new Set(ids.filter((id) => !agentIds.has(id)));
+  if (candidates.size) {
+    try {
+      for await (const runs of readRunBatches(owner)) {
+        for (const run of runs) {
+          if (!run || !candidates.has(run.session?.id) || run.session.source?.type === "agent") continue;
+          const list = legacyRuns.get(run.session.id) ?? [];
+          list.push(run);
+          legacyRuns.set(run.session.id, list);
+        }
+      }
+    } catch { partial = true; }
+  }
+  const items: WorkbenchHistoryItem[] = [];
+  for (let offset = 0; offset < ids.length; offset += 16) {
+    const entries = await Promise.all(ids.slice(offset, offset + 16).map(async (id) => {
+      try {
+        const agentPath = await latestAgentRevision(owner, id);
+        const task = agentPath ? await readAgentRevision(agentPath, id) : null;
+        if (task?.tutorContext && !task.decisions.some(({ calls }) => calls?.length) && !task.runs.length) return null;
+        const workflow = task ? null : await getExperimentWorkflow(id);
+        const viewPath = recordPath(owner, "workbench-views", id);
+        const view = await readWorkbenchView(owner, id).catch(() => { partial = true; return null; });
+        if (!task && !workflow?.isAI && !view) return null;
+        if (!task && typeof workflow?.question !== "string") throw new Error("Invalid workflow record");
+        const storedPath = draftRecordPath(owner, id, drafts);
+        const times = await Promise.all([agentPath ?? storedPath, ...(view ? [viewPath] : [])].map(async (path) => (await stat(path)).mtime.toISOString()));
+        const runs = (legacyRuns.get(id) ?? []).sort((a, b) => b.completedAt.localeCompare(a.completedAt));
+        return workbenchHistoryEntry(id, task, view, [runs[0]?.completedAt ?? "", ...times].sort().at(-1)!, workflow, runs);
+      } catch { partial = true; return null; }
+    }));
+    items.push(...entries.filter((entry) => entry !== null));
+  }
+  items.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
+  return { items, partial };
+}
+
+function draftRecordPath(owner: string, id: string, drafts: string[]) {
+  return recordPath(owner, drafts.includes(id + ".json") ? "workflow-drafts" : "sessions", id);
+}
+
+export async function getWorkbenchResume() {
+  const owner = await visitor();
+  if (!owner) return { item: null, partial: false };
+  let partial = false;
+  try {
+    const active = await readRecord<{ id: string }>(recordPath(owner, "workbench-active", "current"));
+    if (active && !isRecordId(active.id)) throw new Error("Invalid workbench pointer");
+    if (active) {
+      const { id } = active;
+      const [task, view] = await Promise.all([getAgentTask(id), readWorkbenchView(owner, id)]);
+      const workflow = task ? null : await getExperimentWorkflow(id);
+      if (view && (task || workflow)) {
+        const run = !task && view.runId ? await getExperimentRun(view.runId) : null;
+        return { item: workbenchHistoryEntry(id, task, view, "", workflow, run?.session.id === id ? [run] : []), partial: false };
+      }
+      partial = true;
+    }
+  } catch { partial = true; }
+  const history = await getWorkbenchHistory();
+  return { item: history.items[0] ?? null, partial: partial || history.partial };
 }

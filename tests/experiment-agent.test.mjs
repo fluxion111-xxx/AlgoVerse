@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { test } from "node:test";
 
 const scope = Symbol.for("algoverse.test.agentCookies");
@@ -20,6 +20,7 @@ registerHooks({
   },
 });
 const { POST } = await import("../src/app/api/experiments/agent/route.ts");
+const historyAPI = await import("../src/app/api/experiments/history/route.ts");
 const { POST: diagnosisPOST } = await import("../src/app/api/experiments/runs/[runId]/diagnosis/route.ts");
 const { GET: replayGET } = await import("../src/app/api/experiments/runs/[runId]/replay/route.ts");
 const { POST: tutorPOST } = await import("../src/app/api/ai/tutor/route.ts");
@@ -27,7 +28,7 @@ const { POST: learningPOST } = await import("../src/app/api/ai/learning/route.ts
 const { agentTools, prepareToolCall } = await import("../src/lib/server/agentTools.ts");
 const { createAIExperimentSession, createWorkbenchSession, confirmExperimentSession, runExperimentSession, getComparableExperimentRuns,
   getActiveAgentTask, getExperimentRun, getExperimentSession, runConfirmedAgentCall, getAgentTask, getTutorHistory, saveDiagnosis,
-  getLearningProgress, submitKnowledgeExercise } = await import("../src/lib/server/experimentRecords.ts");
+  getLearningProgress, submitKnowledgeExercise, getDiagnosis, getWorkbenchResume, getWorkbenchView } = await import("../src/lib/server/experimentRecords.ts");
 const { learningSuggestion } = await import("../src/lib/learningPath.ts");
 const { getExperimentEngine, registeredEngines } = await import("../src/lib/experimentEngines.ts");
 const { experimentQuestions, nextExperimentQuestion } = await import("../src/lib/experimentQuestions.ts");
@@ -163,6 +164,91 @@ function modelReply(content, finishReason = "stop") {
 
 const sortingPlan = { action: "run", plan: ["比较两种排序"], observation: "用同一组数比较。",
   calls: [{ tool: "sorting", parameters: { goalLabel: "比较排序", values: [5, 2, 9, 1] } }] };
+
+function historyRequest(method, body) {
+  return historyAPI[method](new Request("https://algoverse.test/api/experiments/history", {
+    method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  }));
+}
+
+test("workbench history restores separate researches, approved runs, pending plans, and Agent context", async (t) => {
+  const questionA = "研究甲：比较排序的交换次数。";
+  const questionB = "研究乙：用另一个数组比较排序。";
+  const hypothesis = "我猜快排交换更少。";
+  const followup = "刚才的比较用了哪些数？";
+  const { post } = await setup(t, "192.0.2.92", (input) => {
+    if (input.message === questionB) return { ...sortingPlan, calls: [{ tool: "sorting", parameters: {
+      goalLabel: "研究乙的排序", values: [8, 3, 4],
+    } }] };
+    if (input.message === followup) {
+      assert.ok(input.conversation[0].message.startsWith(questionA));
+      assert.deepEqual(input.runs[0].config.values, [5, 2, 9, 1]);
+      return { action: "answer", observation: "用的是研究甲的四个数。" };
+    }
+    return sortingPlan;
+  });
+  const { id: a } = await (await historyRequest("POST", { question: questionA })).json();
+  assert.equal((await historyRequest("PUT", { id: a, focus: "idea", hypothesis })).status, 200);
+  assert.equal((await getWorkbenchView(a)).hypothesis, hypothesis);
+  let taskA = (await post("start", null, { sessionId: a, goal: questionA })).task;
+  assert.equal(taskA.id, a);
+  taskA = (await post("message", taskA, { message: questionA + "\n我的猜想：" + hypothesis })).task;
+  const pendingA = taskA.pending[0];
+  assert.equal((await post("start", null, { sessionId: a, goal: "重复提交" })).task.revision, taskA.revision);
+  assert.equal((await post("status", taskA)).task.phase, "confirm");
+  assert.equal(await getExperimentRun(pendingA.id), null);
+  taskA = (await post("approve", taskA)).task;
+  const run = await getExperimentRun(pendingA.id);
+  const diagnosis = { runId: run.id, model, promptVersion: 5, createdAt: run.completedAt,
+    conclusion: "实测结论", explanation: "结合排序轨迹。", suggestion: "固定输入。", evidence: ["comparisons"] };
+  await saveDiagnosis(diagnosis);
+  assert.equal((await historyRequest("PUT", { id: a, focus: "analysis", runId: run.id, hypothesis })).status, 200);
+
+  const { id: b } = await (await historyRequest("POST", { question: questionB })).json();
+  assert.notEqual(b, a);
+  let taskB = (await post("start", null, { sessionId: b, goal: questionB })).task;
+  taskB = (await post("message", taskB, { message: questionB })).task;
+  assert.equal((await historyRequest("PUT", { id: b, focus: "plan" })).status, 200);
+  assert.equal((await getWorkbenchResume()).item.id, b);
+  const { items } = await (await historyAPI.GET()).json();
+  assert.equal(items.length, 2);
+  assert.equal(items.find(({ id }) => id === a).rounds, 1);
+  assert.equal(items.find(({ id }) => id === b).phase, "confirm");
+  assert.equal(await getExperimentRun(taskB.pending[0].id), null);
+  assert.equal((await historyRequest("PUT", { id: b, focus: "run", runId: run.id })).status, 404);
+  assert.equal((await historyRequest("PUT", { id: a, focus: "analysis", runId: run.id, hypothesis })).status, 200);
+  const resumed = (await getWorkbenchResume()).item;
+  assert.equal(resumed.id, a);
+  assert.match(resumed.href, /focus=analysis/);
+  assert.ok(resumed.href.includes(run.id));
+  assert.deepEqual(await getDiagnosis(run.id), diagnosis);
+  assert.deepEqual((await post("status", taskB)).task.pending[0].config.values, [8, 3, 4]);
+  const continued = (await post("message", (await getAgentTask(a)), { message: followup, selectedRunId: run.id })).task;
+  assert.equal(continued.dialogue.turns.at(-1).reply, "用的是研究甲的四个数。");
+  assert.deepEqual(await getExperimentRun(run.id), run);
+});
+
+test("workbench history reports unreadable storage and rejects writes without the owner cookie", async (t) => {
+  const { values } = await setup(t, "192.0.2.93", () => { throw new Error("No model should be called"); });
+  const { id } = await (await historyRequest("POST", { question: "保留有效记录" })).json();
+  assert.equal((await historyRequest("PUT", { id, focus: "idea" })).status, 200);
+  const ownerCookie = values.get("algoverse_visitor");
+  const folder = createHash("sha256").update(ownerCookie.value).digest("hex");
+  const corruptView = join(process.env.ALGOVERSE_DATA_DIR, folder, "workbench-views", id + ".json");
+  await writeFile(corruptView, "{");
+  const damaged = await (await historyAPI.GET()).json();
+  assert.equal(damaged.partial, true);
+  assert.equal(damaged.items[0].id, id);
+  assert.equal((await getWorkbenchResume()).partial, true);
+  values.delete("algoverse_visitor");
+  assert.equal((await historyRequest("PUT", { id, focus: "idea" })).status, 401);
+  assert.deepEqual((await (await historyAPI.GET()).json()).items, []);
+  values.set("algoverse_visitor", ownerCookie);
+  await rm(corruptView);
+  // A directory in place of the destination causes the atomic write to fail.
+  await mkdir(corruptView);
+  assert.equal((await historyRequest("PUT", { id, focus: "plan" })).status, 503);
+});
 
 test("learning advice uses the saved wrong choice and varies even when the model repeats", async (t) => {
   const ip = "192.0.2.43";

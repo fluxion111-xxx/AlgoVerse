@@ -6,7 +6,7 @@ import { getExperimentEngine, pathfindingEngine, type ExperimentConfig } from "@
 import { agentWorkbenchLink, workflowRoute, withExperimentTask } from "@/lib/navigation";
 import { maxQuestionLength } from "@/lib/experimentCreator";
 import { getExperimentTopic } from "@/lib/knowledge";
-import { confirmExperimentSession, createWorkbenchSession, createWorkflowDraft, getExperimentRun, getExperimentWorkflow, getQuickStart, rememberExperimentTask, runExperimentSession, saveWorkflowRevision } from "@/lib/server/experimentRecords";
+import { confirmExperimentSession, createWorkbenchSession, createWorkflowDraft, getExperimentRun, getExperimentWorkflow, getQuickStart, rememberExperimentTask, runExperimentSession, saveWorkbenchView, saveWorkflowRevision } from "@/lib/server/experimentRecords";
 
 export async function saveExperimentQuestion(form: FormData): Promise<{ sessionId: string; revision: number } | { error: string }> {
   const input = form.get("question");
@@ -39,6 +39,9 @@ export async function openExperimentQuestion(_error: string, form: FormData): Pr
     const draft = new FormData();
     draft.set("question", question.replace(/\r\n?/gu, "\n"));
     saved = await saveExperimentQuestion(draft);
+    if (!("error" in saved) && await saveWorkbenchView(saved.sessionId, { focus: "idea" }) !== "saved") {
+      return "无法保存。请检查本站 Cookie。";
+    }
   } catch {
     return "保存失败，请重试。";
   }

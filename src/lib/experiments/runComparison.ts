@@ -45,7 +45,7 @@ function countChange(before: string | undefined, after: string | undefined, acti
   }).join("");
 }
 
-const parameterLabels: Record<string, string> = {
+export const parameterLabels: Readonly<Record<string, string>> = {
   walls: "障碍布局", start: "起点", goal: "终点", policy: "调度策略", quantum: "时间片", processes: "进程配置",
   packets: "发包量", links: "链路设置", seed: "模拟种子", factorialInput: "阶乘输入", order: "节点阶数", keys: "插入序列",
   lower: "查询下界", upper: "查询上界", k: "邻居数", metric: "距离算法", samples: "样本", query: "待分类点",

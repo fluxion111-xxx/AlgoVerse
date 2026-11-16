@@ -12,17 +12,17 @@ import { learningTopicRoute } from "@/lib/curriculum";
 import { experimentReviewTopics, knowledgeTopicRoute } from "@/lib/knowledge";
 import { getExperimentEngine, registeredEngines } from "@/lib/experimentEngines";
 import { experimentDomains } from "@/lib/experiments/engine";
-import { experimentTaskLinks, quickStartRoute, runAnalysisLink, withExperimentTask, workbenchFocus, workflowAISettingsRoute, workflowRoute, workflowSteps, type WorkflowStep } from "@/lib/navigation";
+import { agentWorkbenchLink, experimentTaskLinks, quickStartRoute, runAnalysisLink, withExperimentTask, workbenchFocus, workflowAISettingsRoute, workflowRoute, workflowSteps, type WorkflowStep } from "@/lib/navigation";
 import { experimentEvidence } from "@/lib/experiments/evidence";
 import { expandSavedDiagnosis } from "@/lib/server/experimentAI";
 import { getExperimentContext, type ExperimentSearch } from "@/lib/server/experimentContext";
-import { getActiveAIWorkflow, getActiveAgentTask, getAgentTask, getDiagnosis, getExperimentRun, getQuickStart } from "@/lib/server/experimentRecords";
+import { getActiveAIWorkflow, getAgentTask, getDiagnosis, getExperimentRun, getQuickStart, getWorkbenchResume, getWorkbenchView, hasWorkbenchVisitor } from "@/lib/server/experimentRecords";
 import type { Diagnosis } from "@/lib/quickStart";
 import { runCreatorExperiment } from "../actions";
 import "./creator-flow.css";
 import "./agent-workbench.css";
 
-type WorkflowSearch = ExperimentSearch & { step?: string; engine?: string; mode?: string; guide?: string; diagnose?: string; updated?: string; agentId?: string; focus?: string; intent?: string; new?: string };
+type WorkflowSearch = ExperimentSearch & { step?: string; engine?: string; mode?: string; guide?: string; diagnose?: string; updated?: string; agentId?: string; focus?: string; intent?: string; new?: string; historyWarning?: string };
 type Context = Awaited<ReturnType<typeof getExperimentContext>>;
 
 export const metadata: Metadata = { title: "AI 实验创造台｜AlgoVerse" };
@@ -108,30 +108,59 @@ export default async function CreatorPage({ searchParams }: { searchParams: Prom
     if (params.intent !== undefined && (typeof params.intent !== "string" || !Object.hasOwn(workflowSteps, params.intent))) notFound();
     const intent = (params.intent ?? legacyIntent ?? (params.mode === "question" ? "question" : undefined)) as WorkflowStep | undefined;
     const focus = Object.values(workbenchFocus).find((value) => value === params.focus) ?? (intent && workbenchFocus[intent]);
+    if ((explicitTask || params.agentId) && !await hasWorkbenchVisitor()) {
+      return <AgentWorkbench initial={null} initialFocus={focus} restoreError="无法恢复。请检查本站 Cookie。" />;
+    }
+    let restoreError = "";
+    if (!explicitTask && !params.agentId && params.new !== "1") {
+      const resume = await getWorkbenchResume();
+      if (resume.partial) restoreError = "部分历史无法读取。";
+      if (resume.item) {
+        const url = new URL(resume.item.href, "http://localhost");
+        if (focus) url.searchParams.set("focus", focus);
+        if (resume.partial) url.searchParams.set("historyWarning", "1");
+        redirect(url.pathname + url.search);
+      }
+    }
     const context = await getExperimentContext(explicitTask ? params : {});
     const source = context.run?.session.source;
     const sourceId = source?.type === "agent" ? source.taskId : undefined;
     const id = params.agentId ?? sourceId;
-    const task = id !== undefined ? await getAgentTask(id) : explicitTask || params.new === "1" ? null : await getActiveAgentTask();
+    const task = id !== undefined ? await getAgentTask(id) : !context.run && context.workflow?.isAI ? await getAgentTask(context.workflow.id) : null;
     if (id !== undefined && (!task || (context.run && !task.runs.some(({ id }) => id === context.run?.id)) ||
-      (params.sessionId && !context.run && ![...task.runs, ...task.pending].some(({ sessionId }) => sessionId === params.sessionId)))) notFound();
-    const legacyTask = !task && !explicitTask && params.new !== "1" ? await getActiveAIWorkflow() : null;
-    const reference = context.task ? context : legacyTask ? await getExperimentContext(legacyTask) : null;
-    const legacyRun = !task ? reference?.run : undefined;
+      (params.sessionId && !context.run && params.sessionId !== task.id && ![...task.runs, ...task.pending].some(({ sessionId }) => sessionId === params.sessionId)))) notFound();
+    const reference = context.task ? context : null;
+    const view = await getWorkbenchView(task?.id ?? reference?.task?.sessionId).catch(() => {
+      restoreError = "上次位置无法读取。";
+      return null;
+    });
+    if (!restoreError && params.historyWarning === "1") restoreError = "部分历史无法读取。";
+    const viewRun = !task && !reference?.run && view?.runId ? await getExperimentRun(view.runId).catch(() => {
+      restoreError = "上次运行无法读取。";
+      return null;
+    }) : null;
+    const legacyRun = !task ? reference?.run ?? (viewRun?.session.id === reference?.task?.sessionId ? viewRun : null) : null;
     const referenceRun = legacyRun && {
       id: legacyRun.id, sessionId: legacyRun.session.id, tool: legacyRun.session.engineId, version: legacyRun.session.engineVersion,
       config: legacyRun.session.config, completedAt: legacyRun.completedAt, metrics: experimentEvidence(legacyRun.results),
     };
     const pairs = await Promise.all((task?.runs ?? (referenceRun ? [referenceRun] : [])).map(async ({ id }) => {
       const diagnosis = await getDiagnosis(id);
+      if (diagnosis && (diagnosis.runId !== id || !Array.isArray(diagnosis.evidence)
+        || typeof diagnosis.conclusion !== "string" || typeof diagnosis.explanation !== "string")) throw new Error("Invalid diagnosis record");
       const saved = diagnosis && diagnosis.promptVersion < 5 ? await getExperimentRun(id) : null;
       return [id, diagnosis && saved ? expandSavedDiagnosis(saved, diagnosis) : diagnosis] as const;
-    }));
-    const diagnoses = Object.fromEntries(pairs.filter((pair): pair is readonly [string, Diagnosis] => pair[1] !== null));
+    }).map((pair) => pair.catch(() => {
+      restoreError = "部分诊断无法读取。";
+      return null;
+    })));
+    const diagnoses = Object.fromEntries(pairs.filter((pair): pair is readonly [string, Diagnosis] => !!pair?.[1]));
     return <AgentWorkbench key={`${task?.id ?? reference?.task?.sessionId ?? "new"}:${focus ?? "default"}:${context.run?.id ?? ""}:${params.new ?? ""}`}
-      initial={task} initialFocus={focus} diagnoses={diagnoses}
-      initialQuestion={!task ? legacyRun?.session.question ?? reference?.workflow?.question : undefined}
-      fresh={params.new === "1"} reference={reference?.task ?? undefined} referenceRun={referenceRun ?? undefined} selectedRunId={context.run?.id}
+      initial={task} initialFocus={focus ?? view?.focus} diagnoses={diagnoses} restoreError={restoreError} initialGuess={view?.hypothesis}
+      initialQuestion={!task ? view?.draftQuestion ?? legacyRun?.session.question ?? reference?.workflow?.question : undefined}
+      fresh={params.new === "1"} reference={reference?.task ? { ...reference.task, runId: legacyRun?.id ?? reference.task.runId } : undefined}
+      referenceRun={referenceRun ?? undefined}
+      selectedRunId={context.run?.id ?? legacyRun?.id ?? task?.runs.find(({ id }) => id === view?.runId)?.id}
       savedPlan={!task && !legacyRun && reference?.session ? {
         tool: reference.session.engineId, version: reference.session.engineVersion, config: reference.session.config,
       } : undefined} />;

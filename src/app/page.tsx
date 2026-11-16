@@ -6,7 +6,7 @@ import { CatalogIcon } from "@/components/experiments/CatalogEffects";
 import { EditorialStory } from "@/components/experiments/EditorialStory";
 import { ExperimentPrompt } from "@/components/experiments/ExperimentPrompt";
 import { agentWorkbenchLink, quickStartRoute, workbenchFocus, workflowSteps } from "@/lib/navigation";
-import { getActiveAIWorkflow, getActiveAgentTask } from "@/lib/server/experimentRecords";
+import { getWorkbenchResume } from "@/lib/server/experimentRecords";
 import "./home-editorial.css";
 import "./story-editorial.css";
 
@@ -19,9 +19,9 @@ const workflowImages = {
 } satisfies Record<keyof typeof workflowSteps, { photo: string; position: string; label: string; description: string }>;
 
 async function ResumeExperiment() {
-  const [agent, task] = await Promise.all([getActiveAgentTask(), getActiveAIWorkflow()]);
-  if (!agent && !task) return null;
-  return <NavigationLink className="editorial-resume" href={agentWorkbenchLink({ agentId: agent?.id })}>
+  const resume = await getWorkbenchResume().catch(() => null);
+  if (resume && !resume.item && !resume.partial) return null;
+  return <NavigationLink className="editorial-resume" href={resume?.partial ? agentWorkbenchLink() : resume?.item?.href ?? agentWorkbenchLink()}>
     继续上次实验 <CatalogIcon icon="lucide:arrow-up-right" width={16} />
   </NavigationLink>;
 }
