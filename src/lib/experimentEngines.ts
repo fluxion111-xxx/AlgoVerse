@@ -18,6 +18,7 @@ import { tcpCongestionEngine } from "./experiments/tcpCongestion";
 import { dynamicRoutingEngine } from "./experiments/dynamicRouting";
 import { memoryAllocationEngine } from "./experiments/memoryAllocation";
 import { transactionConcurrencyEngine } from "./experiments/transactionConcurrency";
+import { curriculumLabs } from "./experiments/curriculumLabs";
 
 const algorithms = ["dijkstra", "astar"] as const;
 const difficulties = ["easy", "normal", "hard"] as const;
@@ -97,6 +98,7 @@ export const registeredEngines = [
   pageReplacementEngine, hashCollisionsEngine, kMeansEngine, gradientDescentEngine,
   treeTraversalEngine, graphTraversalEngine, deadlockAvoidanceEngine, tcpCongestionEngine,
   dynamicRoutingEngine, memoryAllocationEngine, transactionConcurrencyEngine,
+  ...curriculumLabs,
 ] as const;
 export type ExperimentEngine = typeof registeredEngines[number];
 export type EngineId = ExperimentEngine["id"];

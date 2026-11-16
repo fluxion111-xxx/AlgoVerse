@@ -1,6 +1,8 @@
 import type { ExperimentResults } from "../experimentEngines";
+import { curriculumLabs } from "./curriculumLabs";
 
 export function experimentEvidence(results: ExperimentResults): Record<string, string> {
+  if ("report" in results) return results.metrics;
   if ("dijkstra" in results) {
     const { dijkstra, astar } = results;
     return {
@@ -76,6 +78,7 @@ export function experimentEvidence(results: ExperimentResults): Record<string, s
 }
 
 export const evidenceLabels: Record<string, string> = {
+  ...Object.assign({}, ...curriculumLabs.map(({ curriculum }) => curriculum.metricLabels)),
   visited: "访问节点", pathLength: "路径长度", elapsedMs: "耗时", comparisons: "比较次数", swaps: "交换次数", sorted: "排序结果",
   waiting: "平均等待", turnaround: "平均周转", response: "平均响应", switches: "进程切换", route: "所选路由", delivered: "送达", dropped: "丢包", lossRate: "实测丢包率", latency: "平均送达延迟",
   factorial: "阶乘结果", stackDepth: "最大栈深", calls: "调用次数", treeHeight: "树高（层）", splits: "分裂次数", visitedNodes: "查询访问节点", matches: "命中键",

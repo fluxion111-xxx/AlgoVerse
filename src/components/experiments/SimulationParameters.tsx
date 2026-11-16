@@ -11,6 +11,7 @@ import { RoutingMemoryTransactionFields } from "./RoutingMemoryTransactionFields
 import { DynamicRoutingReplay, HeapReplay, TransactionReplay } from "./RoutingMemoryTransactionReplay";
 import { NetworkReplay, SchedulingReplay, SortingReplay } from "./SimulationReplay";
 import { FactorialFields, KnnFields, NetworkFields, numberValue, SchedulingFields } from "./SimulationFields";
+import { CurriculumFields, CurriculumReplay } from "./CurriculumLab";
 
 type Parameters = Record<string, unknown>;
 
@@ -43,6 +44,7 @@ export function SimulationWorkbench({ engineId, initial, results, action, sessio
   });
   const changed = JSON.stringify(parameters) !== JSON.stringify(editable(initial));
   const engine = getExperimentEngine(engineId);
+  const curriculum = engine && "curriculum" in engine ? engine : undefined;
   const validated = engine?.configure(parameters, "seed" in initial ? initial.seed : 0);
   const config = validated ?? initial;
   const visibleResults = changed ? undefined : results;
@@ -59,6 +61,7 @@ export function SimulationWorkbench({ engineId, initial, results, action, sessio
         <input type="hidden" name="engineId" value={engineId} />
         <input type="hidden" name="runId" value={nextRunId} />
         {(!sessionId || changed) && <input type="hidden" name="parameters" value={JSON.stringify(parameters)} />}
+        {curriculum && <CurriculumFields lab={curriculum.curriculum} parameters={parameters} update={setParameters} />}
         {"values" in initial && <div className="simulation-fields">
           <label htmlFor="simulation-values">整数序列</label>
           <input id="simulation-values" value={sequence} maxLength={140} onChange={(event) => {
@@ -105,6 +108,8 @@ export function SimulationWorkbench({ engineId, initial, results, action, sessio
       </form>
     </aside>}
     <div className="creator-stage" id="experiment-replay" tabIndex={-1}>
+      {curriculum && <CurriculumReplay key={visibleResults ? "saved" : "preview"} lab={curriculum.curriculum} description={curriculum.creator.description}
+        results={visibleResults && "report" in visibleResults && visibleResults.kind === engineId ? visibleResults : undefined} />}
       {"values" in config && <SortingReplay config={config} results={visibleResults && "kind" in visibleResults && visibleResults.kind === "sorting" ? visibleResults : undefined} />}
       {"processes" in config && <SchedulingReplay config={config} results={visibleResults && "kind" in visibleResults && visibleResults.kind === "cpu-scheduling" ? visibleResults : undefined} />}
       {"links" in config && <NetworkReplay config={config} results={visibleResults && "kind" in visibleResults && visibleResults.kind === "network-transmission" ? visibleResults : undefined} />}

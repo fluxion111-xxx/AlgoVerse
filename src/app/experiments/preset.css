@@ -35,3 +35,8 @@
 .experiment-report-table th a { text-decoration: underline; text-underline-offset: 3px; }
 .experiment-path-report { margin-block: 12px; padding-block-start: 12px; border-top: 1px solid var(--work-line); }
 .experiment-path-report > h3 { font-weight: 750; }
+.curriculum-lab-field { display: grid; gap: 4px; }
+.curriculum-trace-actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; }
+.curriculum-trace-table { max-height: 28rem; overflow: auto; }
+.curriculum-trace-table :is(td, th) { min-width: 5em; overflow-wrap: anywhere; }
+.curriculum-trace-table tr[data-active="true"] { background: linear-gradient(90deg, #4d583f, transparent); }

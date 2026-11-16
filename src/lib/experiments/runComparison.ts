@@ -1,4 +1,5 @@
 import type { AgentRun } from "../experimentAgent";
+import { getCurriculumLab, type CurriculumLabId } from "./curriculumLabs";
 import { evidenceLabels } from "./evidence";
 
 export type ComparisonRun = Pick<AgentRun, "id" | "tool" | "version" | "config" | "metrics"> & { round?: number };
@@ -57,7 +58,7 @@ const parameterLabels: Record<string, string> = {
   commands: "分配与释放顺序", initialRows: "初始数据", schedule: "事务操作顺序",
 };
 
-const focusMetrics: Record<ComparisonRun["tool"], string> = {
+const focusMetrics: Partial<Record<ComparisonRun["tool"], string>> & Record<Exclude<ComparisonRun["tool"], CurriculumLabId>, string> = {
   pathfinding: "visited", sorting: "comparisons", "cpu-scheduling": "waiting", "network-transmission": "delivered",
   "memory-visualization": "stackDepth", "b-plus-tree": "splits", "knn-classification": "prediction", "page-replacement": "pageFaults",
   "hash-collisions": "hashChecks", "k-means": "squaredError", "gradient-descent": "lossChange", "tree-traversal": "treeOrder",
@@ -101,8 +102,9 @@ function metricDeltas(key: string, previous: string, value: string) {
 
 function changedParameters(before: ComparisonRun, after: ComparisonRun) {
   const previous = before.config as Record<string, unknown>;
+  const labFields = getCurriculumLab(after.tool)?.curriculum.fields;
   return Object.entries(after.config).flatMap(([key, value]) => {
-    const label = parameterLabels[key];
+    const label = labFields?.find(([name]) => name === key)?.[1].label ?? parameterLabels[key];
     if (!label || (after.tool === "pathfinding" && key === "seed") || JSON.stringify(previous[key]) === JSON.stringify(value)) return [];
     if (key === "walls" && "walls" in before.config && "walls" in after.config &&
       before.config.walls.length === after.config.walls.length && before.config.walls.every((cell) => (value as number[]).includes(cell))) return [];
@@ -140,8 +142,9 @@ export function experimentRunComparison(runs: readonly ComparisonRun[], tool: Co
     } : otherChanges(before, after);
     return { from: before.round, to: after.round, ...notes };
   });
-  const focus = changes.findLast(({ metrics }) => metrics.some(({ key }) => key === focusMetrics[tool]));
-  const focusedMetric = focus?.metrics.find(({ key }) => key === focusMetrics[tool]);
+  const focusMetric = getCurriculumLab(tool)?.curriculum.focusMetric ?? focusMetrics[tool];
+  const focus = changes.findLast(({ metrics }) => metrics.some(({ key }) => key === focusMetric));
+  const focusedMetric = focus?.metrics.find(({ key }) => key === focusMetric);
   const changedCount = new Set(changes.flatMap(({ metrics }) => metrics.map(({ key }) => key))).size;
   const headline = focusedMetric && (focusedMetric.deltas.length === 1 && /^[+−]/.test(focusedMetric.deltas[0])
     ? `${focusedMetric.label}${focusedMetric.deltas[0][0] === "+" ? "增加" : "减少"} ${focusedMetric.deltas[0].slice(1)}。`

@@ -32,7 +32,7 @@ export default function ExperimentsPage() {
     <main id="main-content">
       <section className="lab-index-hero editorial-frame" aria-labelledby="experiments-title">
         <div>
-          <p className="editorial-kicker"><span lang="en">AlgoVerse</span><span>六大实验领域</span></p>
+          <p className="editorial-kicker"><span lang="en">AlgoVerse</span><span>{registeredEngines.length} 个可运行实验</span></p>
           <h1 id="experiments-title">实验中心</h1>
         </div>
         <div className="lab-index-hero-aside">

@@ -1,7 +1,10 @@
 import type { EngineId, ExperimentConfig, ExperimentResults } from "../experimentEngines";
+import { getCurriculumLab, type CurriculumLabId } from "./curriculumLabs";
 import { evidenceLabels, experimentEvidence } from "./evidence";
 
-const followUps: Record<EngineId, Record<string, string>> = {
+type ExistingEngine = Exclude<EngineId, CurriculumLabId>;
+
+const followUps: Record<ExistingEngine, Record<string, string>> = {
   pathfinding: { obstacles: "调整障碍密度，比较访问节点数。", endpoints: "移动起点或终点，再比路径长度。" },
   sorting: { order: "保持数值不变。只改输入顺序。各试升序和倒序。再比比较与交换。", duplicates: "固定序列长度。用重复值替换几项。再比比较与交换。" },
   "cpu-scheduling": { policy: "保持进程不变，切换调度策略。再看等待时间。", arrivals: "只改到达时刻，再看响应时间。" },
@@ -22,7 +25,7 @@ const followUps: Record<EngineId, Record<string, string>> = {
   "transaction-concurrency": { order: "调整操作交错顺序，再比读取与写冲突。" },
 };
 
-const engineNotes: Record<EngineId, string> = {
+const engineNotes: Record<ExistingEngine, string> = {
   pathfinding: "两种搜索在同一张地图上运行。",
   sorting: "冒泡比较相邻项。快排用末项作基准。",
   "cpu-scheduling": "等待是周转时间减去运行时间。",
@@ -81,8 +84,19 @@ function schedulingNote(config: ExperimentConfig, results: ExperimentResults, me
 
 export function diagnosisChoices(engineId: EngineId, config: ExperimentConfig, results: ExperimentResults) {
   const evidence = experimentEvidence(results);
+  if ("report" in results) {
+    const { report } = results;
+    const alternate = getCurriculumLab(results.kind)!.curriculum.alternateTrial;
+    return {
+      observations: Object.entries(evidence).map(([id, value]) => ({
+        id, value, label: evidenceLabels[id], conclusion: `${evidenceLabels[id]} · ${value}`, explanation: report.conclusion,
+      })),
+      steps: [{ id: "controlled", suggestion: report.suggestion }, { id: "alternate", suggestion: alternate }],
+    };
+  }
+  const existing = "dijkstra" in results ? "pathfinding" : results.kind;
   const comparisons: Record<string, string | undefined> = measuredComparisons(results);
-  const steps = { ...followUps[engineId] };
+  const steps = { ...followUps[existing] };
   if (engineId === "cpu-scheduling" && "processes" in config && config.policy === "rr") {
     steps.quantum = "保持进程不变，只改时间片。再看等待和响应。";
   }
@@ -90,7 +104,7 @@ export function diagnosisChoices(engineId: EngineId, config: ExperimentConfig, r
     observations: Object.entries(evidence).map(([id, value]) => ({
       id, value, label: evidenceLabels[id] ?? id,
       conclusion: `${comparisons[id] ?? ""}本轮${evidenceLabels[id] ?? id}为 ${value}。`,
-      explanation: schedulingNote(config, results, id) ?? engineNotes[engineId],
+      explanation: schedulingNote(config, results, id) ?? engineNotes[existing],
     })),
     steps: Object.entries(steps).map(([id, suggestion]) => ({ id, suggestion })),
   };

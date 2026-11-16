@@ -32,6 +32,7 @@ import type { CoreTopic } from "@/content/knowledge/core/types";
 import { teachingById } from "@/content/knowledge/teaching/index";
 import { refineTeaching, reviewedTopicIds } from "@/content/knowledge/quality/index";
 import type { EngineId } from "./experimentEngines";
+import { curriculumLabs } from "./experiments/curriculumLabs";
 
 export type KnowledgeTopic = {
   id: string;
@@ -100,6 +101,15 @@ const topicBatches: readonly Partial<Record<KnowledgeAreaId, readonly CoreTopic[
   fieldEvaluationTopics,
 ];
 
+const curriculumExperiments = new Map<string, KnowledgeTopic["experiments"][number][]>();
+for (const { id, creator, curriculum } of curriculumLabs) {
+  for (const topicId of curriculum.topics) {
+    const experiments = curriculumExperiments.get(topicId) ?? [];
+    experiments.push({ engineId: id, label: `运行${creator.title}`, prompt: curriculum.alternateTrial });
+    curriculumExperiments.set(topicId, experiments);
+  }
+}
+
 function withTopicBatches(domain: KnowledgeDomain) {
   return addCoreTopics(domain, topicBatches.flatMap((batch) => batch[domain.id] ?? []));
 }
@@ -115,7 +125,11 @@ const firstTopicByDomain = new Map<KnowledgeDomain["id"], KnowledgeEntry>();
 
 function teach(topic: KnowledgeTopic): KnowledgeTopic {
   const teaching = Object.hasOwn(teachingById, topic.id) ? teachingById[topic.id] : topic.teaching;
-  return refineTeaching(teaching ? { ...topic, difficulty: teaching.difficulty, teaching } : topic);
+  const experiments = curriculumExperiments.get(topic.id);
+  return refineTeaching({ ...topic,
+    ...(teaching && { difficulty: teaching.difficulty, teaching }),
+    ...(experiments && { experiments: [...topic.experiments, ...experiments] }),
+  });
 }
 
 for (const domain of [...knowledgeDomains, foundationKnowledge]) {
@@ -135,6 +149,11 @@ for (const id of Object.keys(teachingById)) {
 }
 for (const id of reviewedTopicIds) {
   if (!topicsById.has(id)) throw new Error(`Teaching review refers to unknown topic: ${id}`);
+}
+for (const lab of curriculumLabs) {
+  for (const id of lab.curriculum.topics) {
+    if (topicsById.get(id)?.domain.id !== lab.domain) throw new Error(`Invalid knowledge topic for ${lab.id}: ${id}`);
+  }
 }
 
 export function getDefaultKnowledgeTopic(domainId: KnowledgeDomain["id"]) {

@@ -35,6 +35,7 @@ export function pathfindingReport(walls: number | undefined, { dijkstra, astar }
 }
 
 export function experimentReport(config: ExperimentConfig, results: ExperimentResults) {
+  if ("report" in results) return results.report;
   if ("dijkstra" in results) return pathfindingReport("walls" in config ? config.walls.length : undefined, results);
   switch (results.kind) {
   case "sorting": {

@@ -8,6 +8,7 @@ import { ExperimentCreator } from "@/components/experiments/ExperimentCreator";
 import { ExperimentRunReports } from "@/components/experiments/ExperimentRunReports";
 import { ExperimentSteps } from "@/components/experiments/ExperimentSteps";
 import { creatorObservations } from "@/lib/creatorCapabilities";
+import { learningTopicRoute } from "@/lib/curriculum";
 import { experimentReviewTopics, knowledgeTopicRoute } from "@/lib/knowledge";
 import { getExperimentEngine, registeredEngines } from "@/lib/experimentEngines";
 import { experimentDomains } from "@/lib/experiments/engine";
@@ -152,7 +153,8 @@ export default async function CreatorPage({ searchParams }: { searchParams: Prom
     <ExperimentRunReports run={run} settingsHref={workflowAISettingsRoute(workflowRoute("diagnosis", task))}>
         <div className="preset-actions" aria-label="相关知识点">
           {experimentReviewTopics(engine.id, run.topicId).map((entry) =>
-            <Link key={entry.topic.id} className="catalog-direct" href={knowledgeTopicRoute(entry, entry.topic.id === run.topicId ? run.id : undefined)}>
+            <Link key={entry.topic.id} className="catalog-direct" href={"report" in run.results ? learningTopicRoute(entry) :
+              knowledgeTopicRoute(entry, entry.topic.id === run.topicId ? run.id : undefined)}>
               复习 · {entry.topic.title}
             </Link>)}
         </div>

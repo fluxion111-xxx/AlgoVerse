@@ -1,9 +1,10 @@
 import { registeredEngines, type EngineId } from "./experimentEngines";
+import type { CurriculumLabId } from "./experiments/curriculumLabs";
 
 type Observation = { metrics: string; comparison?: string };
 
 // 描述一轮实验实际计算的指标，以及能在同一轮验证的对比。
-export const creatorObservations: Record<EngineId, Observation> = {
+const existingObservations: Record<Exclude<EngineId, CurriculumLabId>, Observation> = {
   pathfinding: { metrics: "访问节点、路径长度、耗时", comparison: "同一地图上的 Dijkstra 与 A*" },
   sorting: { metrics: "比较次数、交换次数、排序结果", comparison: "同一序列上的冒泡排序与快速排序" },
   "cpu-scheduling": { metrics: "等待、周转、响应时间、进程切换" },
@@ -24,6 +25,13 @@ export const creatorObservations: Record<EngineId, Observation> = {
   "transaction-concurrency": { metrics: "提交值、写冲突、读取记录", comparison: "同一调度下的语句级已提交读取与事务级快照" },
 };
 
-export const creatorCapabilities = registeredEngines.map(({ id, version, domain, creator }) => ({
-  id, version, domain, ...creator, ...creatorObservations[id],
-}));
+export const creatorCapabilities = registeredEngines.map((engine) => {
+  const { id, version, domain, creator } = engine;
+  const observation = "curriculum" in engine
+    ? { metrics: Object.values(engine.curriculum.metricLabels).join("、"), comparison: engine.curriculum.comparison }
+    : existingObservations[engine.id];
+  return { id, version, domain, ...creator, ...observation };
+});
+
+export const creatorObservations = Object.fromEntries(creatorCapabilities.map(({ id, metrics, comparison }) =>
+  [id, { metrics, comparison }])) as Record<EngineId, Observation>;

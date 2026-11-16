@@ -161,8 +161,8 @@ test("expanded engines resolve through their catalog, knowledge links and diagno
     "deadlock-avoidance": "banker-safe-sequence", "tcp-congestion": "tcp-cwnd-rwnd",
     "dynamic-routing": "link-state-routing", "memory-allocation": "heap-fit-fragmentation", "transaction-concurrency": "mvcc-row-versions",
   };
-  assert.equal(new Set(registeredEngines.map(({ id }) => id)).size, 18);
-  assert.equal(new Set(registeredEngines.map(({ route }) => route)).size, 18);
+  assert.equal(new Set(registeredEngines.map(({ id }) => id)).size, 30);
+  assert.equal(new Set(registeredEngines.map(({ route }) => route)).size, 30);
   for (const [id, topic] of Object.entries(topics)) {
     const engine = getExperimentEngine(id, 1);
     assert.ok(getCourse(engine.domain).experiments.some(({ href }) => href === engine.route));
@@ -173,6 +173,31 @@ test("expanded engines resolve through their catalog, knowledge links and diagno
     assert.ok(evidence.length > 1);
     assert.ok(evidence.every(([key, value]) => evidenceLabels[key] && value));
   }
+});
+
+test("new simulations preserve IPv4 boundaries, empty outcomes, and seeded replay prefixes", () => {
+  const subnet = getExperimentEngine("ipv4-subnet");
+  const config = subnet.preset();
+  assert.equal(subnet.execute({ ...config, subnetBits: 0 }).metrics.subnetSize, "4294967296");
+  assert.equal(subnet.execute({ ...config, subnetBits: 32 }).metrics.subnetMask, "255.255.255.255");
+  assert.equal(subnet.execute({ ...config, hostIp: "10.0.0.256" }), null);
+
+  const prefixes = getExperimentEngine("longest-prefix");
+  const packet = { ...prefixes.preset(), packetIp: "192.0.2.2" };
+  assert.equal(prefixes.execute(packet).metrics.bestPrefix, "0.0.0.0/0");
+  assert.equal(prefixes.execute({ ...packet, routeTable: "10.0.0.0/8 B" }).metrics.selectedHop, "无");
+  assert.equal(prefixes.execute({ ...packet, routeTable: "10.0.0.1/8 B" }), null);
+  assert.equal(prefixes.execute({ ...packet, routeTable: "10.0.0.0/8 B\n10.0.0.0/8 C" }), null);
+
+  const scores = getExperimentEngine("classification-threshold");
+  assert.equal(scores.execute({ ...scores.preset(), scoredLabels: [[10, 0]] }).metrics.precisionA, "无定义");
+  assert.equal(scores.execute({ ...scores.preset(), scoredLabels: [[10, 2]] }), null);
+
+  const bandit = getExperimentEngine("epsilon-greedy");
+  const initial = bandit.preset();
+  const first = bandit.execute(initial);
+  assert.deepEqual(bandit.execute(initial), first);
+  assert.deepEqual(bandit.execute({ ...initial, banditTurns: 40 }).steps.slice(0, initial.banditTurns), first.steps);
 });
 
 test("link-state recalculation selects a detour and detects a partition", () => {

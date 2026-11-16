@@ -21,8 +21,14 @@ const hooks = registerHooks({
   },
 });
 const { POST } = await import("../src/app/api/experiments/creator/route.ts");
-const { runCreatorExperiment } = await import("../src/app/experiments/actions.ts");
-const { getExperimentSession, getExperimentWorkflow, getExperimentRun, runExperimentSession } = await import("../src/lib/server/experimentRecords.ts");
+const { runCreatorExperiment, runKnowledgeExperiment } = await import("../src/app/experiments/actions.ts");
+const { getComparableExperimentRuns, getExperimentSession, getExperimentWorkflow, getExperimentRun, runExperimentSession } = await import("../src/lib/server/experimentRecords.ts");
+const { curriculumLabs } = await import("../src/lib/experiments/curriculumLabs.ts");
+const { experimentEvidence, evidenceLabels } = await import("../src/lib/experiments/evidence.ts");
+const { experimentReport } = await import("../src/lib/experiments/report.ts");
+const { experimentRunComparison } = await import("../src/lib/experiments/runComparison.ts");
+const { getCourse } = await import("../src/lib/courses.ts");
+const { getExperimentTopic } = await import("../src/lib/knowledge.ts");
 hooks.deregister();
 
 async function setup(t, complete) {
@@ -77,7 +83,7 @@ async function confirmAndRun({ id, revision }) {
   return getExperimentRun(runId);
 }
 
-test("real engines run the validated sorting, round-robin and pathfinding plans only after confirmation", async (t) => {
+test("real engines run validated plans only after confirmation, including a new join lab", async (t) => {
   const examples = [
     ["比较冒泡排序和快速排序。", { intent: "compare", engine: "sorting", version: 1,
       parameters: { goalLabel: "比较交换次数", values: [7, 2, 9, 4, 3] } }],
@@ -85,11 +91,16 @@ test("real engines run the validated sorting, round-robin and pathfinding plans 
       parameters: { goalLabel: "观察抢占", policy: "rr", quantum: 2, processes: [{ arrival: 0, burst: 5 }, { arrival: 1, burst: 3 }] } }],
     ["比较 Dijkstra 与 A*。", { intent: "compare", engine: "pathfinding", version: 1,
       parameters: { goalLabel: "对比访问节点", map: { kind: "random", difficulty: "normal" } } }],
+    ["比较哈希连接与嵌套循环。", { intent: "compare", engine: "join-strategies", version: 1,
+      parameters: { goalLabel: "比较连接候选数", leftRows: [2, 2], rightRows: [2, 2, 3] } }],
   ];
   let index = 0;
   const { ask } = await setup(t, ({ question, capabilities }) => {
     assert.equal(question, examples[index][0]);
-    assert.equal(capabilities.length, 18);
+    assert.equal(capabilities.length, 30);
+    const join = capabilities.find(({ id }) => id === "join-strategies");
+    assert.deepEqual(Object.keys(join.parameters), ["goalLabel", "leftRows", "rightRows"]);
+    assert.match(join.comparison, /哈希分组/);
     const pathfinding = capabilities.find(({ id }) => id === "pathfinding");
     assert.deepEqual(Object.keys(pathfinding.parameters), ["goalLabel", "map"]);
     assert.match(pathfinding.description, /地图必须可达/);
@@ -105,13 +116,95 @@ test("real engines run the validated sorting, round-robin and pathfinding plans 
     assert.equal(workflow.plan.source.intent, output.intent);
     runs.push(await confirmAndRun(workflow));
   }
-  const [sorting, scheduling, pathfinding] = runs.map(({ results }) => results);
+  const [sorting, scheduling, pathfinding, join] = runs.map(({ results }) => results);
   assert.deepEqual(sorting.bubble.sorted, [2, 3, 4, 7, 9]);
   assert.deepEqual(sorting.quick.sorted, sorting.bubble.sorted);
   assert.deepEqual(scheduling.timeline[0], { process: 0, start: 0, end: 2 });
   assert.equal(scheduling.switches, 4);
   assert.equal(pathfinding.dijkstra.pathLength, pathfinding.astar.pathLength);
   assert.ok(pathfinding.astar.visited.length > 0 && pathfinding.dijkstra.visited.length > 0);
+  assert.deepEqual(join.metrics, { joinMatches: "4", nestedCandidates: "6", hashCandidates: "4", hashBuildRows: "3", hashLookupCount: "2" });
+});
+
+test("all twelve new labs run and retest from their learning-path entries", async (t) => {
+  await setup(t, () => assert.fail("Local runs should not call an AI service"));
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-01-01T00:00:00Z") });
+  const cases = {
+    "stack-queue": ["takeAfter", [0, 1, 2, 3, 4], { takeDifferences: "3", emptyTakes: "0" }, { takeDifferences: "0", emptyTakes: "1" }, /栈从刚放入的一端取/],
+    "binary-search": ["searchValue", 22, { searchIndex: "4", binaryReads: "5" }, { searchIndex: "未找到", insertionIndex: "11", binaryReads: "3" }, /遇到相等仍往左收窄/],
+    "disk-scheduling": ["diskHead", 0, { fcfsSeek: "640", sstfSeek: "236" }, { sstfSeek: "183" }, /SSTF 就近选下一站/],
+    "tlb-translation": ["tlbEntries", 3, { tlbHits: "3", tlbMisses: "5" }, { tlbHits: "5", tlbMisses: "3", tlbEvictions: "0" }, /满时换走最久未用项/],
+    "ipv4-subnet": ["subnetBits", 24, { subnetStart: "192.168.1.64", subnetEnd: "192.168.1.127", subnetMember: "不同子网" }, { subnetSize: "256", subnetMember: "同一子网" }, /比较前缀即可判断/],
+    "longest-prefix": ["packetIp", "10.1.3.9", { selectedHop: "D", bestPrefixBits: "24" }, { selectedHop: "C", bestPrefixBits: "16" }, /默认路由匹配所有地址/],
+    "pointer-write": ["pointerOffset", 3, { changedCells: "1", pointerReadback: "42" }, { changedCells: "0", pointerReadback: "未读取", pointerArray: "8、12、19、23" }, /尾后指针可当结束标记/],
+    "variable-scope": ["reassignedValue", 7, { scopeResultGap: "7" }, { scopeResultGap: "0", scopedOuterWith: "7", scopedOuterWithout: "7" }, /内层同名声明遮住外层/],
+    "sql-grouping": ["minSubtotal", 121, { whereRows: "4", havingGroups: "2" }, { whereRows: "4", havingGroups: "0" }, /HAVING 按总和筛组/],
+    "join-strategies": ["rightRows", [2, 2, 2], { joinMatches: "5", nestedCandidates: "20" }, { joinMatches: "6", nestedCandidates: "12", hashCandidates: "6" }, /重复键可匹配多行/],
+    "classification-threshold": ["thresholdAfter", 50, { falseAlarmB: "0", missesB: "2" }, { falseAlarmB: "2", missesB: "1", recallB: "75.0%" }, /漏报是没找出真实正例/],
+    "epsilon-greedy": ["explorationRate", 0, {}, { randomChoices: "0", epsilonBChoices: "0" }, /两种策略共用奖励序列/],
+  };
+  assert.deepEqual(curriculumLabs.map(({ id }) => id), Object.keys(cases));
+  const counts = {};
+  for (const lab of curriculumLabs) {
+    counts[lab.domain] = (counts[lab.domain] ?? 0) + 1;
+    await t.test(lab.id, async () => {
+      const [field, nextValue, expectedFirst, expectedNext, diagnosis] = cases[lab.id];
+      const label = lab.curriculum.fields.find(([name]) => name === field)[1].label;
+      const [topic] = lab.curriculum.topics;
+      assert.ok(getCourse(lab.domain).experiments.some(({ href }) => href === lab.route));
+      assert.equal(getExperimentTopic(topic, lab.id).domain.id, lab.domain);
+      const run = async (parameters, previous) => {
+        t.mock.timers.tick(1000);
+        const runId = randomUUID();
+        const form = new FormData();
+        form.set("engineId", lab.id);
+        form.set("runId", runId);
+        form.set("parameters", JSON.stringify(parameters));
+        if (previous) {
+          form.set("sessionId", previous.session.id);
+          form.set("revision", String(previous.session.revision ?? 0));
+        }
+        let route;
+        await assert.rejects(runKnowledgeExperiment(topic, form), (error) => {
+          if (!error.digest?.startsWith("NEXT_REDIRECT;")) return false;
+          route = new URL(error.digest.split(";")[2], "https://algoverse.test");
+          return true;
+        });
+        assert.equal(route.pathname, lab.route);
+        assert.equal(route.hash, "#knowledge-lab");
+        assert.equal(route.searchParams.get("runId"), runId);
+        const saved = await getExperimentRun(runId);
+        assert.equal(saved.topicId, topic);
+        assert.equal(saved.session.id, route.searchParams.get("sessionId"));
+        assert.equal(saved.results.kind, lab.id);
+        assert.ok(saved.results.steps.length > 0);
+        assert.ok(saved.results.steps.every((step) => step.length === lab.curriculum.columns.length));
+        return saved;
+      };
+      const preset = lab.preset();
+      const first = await run(preset);
+      const second = await run({ ...preset, [field]: nextValue }, first);
+      assert.equal(first.session.id, second.session.id);
+      assert.equal(second.session.revision, 1);
+      assert.deepEqual(first.session.config, preset);
+      assert.deepEqual(second.session.config[field], nextValue);
+      for (const [saved, expected] of [[first, expectedFirst], [second, expectedNext]]) {
+        const evidence = experimentEvidence(saved.results);
+        for (const [metric, value] of Object.entries(expected)) assert.equal(evidence[metric], value, metric);
+        assert.ok(Object.entries(evidence).every(([metric, value]) => evidenceLabels[metric] && value));
+        const report = experimentReport(saved.session.config, saved.results);
+        assert.ok(report.conclusion && report.detail.split("。").length >= 4 && report.suggestion);
+        assert.doesNotMatch(JSON.stringify(saved.results), /NaN|undefined/);
+      }
+      assert.match(experimentReport(second.session.config, second.results).explanation, diagnosis);
+      const history = await getComparableExperimentRuns(second);
+      const comparison = experimentRunComparison(history, lab.id, lab.version);
+      assert.deepEqual(comparison.rounds.map(({ id }) => id), [first.id, second.id]);
+      assert.deepEqual(comparison.changes[0].parameters, [{ label, previous: preset[field], value: nextValue }]);
+      assert.ok(comparison.changes[0].metrics.length > 0);
+    });
+  }
+  assert.deepEqual(Object.values(counts), [2, 2, 2, 2, 2, 2]);
 });
 
 test("knowledge, network recommendations, unsupported requests and clarification do not create plans", async (t) => {

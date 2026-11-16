@@ -511,8 +511,11 @@ test("learning advice uses the target and exact topic activity without inferring
   assert.equal(learningSuggestion(read, "networks")?.entry.topic.id, "packet-routing");
   assert.equal(learningSuggestion({ ...read, byTopic: practiced.byTopic }, "networks")?.entry.topic.id, "per-hop-delivery-probability");
   const practicedOriginalLabs = { ...practiced.byTopic, "per-hop-delivery-probability": { count: 1 } };
-  assert.equal(learningSuggestion({ ...read, byTopic: practicedOriginalLabs }, "networks")?.entry.topic.id, "link-state-routing");
-  const beforeCaptureLab = { ...practicedOriginalLabs, "link-state-routing": { count: 1 } };
+  assert.equal(learningSuggestion({ ...read, byTopic: practicedOriginalLabs }, "networks")?.entry.topic.id, "cidr-prefix-match");
+  const practicedSubnetLabs = { ...practicedOriginalLabs, "cidr-prefix-match": { count: 1 },
+    "ipv4-subnet-network-host": { count: 1 }, "cidr-aggregate-alignment": { count: 1 } };
+  assert.equal(learningSuggestion({ ...read, byTopic: practicedSubnetLabs }, "networks")?.entry.topic.id, "link-state-routing");
+  const beforeCaptureLab = { ...practicedSubnetLabs, "link-state-routing": { count: 1 } };
   assert.equal(learningSuggestion({ ...read, byTopic: beforeCaptureLab }, "networks")?.entry.topic.id, "capture-model-hop-event-crosscheck");
   const beforeCongestionLab = { ...beforeCaptureLab, "capture-model-hop-event-crosscheck": { count: 1 } };
   assert.equal(learningSuggestion({ ...read, byTopic: beforeCongestionLab }, "networks")?.entry.topic.id, "tcp-cwnd-rwnd");
@@ -747,13 +750,15 @@ test("deep lessons keep real topic links and validate each published answer", ()
   assert.equal(gradeKnowledgeExercise("asymptotic-bounds", "tight-bound", "1")?.correct, true);
 });
 
-test("every experiment engine is reachable from a matching deep lesson", () => {
+test("each experiment engine is reachable from its matching learning-path topic", () => {
   const aliases = { index: "b-plus-tree", scheduling: "cpu-scheduling", memory: "memory-allocation",
     network: "network-transmission", "recursion-stack": "memory-visualization" };
   const exposed = new Set();
+  const inline = new Set();
   for (const entry of knowledgeEntries) {
     const lesson = getDeepLesson(entry.topic.id);
-    if (!lesson) continue;
+    const curriculumLinks = entry.topic.experiments.filter(({ engineId }) => "curriculum" in getExperimentEngine(engineId));
+    if (!lesson && !curriculumLinks.length) continue;
     const url = new URL(learningTopicRoute(entry, "algorithms"), "https://example.test");
     assert.equal(url.pathname, "/learning-path");
     assert.equal(url.hash, "#knowledge-topic");
@@ -761,12 +766,18 @@ test("every experiment engine is reachable from a matching deep lesson", () => {
       course: entry.course.id, chapter: entry.chapter.id, topic: entry.topic.id });
     const scope = resolveCurriculumScope(Object.fromEntries(url.searchParams));
     assert.ok(scope.chapter.lessons.some(({ topic }) => topic.id === entry.topic.id), url.href);
-    if (lesson.demo === "growth" || isTeachingModel(lesson.demo)) continue;
+    for (const { engineId } of curriculumLinks) {
+      assert.equal(getExperimentTopic(entry.topic.id, engineId), entry);
+      exposed.add(engineId);
+    }
+    if (!lesson || lesson.demo === "growth" || isTeachingModel(lesson.demo)) continue;
     const engine = getExperimentEngine(aliases[lesson.demo] ?? lesson.demo);
     assert.equal(engine?.domain, entry.domain.id, entry.topic.id);
     assert.ok(getExperimentTopic(entry.topic.id, engine.id), entry.topic.id);
     exposed.add(engine.id);
+    inline.add(engine.id);
   }
+  assert.deepEqual(inline, new Set(registeredEngines.filter((engine) => !("curriculum" in engine)).map(({ id }) => id)));
   assert.deepEqual(exposed, new Set(registeredEngines.map(({ id }) => id)));
 });
 
@@ -1257,8 +1268,9 @@ test("all runnable labs explain a domain-specific observation and a controlled r
     "tcp-congestion": /第 8 步首次快重传。.*第 11 步首次超时/, "dynamic-routing": /调整链路 1↔4。.*重算后下一跳为 2/,
     "memory-allocation": /第 7 步先出现差异。首次碎片失败 1 次。最佳碎片失败 0 次/, "transaction-concurrency": /冲突出现在第 0 号行/,
   };
-  assert.deepEqual(Object.keys(diagnosticEvidence), registeredEngines.map(({ id }) => id));
-  for (const engine of registeredEngines) {
+  const existing = registeredEngines.filter((engine) => !("curriculum" in engine));
+  assert.deepEqual(Object.keys(diagnosticEvidence), existing.map(({ id }) => id));
+  for (const engine of existing) {
     const config = engine.preset(101);
     const { conclusion, detail, explanation, suggestion } = experimentReport(config, engine.run(config));
     assert.match(explanation, diagnosticEvidence[engine.id], engine.id);
@@ -2014,12 +2026,7 @@ test("creator passes model answers through and builds only validated engine conf
   assert.deepEqual((await interpretCreatorRequest(question, null, credentials)).result, decision);
   const upstream = JSON.parse(fetch.mock.calls[0].arguments[1].body);
   const input = JSON.parse(upstream.messages[1].content);
-  assert.deepEqual(input.capabilities.map((engine) => engine.id), [
-    "pathfinding", "sorting", "cpu-scheduling", "network-transmission", "memory-visualization", "b-plus-tree", "knn-classification",
-    "page-replacement", "hash-collisions", "k-means", "gradient-descent",
-    "tree-traversal", "graph-traversal", "deadlock-avoidance", "tcp-congestion",
-    "dynamic-routing", "memory-allocation", "transaction-concurrency",
-  ]);
+  assert.deepEqual(input.capabilities.map(({ id }) => id), registeredEngines.map(({ id }) => id));
   assert.equal(new Set(input.capabilities.map((engine) => engine.domain)).size, 6);
   assert.deepEqual(input.conversation, question.history);
   assert.equal(input.currentExperiment, null);

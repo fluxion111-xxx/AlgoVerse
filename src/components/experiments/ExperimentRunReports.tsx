@@ -1,8 +1,10 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
+import { learningTopicRoute } from "@/lib/curriculum";
 import { evidenceLabels, experimentEvidence } from "@/lib/experiments/evidence";
 import { experimentReport } from "@/lib/experiments/report";
 import { experimentRunComparison, type ComparisonRun } from "@/lib/experiments/runComparison";
+import { experimentReviewTopics } from "@/lib/knowledge";
 import { runAnalysisLink, workflowAISettingsRoute } from "@/lib/navigation";
 import { getComparableExperimentRuns, getDiagnosis, type ExperimentRun } from "@/lib/server/experimentRecords";
 import { QuickStartDiagnosis } from "./QuickStartDiagnosis";
@@ -28,6 +30,7 @@ export async function ExperimentRunReports({ run, history, settingsHref, childre
   const metrics = experimentEvidence(run.results);
   const comparison = experimentRunComparison(runs, engineId, engineVersion);
   const input = engineId === "sorting" && "values" in config ? config.values : null;
+  const review = "report" in run.results ? experimentReviewTopics(engineId, run.topicId) : [];
   return <>
     <section className="workflow-note experiment-run-report" aria-labelledby="run-report-title">
       <h2 id="run-report-title">本轮实验报告</h2>
@@ -43,6 +46,18 @@ export async function ExperimentRunReports({ run, history, settingsHref, childre
         <div><dt>完成时间</dt><dd><time dateTime={run.completedAt}>{run.completedAt.replace("T", " ").slice(0, 16)} UTC</time></dd></div>
       </dl>
       <details><summary>本轮参数</summary><pre className="experiment-report-config">{JSON.stringify(config, null, 2)}</pre></details>
+    </section>
+    <section className="workflow-note experiment-run-report" id="run-diagnosis" aria-label="本轮诊断">
+      <div id="creator-diagnosis">
+        <QuickStartDiagnosis diagnosis={diagnosis} runId={run.id} report={report}
+          settingsHref={run.session.source ? settingsHref ?? workflowAISettingsRoute(runAnalysisLink(run.id, true)) : undefined} />
+        {review.length > 0 && !children && <div className="preset-actions" aria-label="学习路径">
+          {review.map((entry) => <Link className="catalog-direct" key={entry.topic.id} href={learningTopicRoute(entry)}>
+            复习 · {entry.topic.title}
+          </Link>)}
+        </div>}
+        {children}
+      </div>
     </section>
     {comparison.rounds.length > 1 && <section className="workflow-note experiment-run-report" aria-labelledby="run-comparison-title">
       <h2 id="run-comparison-title">多轮实测对比</h2>
@@ -81,12 +96,5 @@ export async function ExperimentRunReports({ run, history, settingsHref, childre
         </table>
       </div>
     </section>}
-    <section className="workflow-note experiment-run-report" id="run-diagnosis" aria-label="本轮诊断">
-      <div id="creator-diagnosis">
-        <QuickStartDiagnosis diagnosis={diagnosis} runId={run.id} report={report}
-          settingsHref={run.session.source ? settingsHref ?? workflowAISettingsRoute(runAnalysisLink(run.id, true)) : undefined} />
-        {children}
-      </div>
-    </section>
   </>;
 }
