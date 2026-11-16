@@ -10,7 +10,8 @@ import { maxQuestionLength } from "@/lib/experimentCreator";
 import { getExperimentEngine } from "@/lib/experimentEngines";
 import { agentWorkbenchLink, workbenchFocus, workflowAISettingsRoute, workflowSteps, type ExperimentTask, type WorkbenchFocus, type WorkflowStep } from "@/lib/navigation";
 import type { Diagnosis } from "@/lib/quickStart";
-import { containsTemporaryAIKey, fetchWithTemporaryAI, requestAgentTask as agentRequest, useActiveAI } from "@/lib/temporaryAI";
+import { containsTemporaryAIKey, fetchWithTemporaryAI, requestAgentTask as agentRequest, useAIModelChoices } from "@/lib/temporaryAI";
+import { AIModelSelect } from "./AIModelSelect";
 import { WorkbenchIcon } from "./WorkbenchIcon";
 import { WorkbenchActivity, agentPhases } from "./WorkbenchActivity";
 import { useWorkbenchView, WorkbenchHistory, workbenchHistoryRequest } from "./WorkbenchHistory";
@@ -64,8 +65,10 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
   const [diagnosisError, setDiagnosisError] = useState<{ id: string; message: string }>();
   const [requestCooldown, setRequestCooldown] = useState<AICooldown>();
   const [clock, setClock] = useState<number>();
-  const connection = useActiveAI();
+  const models = useAIModelChoices("workbench");
+  const connection = models.active;
   const active = useRef<ActiveRequest | null>(null);
+  const uncertainOperation = useRef<{ operationId: string; input: string; message?: string } | null>(null);
   const diagnosisRequest = useRef<AbortController | null>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const canvas = useRef<HTMLDivElement>(null);
@@ -100,7 +103,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
   const retryUntil = cooldown?.until ?? 0;
   const retrySeconds = clock === undefined ? undefined : Math.max(0, Math.ceil((retryUntil - clock) / 1000));
   const modelCooling = !!cooldown && (retrySeconds === undefined || retrySeconds > 0);
-  const modelBlocked = blocked || modelCooling || !!diagnosing;
+  const modelBlocked = blocked || modelCooling || !!diagnosing || !connection;
   const maySend = !blocked && (!modelBlocked || !!task && isAgentConfirmation(task, message));
   const waitHint = modelCooling ? (retrySeconds === undefined ? "等待恢复" : formatAIRetryTime(retrySeconds)) : "";
   const runningNow = busy === "running" || (workBusy && task?.phase === "running");
@@ -201,11 +204,16 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
       action = "retry-message";
     }
     const needsModel = (action === "message" && !confirmation) || action === "retry-message" || action === "decide";
-    if (needsModel && !connection) { setError("请先配置 AI 服务。"); return false; }
+    if (needsModel && !connection) { setError(models.current.reason); return false; }
     if (needsModel && (diagnosisRequest.current || retryUntil > Date.now())) return false;
     const running = action === "approve" || (confirmation && task?.phase === "confirm");
     if (running && !canApprove) return false;
-    const request = { controller: new AbortController(), operationId: crypto.randomUUID(), taskId: task?.id };
+    const sentText = action === "retry-message" ? waiting?.pending : action === "message" ? text : undefined;
+    const retryInput = JSON.stringify([action, sentText, explicitRun?.id]);
+    const uncertain = uncertainOperation.current;
+    const request = { controller: new AbortController(),
+      operationId: needsModel && uncertain?.input === retryInput ? uncertain.operationId : crypto.randomUUID(), taskId: task?.id };
+    if (needsModel) uncertainOperation.current = { input: retryInput, operationId: request.operationId, message: sentText };
     const { signal } = request.controller;
     const startNavigation = navigation.current;
     active.current = request;
@@ -216,7 +224,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
       let current = task;
       if (!current && (action === "message" || action === "import")) {
         current = await agentRequest({
-          action: "start", goal: startingGoal ?? (draftQuestion || (action === "import" ? savedPlan?.config.goalLabel : text)),
+          action: "start", operationId: request.operationId, goal: startingGoal ?? (draftQuestion || (action === "import" ? savedPlan?.config.goalLabel : text)),
           ...reference, ...(action === "import" && { importPlan: true }),
         }, connection, signal);
         if (signal.aborted) return false;
@@ -232,6 +240,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
       }, needsModel ? connection : undefined, signal);
       if (signal.aborted) return false;
       setTask(next);
+      if (needsModel && !agentDialogueActive(next) && next.phase !== "deciding") uncertainOperation.current = null;
       const newTurn = (action === "message" || action === "retry-message") && !confirmation
         && next.dialogue && !next.dialogue.pending && next.dialogue.turns.length > (current.dialogue?.turns.length ?? 0)
         ? next.dialogue.turns.at(-1) : undefined;
@@ -275,13 +284,18 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
               const sent = action === "retry-message" ? waiting?.pending : text;
               const restored = snapshot.dialogue?.turns.at(-1);
               if (snapshot.dialogue && !snapshot.dialogue.pending && snapshot.dialogue.turns.length > (waiting?.turns.length ?? 0)
-                && restored?.action && restored.message === sent) {
+                && restored?.action && restored.operationId === request.operationId && restored.message === sent) {
+                uncertainOperation.current = null;
                 setMessage((draft) => draft.trim() === sent ? "" : draft);
                 if (stayed && restored.action === "run") show("plan", view.current.selectedRun, snapshot, false);
                 setError("");
                 setRecovery("Agent 回复已同步。");
                 return true;
               }
+              if (snapshot.dialogue?.operationId === request.operationId && snapshot.dialogue.error) uncertainOperation.current = null;
+            } else if (action === "decide" && snapshot.operationId === request.operationId && snapshot.phase !== "deciding") {
+              uncertainOperation.current = null;
+              setError("");
             }
           }
         }
@@ -299,6 +313,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
     const request = active.current;
     const operationId = request?.operationId ?? restoredOperation;
     if (!canStop || !operationId) return;
+    uncertainOperation.current = null;
     active.current = null;
     request?.controller.abort();
     setBusy("status");
@@ -342,6 +357,18 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
         if (!signal.aborted) {
           setTask((current) => current?.id === next.id && current.revision <= next.revision ? next : current);
           setError((current) => current === statusReadError ? "" : current);
+          const uncertain = uncertainOperation.current;
+          if (uncertain && !agentDialogueActive(next) && next.phase !== "deciding") {
+            const savedReply = next.dialogue?.turns.some(({ action, operationId }) => !!action && operationId === uncertain.operationId);
+            if (savedReply || next.dialogue?.operationId === uncertain.operationId || next.operationId === uncertain.operationId) {
+              uncertainOperation.current = null;
+              if (savedReply) {
+                setMessage((draft) => draft.trim() === uncertain.message ? "" : draft);
+                setError("");
+                setRecovery("Agent 回复已同步。");
+              }
+            }
+          }
         }
       } catch {
         if (!signal.aborted) setError((current) => current || statusReadError);
@@ -459,6 +486,10 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
         <span className="wb-product">动态实验工作台</span>
       </div>
       <nav className="wb-top-tools" aria-label="工作台操作">
+        <div className="wb-model-picker">
+          <AIModelSelect id="wb-ai-model" models={models} disabled={blocked || !!diagnosing} />
+          <WorkbenchIcon icon="chevron-down" width={15} />
+        </div>
         <button type="button" className="wb-button wb-top-link" title="实验历史" aria-label="实验历史" aria-haspopup="dialog"
           aria-expanded={historyOpen} ref={historyToggle} onClick={() => setHistoryOpen(true)}>
           <WorkbenchIcon icon="history" width={16} /><span>实验历史</span>
@@ -559,6 +590,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
           <label htmlFor="agent-message"><WorkbenchIcon icon="sparkles" width={17} /> AI 实验指令</label>
           {visibleError ? <span className="wb-dock-error" role={waitHint ? undefined : "alert"}>{visibleError}</span>
             : recovery ? <span className="wb-dock-context" role="status">{recovery}</span>
+            : models.current.reason ? <span className="wb-dock-context" role="status">{models.current.reason}</span>
             : explicitRun && <span className="wb-dock-context">引用第 {number} 轮</span>}
         </div>
         {(storage.error || creationError || restoreError) && <div className="wb-save-feedback wb-dock-error" role="alert">

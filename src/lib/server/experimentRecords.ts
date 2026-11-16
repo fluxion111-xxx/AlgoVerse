@@ -533,7 +533,7 @@ export async function createAgentTask(goal: string, reference?: ExperimentSessio
   const id = researchId ?? randomUUID();
   if (researchId) {
     const existing = await getAgentTask(id);
-    if (existing) return rememberAgentTask(existing);
+    if (existing) return tutorContext ? existing : rememberAgentTask(existing);
   }
   const pending = importPlan && reference ? [{ id: randomUUID(), sessionId: randomUUID(), tool: reference.engineId,
     version: reference.engineVersion, config: reference.config }] : [];

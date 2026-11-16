@@ -1,12 +1,13 @@
 import { maxCreatorHistory, maxCreatorReplyLength, maxQuestionLength, type CreatorTurn } from "@/lib/experimentCreator";
-import { agentDialogueActive, type AgentFocus, type TutorContext } from "@/lib/experimentAgent";
+import { agentDialogueActive, hasAgentOperation, isAgentOperationId, type AgentFocus, type AgentTask, type TutorContext } from "@/lib/experimentAgent";
 import { registeredEngines } from "@/lib/experimentEngines";
 import { experimentEvidence } from "@/lib/experiments/evidence";
 import { experimentReviewTopics, getExperimentTopic, getKnowledgeTopic, knowledgeTopicRoute } from "@/lib/knowledge";
 import { searchKnowledge } from "@/lib/knowledgeSearch";
 import { agentWorkbenchLink } from "@/lib/navigation";
 import { AIRequestError, aiErrorResponse, aiJson, asObject, readAICredentials, requestAIJson, type AICredentials } from "@/lib/server/aiProvider";
-import { readAgentFocus, readPlanFocus, replyToAgentMessage, type TutorResolution } from "@/lib/server/experimentAgent";
+import { containsSavedAIKey } from "@/lib/server/aiCredentialSession";
+import { readAgentFocus, readPlanFocus, recentAgentTurns, replyToAgentMessage, type TutorResolution } from "@/lib/server/experimentAgent";
 import { createAgentTask, getAgentTask, getExperimentRun, getTopicPractice, saveAgentTask } from "@/lib/server/experimentRecords";
 import { getDeepLesson } from "@/content/lessons/index";
 import { normalizeTutorFencedReply, normalizeTutorReplyJson, readTutorCodeBlocks, requestedPythonVerbatimLine, type TutorCodeBlock } from "@/lib/tutorReply";
@@ -41,11 +42,25 @@ function citationId(citation: unknown) {
   return typeof id === "string" ? id : null;
 }
 
+function sharedReply(task: AgentTask, operationId?: string) {
+  const turn = operationId ? task.dialogue?.turns.find((entry) => entry.operationId === operationId) : task.dialogue?.turns.at(-1);
+  if (!turn && agentDialogueActive(task)) return aiJson({ status: "pending", task });
+  if (task.dialogue?.error && (!operationId || !turn)) {
+    return aiJson({ status: "error", message: task.dialogue.error, code: task.dialogue.errorCode, task });
+  }
+  if (turn?.stopped) return aiJson({ status: "stopped", task });
+  const workbench = turn === task.dialogue?.turns.at(-1) && turn?.action === "run" && task.phase === "confirm"
+    ? agentWorkbenchLink({ agentId: task.id }) : undefined;
+  return aiJson({ status: "shared", task, workbench });
+}
+
 export async function POST(request: Request) {
   try {
     const payload = asObject(await request.json().catch(() => null));
     const shared = payload?.conversation === true;
     const changingContext = shared && payload.action === "context";
+    const starting = shared && payload.action === "start";
+    const operationId = isAgentOperationId(payload?.operationId) ? payload.operationId : undefined;
     const origin = request.headers.get("origin");
     const site = request.headers.get("sec-fetch-site");
     const url = new URL(request.url);
@@ -53,9 +68,13 @@ export async function POST(request: Request) {
     if (shared && ((site && site !== "same-origin" && site !== "none") || (origin && origin !== `${url.protocol}//${host}`))) {
       return aiJson({ status: "error", message: "请在本站操作。" }, 403);
     }
-    let task = shared && payload.agentId !== undefined ? await getAgentTask(payload.agentId) : null;
+    if (starting && (!operationId || payload.agentId !== undefined)) return aiJson({ status: "error", message: "会话请求格式有误。" }, 400);
+    let task = shared ? await getAgentTask(payload.agentId ?? operationId) : null;
     if (shared && payload.agentId !== undefined && !task) return aiJson({ status: "error", message: "找不到这段对话。" }, 404);
-    if (task && task.revision !== payload?.revision) return aiJson({ status: "error", message: "对话已更新。请重试。", task }, 409);
+    if (task && !starting && !changingContext && hasAgentOperation(task, operationId)) return sharedReply(task, operationId);
+    if (task && payload?.agentId !== undefined && task.revision !== payload.revision) {
+      return aiJson({ status: "error", message: "对话已更新。请重试。", task }, 409);
+    }
     const rawQuestion = typeof payload?.question === "string" ? payload.question : "";
     const question = rawQuestion.trim();
     const history = shared ? [] : payload?.history ?? [];
@@ -100,10 +119,15 @@ export async function POST(request: Request) {
       return aiJson({ status: "context", task: saved });
     }
     const credentials = readAICredentials(request);
-    if (question.includes(credentials.apiKey) || (shared && /\bsk-[A-Za-z0-9_-]{16,}\b/i.test(question))) {
+    if (question.includes(credentials.apiKey) || containsSavedAIKey(request, question)
+      || (shared && /\bsk-[A-Za-z0-9_-]{16,}\b/i.test(question))) {
       return aiJson({ status: "error", message: "请先移除问题里的 Key。" }, 400);
     }
     const run = access.includeExperiment ? selected : null;
+    if (starting) {
+      task ??= await createAgentTask(question, run?.session, run ?? undefined, { tutorContext: access, researchId: operationId });
+      return aiJson({ status: "started", task });
+    }
     const lesson = topic && getDeepLesson(topic.topic.id);
     const exercises = topic ? [...(topic.topic.teaching?.exercises ?? []), ...(lesson?.exercises ?? [])] : [];
     const practice = topic && payload?.includePractice === true
@@ -132,7 +156,8 @@ export async function POST(request: Request) {
       } }),
       excerpt: topic.sections.flatMap(({ paragraphs }) => paragraphs).join("\n").slice(0, 800),
     })), available: registeredEngines.map(({ id, creator }) => ({ id, title: creator.title })) };
-    if (JSON.stringify(input).includes(credentials.apiKey)) throw new AIRequestError("请先移除问题里的 Key。", 400);
+    const serialized = JSON.stringify(input);
+    if (serialized.includes(credentials.apiKey) || containsSavedAIKey(request, serialized)) throw new AIRequestError("请先移除问题里的 Key。", 400);
 
     const requestedLine = credentials.selection.provider === "siliconflow" && credentials.selection.model === "backup"
       ? requestedPythonVerbatimLine(rawQuestion) : null;
@@ -217,8 +242,7 @@ export async function POST(request: Request) {
       if (result.action !== "answer") throw new AIRequestError("AI 回复格式有误。", 502);
       return aiJson({ status: "answer", answer: result.observation, ...result.tutor });
     }
-    task ??= await createAgentTask(question, run?.session, run ?? undefined, { tutorContext: access });
-    const operationId = typeof payload.operationId === "string" && /^[a-f0-9-]{36}$/i.test(payload.operationId) ? payload.operationId : undefined;
+    task ??= await createAgentTask(question, run?.session, run ?? undefined, { tutorContext: access, researchId: operationId });
     const next = await replyToAgentMessage(task, question, credentials, operationId, undefined, {
       access, run,
       async resolve(history, context, credentials) {
@@ -226,16 +250,13 @@ export async function POST(request: Request) {
         if (focus && experimentFollowUp.test(question.normalize("NFKC"))) {
           return { action: "plan", focus: { ...focus, goal: focus.goal ?? focus.topic } };
         }
-        const { result, model } = await resolve(history.slice(-maxCreatorHistory).map((turn) => ({
+        const { result, model } = await resolve(recentAgentTurns(history, maxCreatorHistory).map((turn) => ({
           question: turn.message, answer: turn.reply ?? "", codeBlocks: turn.tutor?.codeBlocks,
         })), context, credentials);
         return { ...result, model };
       },
     });
-    if (next.dialogue?.error) return aiJson({ status: "error", message: next.dialogue.error, task: next });
-    const lastTurn = next.dialogue?.turns.at(-1);
-    const workbench = lastTurn?.action === "run" && next.phase === "confirm" ? agentWorkbenchLink({ agentId: next.id }) : undefined;
-    return aiJson({ status: "shared", task: next, workbench });
+    return sharedReply(next, operationId);
   } catch (error) {
     return aiErrorResponse(error);
   }

@@ -24,10 +24,12 @@ const historyAPI = await import("../src/app/api/experiments/history/route.ts");
 const { POST: diagnosisPOST } = await import("../src/app/api/experiments/runs/[runId]/diagnosis/route.ts");
 const { GET: replayGET } = await import("../src/app/api/experiments/runs/[runId]/replay/route.ts");
 const { POST: tutorPOST } = await import("../src/app/api/ai/tutor/route.ts");
+const connectionAPI = await import("../src/app/api/ai/connection/route.ts");
+const { recentAgentTurns } = await import("../src/lib/server/experimentAgent.ts");
 const { POST: learningPOST } = await import("../src/app/api/ai/learning/route.ts");
 const { agentTools, prepareToolCall } = await import("../src/lib/server/agentTools.ts");
 const { createAIExperimentSession, createWorkbenchSession, confirmExperimentSession, runExperimentSession, getComparableExperimentRuns,
-  getActiveAgentTask, getExperimentRun, getExperimentSession, runConfirmedAgentCall, getAgentTask, getTutorHistory, saveDiagnosis,
+  getActiveAgentTask, getExperimentRun, getExperimentSession, runConfirmedAgentCall, getAgentTask, getTutorHistory, saveAgentTask, saveDiagnosis,
   getLearningProgress, submitKnowledgeExercise, getDiagnosis, getWorkbenchResume, getWorkbenchView } = await import("../src/lib/server/experimentRecords.ts");
 const { learningSuggestion } = await import("../src/lib/learningPath.ts");
 const { getExperimentEngine, registeredEngines } = await import("../src/lib/experimentEngines.ts");
@@ -164,6 +166,128 @@ function modelReply(content, finishReason = "stop") {
 
 const sortingPlan = { action: "run", plan: ["比较两种排序"], observation: "用同一组数比较。",
   calls: [{ tool: "sorting", parameters: { goalLabel: "比较排序", values: [5, 2, 9, 1] } }] };
+
+test("retrying an acknowledged instruction returns the saved turn without another model call", async (t) => {
+  const { post, upstreamFetch } = await setup(t, "192.0.2.85", () => ({ action: "answer", observation: "已记下。" }));
+  const task = (await post("start", null, { goal: "讨论排序" })).task;
+  const body = { message: "你好", operationId: randomUUID() };
+  const first = await post("message", task, body);
+  assert.equal(first.http, 200);
+  const calls = upstreamFetch.mock.callCount();
+  const replay = await post("message", task, body);
+  assert.equal(replay.http, 200);
+  assert.deepEqual(replay.task, first.task);
+  assert.equal(upstreamFetch.mock.callCount(), calls);
+});
+
+test("an expired approval can recover its saved Run at the step limit", async (t) => {
+  const { post } = await setup(t, "192.0.2.86", () => sortingPlan);
+  const draft = (await post("start", null, { goal: "比较排序" })).task;
+  const planned = (await post("message", draft, { message: "比较排序" })).task;
+  const running = await saveAgentTask(planned, { phase: "running", leaseUntil: Date.now() - 1, steps: 12 });
+  const saved = await runConfirmedAgentCall(running, running.pending[0].id);
+  assert.ok(saved);
+  const result = await post("approve", running);
+  assert.equal(result.task.phase, "observe");
+  assert.equal(result.task.steps, 12);
+  assert.deepEqual(result.task.runs.map(({ id }) => id), [saved.id]);
+  assert.equal((await getExperimentRun(saved.id)).completedAt, saved.completedAt);
+});
+
+test("the same BYOK settings drive both providers in Tutor and real workbench runs across retries", async (t) => {
+  const limits = globalThis.algoVerseAILimits;
+  delete globalThis.algoVerseAILimits;
+  t.after(() => { globalThis.algoVerseAILimits = limits; });
+  const { post, upstreamFetch, values } = await setup(t, "192.0.2.87", () => assert.fail("use personal fixtures"));
+  const profiles = [
+    { provider: "deepseek", model: "deepseek-flash", endpoint: "api.deepseek.com", key: "sk-byok-integration-deepseek" },
+    { provider: "qwen", model: "qwen3.8-flash", endpoint: "dashscope-intl.aliyuncs.com", key: "sk-byok-integration-qwen",
+      region: "ap-southeast-1" },
+  ];
+  const calls = [];
+  upstreamFetch.mock.mockImplementation(async (endpoint, init) => {
+    const profile = profiles.find((entry) => new URL(endpoint).hostname === entry.endpoint);
+    assert.ok(profile && init.headers.Authorization === `Bearer ${profile.key}`);
+    const body = JSON.parse(init.body);
+    assert.equal(body.model, profile.model);
+    assert.ok(!init.body.includes(profile.key));
+    const input = JSON.parse(body.messages[1].content);
+    calls.push({ model: body.model, input, roles: body.messages.map(({ role }) => role) });
+    const output = input === "连接测试" ? { ok: true }
+      : input.stage === "plan" ? sortingPlan
+      : input.message?.includes("解释实测") ? { action: "explain", observation: "收到实测。", evidence: ["r1-r1-comparisons"] }
+      : input.message ? { action: "plan", focus: { topic: "排序", goal: "比较操作次数" } }
+      : { answer: `${body.model} 已回复。`, citations: [] };
+    return Response.json({ model: body.model, choices: [{ finish_reason: "stop", message: { content: JSON.stringify(output) } }],
+      usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 } });
+  });
+
+  let cookie = "";
+  let tutorTask;
+  for (const { provider, model, region, key } of profiles) {
+    const modelHeaders = { "Content-Type": "application/json", "X-AI-Provider": provider, "X-AI-Model": model,
+      ...(region && { "X-AI-Region": region }) };
+    const saved = await connectionAPI.POST(new Request("https://algoverse.test/api/ai/connection", {
+      method: "POST", body: "{}", headers: { ...modelHeaders, Cookie: cookie, "X-AI-Save-Credential": "1", Authorization: `Bearer ${key}` },
+    }));
+    assert.equal(saved.status, 200);
+    cookie = saved.headers.get("Set-Cookie").split(";")[0];
+    const publicConfig = await connectionAPI.GET(new Request("https://algoverse.test/api/ai/connection", { headers: { Cookie: cookie } })).json();
+    const selected = { ...modelHeaders, Cookie: cookie, "X-AI-Credential-Version": publicConfig.providers[provider].credentialVersion };
+    const question = "讲一下排序的操作次数。";
+    const ask = async (payload) => (await tutorPOST(new Request("https://algoverse.test/api/ai/tutor", {
+      method: "POST", headers: selected, body: JSON.stringify({ conversation: true, ...payload }),
+    }))).json();
+    if (!tutorTask) {
+      const initialOperation = randomUUID();
+      const before = calls.length;
+      tutorTask = (await ask({ action: "start", question, operationId: initialOperation })).task;
+      assert.equal(tutorTask.id, initialOperation);
+      assert.equal(calls.length, before);
+      assert.ok(values.get("algoverse_visitor"));
+    }
+    for (const prompt of [question, "再举一个例子。"]) {
+      const body = { question: prompt, agentId: tutorTask.id, revision: tutorTask.revision, operationId: randomUUID() };
+      const result = await ask(body);
+      assert.equal(result.status, "shared");
+      const before = calls.length;
+      assert.equal((await ask(body)).task.revision, result.task.revision);
+      assert.equal(calls.length, before);
+      tutorTask = result.task;
+      assert.equal(tutorTask.dialogue.turns.at(-1).model, model);
+    }
+
+    const draft = (await post("start", null, { goal: "比较冒泡和快排", operationId: randomUUID() })).task;
+    const planned = (await post("message", draft, { message: "比较冒泡和快排", operationId: randomUUID() }, selected)).task;
+    assert.equal(planned.phase, "confirm");
+    assert.equal(planned.dialogue.turns.at(-1).model, model);
+    assert.equal(await getExperimentRun(planned.pending[0].id), null);
+    const attempts = await Promise.all([post("approve", planned), post("approve", planned)]);
+    assert.deepEqual(attempts.map(({ http }) => http).sort(), [200, 409]);
+    const completed = (await post("status", planned)).task;
+    assert.equal(completed.runs.length, 1);
+    const run = await getExperimentRun(completed.runs[0].id);
+    assert.deepEqual(run.results.bubble.sorted, [1, 2, 5, 9]);
+    const analyzed = (await post("message", completed, { message: "解释实测", selectedRunId: run.id, operationId: randomUUID() }, selected)).task;
+    assert.deepEqual(analyzed.runs.map(({ id }) => id), [run.id]);
+    assert.equal(analyzed.dialogue.turns.at(-1).action, "explain");
+    assert.equal(calls.at(-1).input.selectedRound, 1);
+    assert.ok(calls.at(-1).roles.includes("assistant"));
+  }
+  assert.deepEqual(tutorTask.dialogue.turns.map((turn) => turn.model),
+    ["deepseek-flash", "deepseek-flash", "qwen3.8-flash", "qwen3.8-flash"]);
+});
+
+test("a long conversation keeps recent full turns within the model context budget", () => {
+  const turns = Array.from({ length: 10 }, (_, index) => ({
+    message: `第${index}问`, reply: "答".repeat(4700), action: "answer", model: "test", evidence: [],
+  }));
+  const bounded = recentAgentTurns(turns, 10);
+  assert.ok(bounded.length < turns.length);
+  assert.equal(bounded.at(-1), turns.at(-1));
+  assert.equal(turns.length, 10);
+  assert.equal(turns[0].reply.length, 4700);
+});
 
 function historyRequest(method, body) {
   return historyAPI[method](new Request("https://algoverse.test/api/experiments/history", {
@@ -670,7 +794,7 @@ test("stopping one reply preserves its proposal and ignores unrelated stop reque
   assert.equal(unrelated.dialogue.pending, "把输入改一下。");
   const stopped = (await post("stop", proposal, { operationId })).task;
   assert.equal(stopped.dialogue.pending, undefined);
-  assert.deepEqual(stopped.dialogue.turns.at(-1), { message: "把输入改一下。", stopped: true });
+  assert.deepEqual(stopped.dialogue.turns.at(-1), { message: "把输入改一下。", stopped: true, operationId });
   assert.deepEqual(stopped.pending, proposal.pending);
   result.resolve(sortingPlan);
   assert.equal((await waiting).http, 409);

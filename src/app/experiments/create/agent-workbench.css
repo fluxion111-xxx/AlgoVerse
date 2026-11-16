@@ -51,6 +51,31 @@
 .wb-brand-divider { width: 1px; height: 19px; background: var(--wb-line); margin-inline: 5px; }
 .wb-product { color: var(--wb-muted); font-size: 13px; }
 .wb-top-tools { flex: none; gap: 6px; }
+.wb-model-picker { position: relative; min-width: 0; }
+.wb-model-picker select {
+  appearance: none;
+  width: clamp(165px, 20vw, 264px);
+  min-height: 36px;
+  padding: 6px 30px 6px 10px;
+  border: 1px solid var(--wb-line);
+  border-radius: 5px;
+  background: linear-gradient(115deg, #ffffff07, transparent), var(--wb-panel);
+  color: var(--wb-ink);
+  font: inherit;
+  font-size: 13px;
+  text-overflow: ellipsis;
+}
+.wb-model-picker select:hover:enabled { border-color: var(--wb-accent); }
+.wb-model-picker select:disabled { opacity: .65; }
+.wb-model-picker select option { background: var(--wb-panel); }
+.wb-model-picker svg {
+  position: absolute;
+  inset-inline-end: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: var(--wb-accent);
+}
 .algoverse-workbench .wb-button {
   display: inline-flex;
   justify-content: center;
@@ -745,16 +770,18 @@
 
 @media (max-width: 580px) {
   .algoverse-workbench { --wb-gutter: 10px; }
-  .wb-top { min-height: 48px; gap: 5px; }
+  .wb-top { min-height: 76px; gap: 5px; flex-wrap: wrap; }
   .wb-brand { font-size: 18px; gap: 4px; }
   .wb-brand svg { width: 16px; }
   .wb-brand-divider { margin-inline: 1px; }
   .wb-brand-row { gap: 5px; }
   .wb-product { font-size: 11px; }
-  .wb-top-tools { gap: 0; }
+  .algoverse-workbench .wb-top-tools { width: 100%; gap: 6px; }
+  .wb-model-picker { flex: 1; }
+  .wb-model-picker select { width: 100%; min-height: 32px; font-size: 16px; }
   .algoverse-workbench .wb-top-link { min-height: 32px; padding: 4px 6px; }
   .wb-top-link span, .wb-new span { display: none; }
-  .wb-frame { height: calc(100svh - 48px); grid-template-rows: auto auto minmax(290px, 1fr) auto; }
+  .wb-frame { height: calc(100svh - 76px); grid-template-rows: auto auto minmax(290px, 1fr) auto; }
   .wb-session { gap: 8px; }
   .wb-session-name { gap: 6px; }
   .wb-session-name h1 { font-size: 17px; }

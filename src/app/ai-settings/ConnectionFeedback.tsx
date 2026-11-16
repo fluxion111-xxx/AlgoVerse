@@ -2,12 +2,12 @@
 
 import { Icon } from "@iconify/react";
 import { useEffect, useRef, useState } from "react";
-import { canUseAITransport, type TokenUsage } from "@/lib/aiSettings";
+import { canUseAITransport, type AIConfiguration, type ConnectionVerification, type TokenUsage } from "@/lib/aiSettings";
 import { AIResponseError, fetchAI, readAIResponse } from "@/lib/aiHttp";
 import { formatAIRetryTime } from "@/lib/aiRateLimit";
-import type { ConnectionVerification } from "@/lib/temporaryAI";
+import { withCredentialMutation } from "@/lib/temporaryAI";
 
-type ResponseBody = { status: "connected"; model: string; usage: TokenUsage };
+type ResponseBody = { status: "connected"; model: string; usage: TokenUsage; configuration?: AIConfiguration };
 type Attempt = { kind: "pending" } | { kind: "error" | "unverified"; message: string };
 type Result = { kind: "success"; provider: string; model: string } | { kind: "error"; message: string };
 const httpsHint = "请通过 HTTPS 打开此页。";
@@ -52,11 +52,13 @@ export function useConnectionTest() {
     return () => window.clearInterval(timer);
   }, [retryAt]);
 
-  async function run({ headers, provider, model, onVerified }: {
+  async function run({ headers, provider, model, onVerified, onAuthFailure, onConfigurationChanged }: {
     headers: Record<string, string>;
     provider: string;
     model?: string;
-    onVerified: (verification: ConnectionVerification) => void;
+    onVerified: (verification: ConnectionVerification, configuration?: AIConfiguration) => void;
+    onAuthFailure?: () => void;
+    onConfigurationChanged?: () => void;
   }) {
     if (pending.current || !canTest || retryAt > Date.now()) return;
     const controller = new AbortController();
@@ -71,16 +73,18 @@ export function useConnectionTest() {
     }
 
     try {
-      const response = await fetchAI("/api/ai/connection", {
-        method: "POST", cache: "no-store", redirect: "error", signal: controller.signal,
+      const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(75_000)]);
+      const send = () => fetchAI("/api/ai/connection", {
+        method: "POST", cache: "no-store", redirect: "error", signal,
         headers: { "Content-Type": "application/json", ...headers }, body: "{}",
       });
+      const response = await (headers["X-AI-Save-Credential"] === "1" ? withCredentialMutation(send, signal) : send());
       const body = await readAIResponse<ResponseBody>(response);
       if (pending.current !== controller) return;
 
       if (body.status === "connected" && typeof body.model === "string" && body.model
         && (!model || body.model === model) && Number.isSafeInteger(body.usage?.totalTokens)) {
-        onVerified({ model: body.model, usage: body.usage });
+        onVerified({ model: body.model, usage: body.usage }, body.configuration);
         setAttempt(null);
         setResult({ kind: "success", provider, model: body.model });
       } else {
@@ -89,6 +93,8 @@ export function useConnectionTest() {
     } catch (error) {
       if (pending.current !== controller) return;
       if (error instanceof AIResponseError) {
+        if (error.status === 401) onAuthFailure?.();
+        if (error.code === "credential_changed") onConfigurationChanged?.();
         if (error.retryAfter) {
           const now = Date.now();
           setClock(now);

@@ -3,21 +3,23 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { availableAIModels, canUseAITransport } from "@/lib/aiSettings";
-import { agentDialogueActive, type AgentTask, type TutorConversationSummary } from "@/lib/experimentAgent";
+import { canUseAITransport } from "@/lib/aiSettings";
+import { AIResponseError, readAIResponse } from "@/lib/aiHttp";
+import { formatAIRetryTime } from "@/lib/aiRateLimit";
+import { agentDialogueActive, hasAgentOperation, type AgentTask, type TutorConversationSummary } from "@/lib/experimentAgent";
 import { maxQuestionLength } from "@/lib/experimentCreator";
 import { agentWorkbenchLink, tutorConversationLink, tutorResumeCookie, tutorRoute, workflowAISettingsRoute } from "@/lib/navigation";
-import { isPlatformModel, platformModels } from "@/lib/platformAI";
-import { fetchWithTemporaryAI, requestAgentTask, selectPlatformAIModel, selectTemporaryAIModel, useActiveAI, useTemporaryAI } from "@/lib/temporaryAI";
+import { fetchWithTemporaryAI, refreshAIConfiguration, requestAgentTask, useAIModelChoices } from "@/lib/temporaryAI";
 import { NavigationLink } from "../NavigationLink";
 import { CatalogIcon } from "./CatalogEffects";
 import { LazyTutorReply } from "./LazyTutorReply";
+import { AIModelSelect } from "./AIModelSelect";
 
 type Reference = { title: string; href: string };
 type Metric = { id: string; label: string; value: string };
 type RunOption = Reference & { id: string; completedAt: string; metrics?: Metric[] };
 type Conversation = Pick<AgentTask, "id" | "goal" | "revision" | "dialogue" | "tutorContext">;
-type ActiveRequest = { controller: AbortController; operationId: string };
+type ActiveRequest = { controller: AbortController; operationId: string; taskId?: string };
 type Feedback = { kind: "error" | "stopped"; text: string };
 
 type TutorProps = {
@@ -47,8 +49,8 @@ function ReferenceLink({ reference, children }: { reference: Reference; children
 
 export function TutorConversation({ initialTask, initialHistory, initial, choices, topicId, reference, returnToDiagnosis, missingRun }: TutorProps) {
   const router = useRouter();
-  const connection = useActiveAI();
-  const { mode, platformModel } = useTemporaryAI();
+  const models = useAIModelChoices("tutor");
+  const connection = models.active;
   const [task, setTask] = useState(initialTask);
   const [conversations, setConversations] = useState(initialHistory);
   const [question, setQuestion] = useState(initialTask?.dialogue?.error ? initialTask.dialogue.pending ?? "" : "");
@@ -61,11 +63,13 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
   const [revealedRevision, setRevealedRevision] = useState<number>();
   const [stopping, setStopping] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(initialTask?.dialogue?.error ? { kind: "error", text: initialTask.dialogue.error } : null);
+  const [clock, setClock] = useState(0);
   const [panelOpen, setPanelOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const historyToggle = useRef<HTMLButtonElement>(null);
   const historyClose = useRef<HTMLButtonElement>(null);
   const pending = useRef<ActiveRequest | null>(null);
+  const uncertainTurn = useRef<{ operationId: string; question: string } | null>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const panelToggle = useRef<HTMLButtonElement>(null);
   const panelTitle = useRef<HTMLHeadingElement>(null);
@@ -75,6 +79,10 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
   const restored = task && agentDialogueActive(task) ? task.dialogue : undefined;
   const activeText = requestText || restored?.pending;
   const busy = !!activeText || stopping;
+  const provider = "selection" in models.current.choice ? models.current.choice.selection.provider : "siliconflow";
+  const cooldown = task?.dialogue?.cooldown;
+  const retryAt = cooldown?.provider === provider ? cooldown.until : 0;
+  const remaining = clock && retryAt ? Math.max(0, Math.ceil((retryAt - clock) / 1000)) : 0;
   const history = task?.dialogue?.turns ?? [];
   const options = initial ? [initial, ...choices.filter(({ id }) => id !== initial.id)] : choices;
   const context = options.find(({ id }) => id === selected);
@@ -84,15 +92,22 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
   const recentCode = history.findLastIndex(({ tutor, reply }) => tutor?.codeBlocks?.length || /(?:^|\n) {0,3}(?:`{3,}|~{3,})/.test(reply ?? ""));
   const hasContext = !!(references.length || options.length || recentCode >= 0);
   const sideOpen = hasContext && panelOpen;
-  const personalSelection = connection && "selection" in connection ? connection.selection : undefined;
-  const personalModels = personalSelection ? availableAIModels(personalSelection.provider,
-    personalSelection.provider === "qwen" ? personalSelection.region : undefined) : [];
   const settingsParams = new URLSearchParams();
   if (selected) settingsParams.set("runId", selected);
   if (topicId) settingsParams.set("topic", topicId);
   if (task) settingsParams.set("agentId", task.id);
   if (returnToDiagnosis && selected === initial?.id) settingsParams.set("from", "diagnosis");
   const settingsHref = workflowAISettingsRoute(settingsParams.size ? `${tutorRoute}?${settingsParams}` : tutorRoute);
+
+  useEffect(() => {
+    if (!retryAt) return;
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      setClock(now);
+      if (now >= retryAt) window.clearInterval(timer);
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, [retryAt]);
 
   useEffect(() => {
     setReady(true);
@@ -137,6 +152,14 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
     const timer = window.setInterval(() => {
       void requestAgentTask({ action: "status", id }, undefined, controller.signal).then((next) => {
         setTask((current) => current?.id === next.id && current.revision <= next.revision ? next : current);
+        const uncertain = uncertainTurn.current;
+        if (uncertain && !agentDialogueActive(next) && hasAgentOperation(next, uncertain.operationId)) {
+          uncertainTurn.current = null;
+          if (next.dialogue?.turns.some((turn) => turn.operationId === uncertain.operationId && turn.action)) {
+            setQuestion((draft) => draft.trim() === uncertain.question ? "" : draft);
+            setFeedback(null);
+          } else if (next.dialogue?.error) setFeedback({ kind: "error", text: next.dialogue.error });
+        }
       }).catch(() => {});
     }, 1500);
     return () => { window.clearInterval(timer); controller.abort(); };
@@ -168,6 +191,7 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
   }
 
   function clearDialogue() {
+    uncertainTurn.current = null;
     rememberConversation();
     setFeedback(null);
     setConfirmClear(false);
@@ -197,12 +221,14 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
     const operationId = request?.operationId ?? restored?.operationId;
     if (stopping || !operationId) return;
     pending.current = null;
+    uncertainTurn.current = null;
     request?.controller.abort();
     setRequestText("");
     setStopping(true);
     try {
-      if (task) {
-        const stopRequest = () => requestAgentTask({ action: "stop", id: task.id, operationId });
+      const id = request?.taskId ?? task?.id;
+      if (id) {
+        const stopRequest = () => requestAgentTask({ action: "stop", id, operationId });
         setTask(await stopRequest().catch(stopRequest));
       }
       setFeedback({ kind: "stopped", text: "已停止。可以重试。" });
@@ -216,37 +242,76 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
 
   async function send(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!ready || busy || pending.current || confirmClear) return;
+    if (!ready || busy || pending.current || confirmClear || retryAt > Date.now()) return;
     const text = question.trim();
     if (!text) { input.current?.focus(); return; }
     if (!connection || !canUseAITransport(window.location)) {
-      setFeedback({ kind: "error", text: connection ? "请通过 HTTPS 使用 AI。" : "请先配置 AI 服务。" });
+      setFeedback({ kind: "error", text: connection ? "请通过 HTTPS 使用 AI。" : models.current.reason });
       return;
     }
 
-    const request = { controller: new AbortController(), operationId: crypto.randomUUID() };
+    const uncertain = uncertainTurn.current;
+    const request: ActiveRequest = { controller: new AbortController(), taskId: task?.id,
+      operationId: uncertain?.question === text ? uncertain.operationId : crypto.randomUUID() };
+    uncertainTurn.current = { question: text, operationId: request.operationId };
     pending.current = request;
     follow.current = true;
     setRequestText(text);
     setFeedback(null);
     try {
-      const response = await fetchWithTemporaryAI("/api/ai/tutor", connection, {
+      const body = {
         conversation: true, question: text, topicId, operationId: request.operationId,
-        ...(task && { agentId: task.id, revision: task.revision }),
         runId: context?.id, includeExperiment: include && !!context, includePractice: includePractice && !!topicId,
+      };
+      let current = task;
+      if (!current) {
+        const started = await fetchWithTemporaryAI("/api/ai/tutor", connection, { ...body, action: "start" }, request.controller.signal);
+        const result = await readAIResponse<{ task?: Conversation }>(started);
+        if (pending.current !== request) return;
+        current = result.task;
+        if (!current?.id) throw new AIResponseError("会话建立失败。请重试。", 502);
+        request.taskId = current.id;
+        rememberConversation(current);
+      }
+      const response = await fetchWithTemporaryAI("/api/ai/tutor", connection, {
+        ...body, agentId: current.id, revision: current.revision,
       }, request.controller.signal);
-      const result = await response.json();
+      const result = await response.clone().json().catch(() => null);
       if (pending.current !== request) return;
-      if (result.task) rememberConversation(result.task);
-      if (!response.ok || result.status !== "shared") {
-        setFeedback({ kind: "error", text: result.message ?? "请求失败，请重试。" });
+      if (result?.task) rememberConversation(result.task);
+      if (result?.status === "pending") return;
+      if (!response.ok) await readAIResponse(response);
+      if (result?.status === "stopped") {
+        uncertainTurn.current = null;
+        setFeedback({ kind: "stopped", text: "已停止。可以重试。" });
         return;
       }
+      if (result?.status !== "shared") {
+        if (result?.task) uncertainTurn.current = null;
+        if ("selection" in connection && result?.code === "authentication") void refreshAIConfiguration();
+        setFeedback({ kind: "error", text: result?.message ?? "服务响应异常。请重试。" });
+        return;
+      }
+      uncertainTurn.current = null;
       setQuestion("");
       setRevealedRevision(result.task?.revision);
       if (result.workbench && result.task) router.push(agentWorkbenchLink({ agentId: result.task.id }));
-    } catch {
-      if (pending.current === request) setFeedback({ kind: "error", text: "连接失败，请重试。" });
+    } catch (error) {
+      if (pending.current !== request) return;
+      setFeedback({ kind: "error", text: error instanceof AIResponseError ? error.message : "请求失败，请重试。" });
+      if (request.taskId && error instanceof AIResponseError && (error.status === 0 || error.status >= 500)) {
+        const snapshot = await requestAgentTask({ action: "status", id: request.taskId }, undefined, request.controller.signal).catch(() => null);
+        if (pending.current !== request || !snapshot) return;
+        rememberConversation(snapshot);
+        if (snapshot.dialogue?.turns.some((turn) => turn.operationId === request.operationId && turn.action)) {
+          uncertainTurn.current = null;
+          setQuestion((draft) => draft.trim() === text ? "" : draft);
+          setFeedback({ kind: "stopped", text: "回复已同步。" });
+        } else if (snapshot.dialogue?.error && snapshot.dialogue.operationId === request.operationId) {
+          uncertainTurn.current = null;
+          setFeedback({ kind: "error", text: snapshot.dialogue.error });
+        }
+      }
     } finally {
       if (pending.current === request) {
         pending.current = null;
@@ -362,9 +427,9 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
             <button type="button" onClick={startNewConversation}>开启新对话</button>
             <button type="button" onClick={() => { setConfirmClear(false); input.current?.focus(); }}>继续编辑</button>
           </div>}
-          {feedback && <div className="tutor-feedback" data-kind={feedback.kind}>
-            <p role={feedback.kind === "error" ? "alert" : "status"}>{feedback.text}</p>
-            <button type="button" onClick={() => input.current?.form?.requestSubmit()}>重试</button>
+          {(feedback || remaining > 0) && <div className="tutor-feedback" data-kind={feedback?.kind ?? "error"}>
+            <p role={feedback?.kind === "error" ? "alert" : "status"}>{feedback?.text ?? cooldown?.message}{remaining > 0 && ` ${formatAIRetryTime(remaining)}`}</p>
+            <button type="button" disabled={remaining > 0} onClick={() => input.current?.form?.requestSubmit()}>重试</button>
           </div>}
           <div className="tutor-editor">
             <label className="sr-only" htmlFor="tutor-question">你想弄懂什么？</label>
@@ -381,22 +446,14 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
             </div>
             <div className="tutor-editor-actions">
               <span id="tutor-question-count">{question.length} / {maxQuestionLength}</span>
-              {mode === "platform" || personalSelection ? <div className="tutor-model-picker">
-                <label className="sr-only" htmlFor="tutor-model">切换模型</label>
-                <select id="tutor-model" lang="en" value={personalSelection?.model ?? platformModel} disabled={!ready || busy} onChange={(event) => {
-                  const model = event.target.value;
-                  if (mode === "platform" && isPlatformModel(model)) selectPlatformAIModel(model);
-                  else if (mode === "byok") selectTemporaryAIModel(model);
-                  setFeedback(null);
-                }}>
-                  {mode === "platform" ? Object.entries(platformModels).map(([id, title]) => <option key={id} value={id}>{title}</option>)
-                    : personalModels.map(({ apiId, label }) => <option key={apiId} value={apiId}>{label}</option>)}
-                </select>
+              <div className="tutor-model-picker" onChange={() => setFeedback(null)}>
+                <AIModelSelect id="tutor-model" models={models} disabled={!ready || busy} />
                 <CatalogIcon icon="lucide:chevron-down" width={15} />
-              </div> : <NavigationLink className="tutor-model-link" href={settingsHref}>配置模型 <CatalogIcon icon="lucide:chevron-down" width={15} /></NavigationLink>}
+              </div>
+              {!connection && <NavigationLink className="tutor-model-link" href={settingsHref}>AI 设置</NavigationLink>}
               {busy ? <button key="stop" className="tutor-send" type="button" disabled={stopping} onClick={() => void stop()} aria-label="停止接收" title="停止接收">
                 <CatalogIcon icon="lucide:square" width={15} /><span>停止</span>
-              </button> : <button key="send" className="tutor-send" type="submit" disabled={!ready || confirmClear || !question.trim()}
+              </button> : <button key="send" className="tutor-send" type="submit" disabled={!ready || confirmClear || !question.trim() || remaining > 0}
                 aria-label="发送给阿洛" title="发送给阿洛"><CatalogIcon icon="lucide:arrow-up" width={17} /><span>发送</span></button>}
             </div>
           </div>

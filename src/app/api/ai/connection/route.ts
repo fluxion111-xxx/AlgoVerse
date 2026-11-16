@@ -1,4 +1,37 @@
-import { AIRequestError, AIUnverifiedError, aiErrorResponse, aiJson, asObject, readAICredentials, requestAIJson } from "@/lib/server/aiProvider";
+import { clearSavedCredential, credentialMetadata, readCredentialSession, saveVerifiedCredential } from "@/lib/server/aiCredentialSession";
+import { AIRequestError, AIUnverifiedError, aiErrorResponse, aiJson, asObject, assertAIRequestOrigin, platformAIConfigured, readAICredentials, requestAIJson } from "@/lib/server/aiProvider";
+
+function configuration(session: ReturnType<typeof readCredentialSession>) {
+  return { platformConfigured: platformAIConfigured(), ...credentialMetadata(session) };
+}
+
+export function GET(request: Request) {
+  try {
+    assertAIRequestOrigin(request);
+    return aiJson(configuration(readCredentialSession(request)));
+  } catch (error) {
+    return aiErrorResponse(error);
+  }
+}
+
+export async function DELETE(request: Request) {
+  try {
+    assertAIRequestOrigin(request);
+    const provider = request.headers.get("x-ai-provider");
+    if ((provider !== "deepseek" && provider !== "qwen") || !await hasEmptyPayload(request)) {
+      throw new AIRequestError("请选择要清除的服务商。", 400);
+    }
+    const session = readCredentialSession(request);
+    const version = request.headers.get("x-ai-credential-version");
+    if (version !== null && version !== session?.providers[provider]?.credentialVersion) {
+      throw new AIRequestError("AI 配置已变更。请重试。", 409, undefined, "credential_changed");
+    }
+    clearSavedCredential(session, provider);
+    return aiJson(configuration(session));
+  } catch (error) {
+    return aiErrorResponse(error);
+  }
+}
 
 async function hasEmptyPayload(request: Request) {
   const reader = request.body?.getReader();
@@ -28,7 +61,13 @@ async function hasEmptyPayload(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const credentials = readAICredentials(request);
+    const credentials = readAICredentials(request, false, true);
+    const original = readCredentialSession(request);
+    const previous = credentials.visitor === undefined ? original?.providers[credentials.selection.provider] : undefined;
+    const expected = request.headers.get("x-ai-credential-version");
+    if (credentials.visitor === undefined && expected !== null && expected !== previous?.credentialVersion) {
+      throw new AIRequestError("AI 配置已变更。请重试。", 409, undefined, "credential_changed");
+    }
 
     // Model endpoints are selected by the adapter's provider and region allowlist.
     if (new URL(request.url).search || request.headers.has("x-ai-base-url") || request.headers.has("x-base-url")
@@ -46,6 +85,13 @@ export async function POST(request: Request) {
         return result?.ok === true && Object.keys(result).length === 1 ? true : null;
       },
     });
+    if (credentials.visitor === undefined && request.headers.get("x-ai-save-credential") === "1") {
+      const saved = saveVerifiedCredential(request, credentials.selection, credentials.apiKey, { model, usage }, original, previous, credentials.workspaceId);
+      if (!saved) throw new AIRequestError("Key 未保存。请重试。", 409);
+      const response = aiJson({ status: "connected", model, usage, configuration: configuration(saved.session) });
+      if (saved.cookie) response.headers.set("Set-Cookie", saved.cookie);
+      return response;
+    }
     return aiJson({ status: "connected", model, usage });
   } catch (error) {
     if (error instanceof AIUnverifiedError) return aiJson({ status: "unverified", message: error.message }, error.status);

@@ -6,6 +6,7 @@ import { agentPlanningTools, agentTools, callAgentTool, prepareToolCall } from "
 import { getDiagnosis, getExperimentRun, saveAgentTask, type ExperimentRun } from "./experimentRecords";
 
 const leaseMs = 75_000;
+const dialogueContextBytes = 24 * 1024;
 export type FocusUpdate = Omit<AgentFocus, "firstRun"> & { switchTopic?: boolean };
 type Decision = {
   action: "finish" | AgentTurnAction;
@@ -223,7 +224,7 @@ function decisionContext(task: AgentTask, currentTopicOnly = false) {
   const focus = task.dialogue?.focus;
   const firstRun = focus?.firstRun ?? 0;
   const currentExperiment = currentProposal(task);
-  const conversation = visibleTurns(task.dialogue?.turns ?? []).slice(-agentDialogueLimits.context)
+  const conversation = recentAgentTurns(visibleTurns(task.dialogue?.turns ?? []), agentDialogueLimits.context)
     .map(({ message, reply, action, evidence, tutor }) => ({
       message, reply: tutor?.codeBlocks?.length ? JSON.stringify({ answer: reply, codeBlocks: tutor.codeBlocks }) : reply,
       action, evidence,
@@ -246,6 +247,18 @@ function decisionContext(task: AgentTask, currentTopicOnly = false) {
   };
 }
 
+export function recentAgentTurns(turns: AgentTurn[], limit: number) {
+  let bytes = 0;
+  let first = turns.length;
+  for (let index = turns.length - 1; index >= Math.max(0, turns.length - limit); index--) {
+    const { message, reply, tutor } = turns[index];
+    bytes += Buffer.byteLength(JSON.stringify([message, reply, tutor?.codeBlocks]));
+    if (bytes > dialogueContextBytes && first < turns.length) break;
+    first = index;
+  }
+  return turns.slice(first);
+}
+
 function leaseActive(task: AgentTask) {
   return (task.leaseUntil ?? 0) > Date.now();
 }
@@ -263,11 +276,11 @@ function cooldownFrom(error: unknown, credentials: AICredentials) {
 }
 
 export async function replyToAgentMessage(task: AgentTask, message: string, credentials: AICredentials, operationId?: string, selectedRound?: number, tutor?: TutorDelegate) {
-  credentials.signal.throwIfAborted();
+  if (credentials.signal.aborted) throw new AIRequestError("请求已取消。", 499, undefined, "cancelled");
   if (agentDialogueActive(task) || task.phase === "running" || (task.phase === "deciding" && leaseActive(task))) {
     throw new AIRequestError("当前请求还在处理。", 409);
   }
-  if (!tutor) assertModelReady(task, credentials);
+  assertModelReady(task, credentials);
   const dialogue = task.dialogue ?? { turns: [], requests: 0 };
   if (dialogue.requests >= agentDialogueLimits.requests) throw new AIRequestError("已到本对话上限。", 429);
   const priorScope = task.tutorContext;
@@ -347,18 +360,19 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
       model = response.model;
     }
   } catch (error) {
-    if (credentials.signal.aborted && operationId) return stopAgentAnalysis(claimed, operationId);
     return update(claimed, { dialogue: { ...requested, activeUntil: undefined,
-      cooldown: !tutor ? cooldownFrom(error, credentials) : undefined,
+      cooldown: cooldownFrom(error, credentials),
+      errorCode: credentials.signal.aborted ? "cancelled" : deadline.aborted ? "timeout" : error instanceof AIRequestError ? error.code : undefined,
       error: deadline.aborted && !credentials.signal.aborted ? "本次回复超时。可重试。"
-        : error instanceof AIRequestError ? error.message : "回复失败。请重试。" } });
+        : credentials.signal.aborted ? "请求已取消。可重试。" : error instanceof AIRequestError ? error.message : "回复失败。请重试。" } });
   }
-  if (credentials.signal.aborted && operationId) return stopAgentAnalysis(claimed, operationId);
+  if (credentials.signal.aborted) return update(claimed, { dialogue: { ...requested, activeUntil: undefined,
+    error: "请求已取消。可重试。", errorCode: "cancelled" } });
   if (result.action === "finish") throw new Error("Invalid dialogue action");
   const scheduling = result.action === "explain" && !result.observation ? schedulingEvidence(details, result.evidence) : undefined;
   const reply = !tutor && result.action === "answer" && !task.pending.length && !task.runs.length
     ? trimChatInvitation(result.observation) : result.observation;
-  const turn: AgentTurn = { message, reply, action: result.action, evidence: result.evidence, model, scheduling,
+  const turn: AgentTurn = { message, reply, action: result.action, evidence: result.evidence, model, scheduling, operationId,
     ...(tutorDetails && { tutor: tutorDetails }),
     ...((tutor?.access.includeExperiment || tutor?.access.includePractice) && { tutorScope: tutor.access }),
     ...(result.calls.length && { proposalIds: result.calls.map(({ id }) => id) }) };
@@ -370,7 +384,7 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
   const completed = { turns: [...turns, turn], focus, requests: requested.requests };
   const switchContext = switchTopic ? {
     phase: "draft" as const, experimentGoal: undefined, plan: [], pending: [], referenceConfig: undefined,
-    question: undefined, error: undefined, cooldown: undefined, leaseUntil: undefined, autoContinue: undefined, clarifications: [],
+    question: undefined, error: undefined, errorCode: undefined, cooldown: undefined, leaseUntil: undefined, autoContinue: undefined, clarifications: [],
   } : {};
   if (result.action !== "run") return update(claimed, { ...switchContext, dialogue: completed });
   return update(claimed, {
@@ -379,12 +393,12 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
     plan: result.plan.length ? result.plan : task.plan,
     experimentGoal: result.focus?.goal ?? result.calls[0].config.goalLabel,
     decisions: [...task.decisions, { observation: result.observation, evidence: result.evidence, model, calls: result.calls, plan: result.plan }],
-    question: undefined, leaseUntil: undefined, error: undefined, cooldown: undefined, requests: task.requests + 1, steps: task.steps + 1,
+    question: undefined, leaseUntil: undefined, error: undefined, errorCode: undefined, cooldown: undefined, requests: task.requests + 1, steps: task.steps + 1,
   });
 }
 
 export async function decideAgentTask(task: AgentTask, credentials: AICredentials, operationId?: string) {
-  credentials.signal.throwIfAborted();
+  if (credentials.signal.aborted) throw new AIRequestError("请求已取消。", 499, undefined, "cancelled");
   if (task.dialogue?.pending) throw new AIRequestError("请先处理当前消息。", 409);
   if (task.phase !== "draft" && task.phase !== "observe" && task.phase !== "ai-error"
     && !(task.phase === "deciding" && !leaseActive(task))) throw new AIRequestError("当前不能分析。", 409);
@@ -393,7 +407,7 @@ export async function decideAgentTask(task: AgentTask, credentials: AICredential
   }
   assertModelReady(task, credentials);
   const claimed = await update(task, { phase: "deciding", requests: task.requests + 1, steps: task.steps + 1,
-    leaseUntil: Date.now() + leaseMs, error: undefined, cooldown: undefined, operationId });
+    leaseUntil: Date.now() + leaseMs, error: undefined, errorCode: undefined, cooldown: undefined, operationId });
   const remainingBatch = availableBatch(task, claimed.steps, claimed.requests);
   const stageInstructions = task.runs.length <= (task.dialogue?.focus?.firstRun ?? 0)
     ? '现在制定计划。run 示例结构：{"action":"run","plan":["设置对照","运行基线","看结果再决策"],"observation":"说明如何对照","calls":[{"tool":"引擎 ID","parameters":{}}]}。plan 最多 6 项，按任务改写。未来参数等实测后再选。'
@@ -413,8 +427,9 @@ export async function decideAgentTask(task: AgentTask, credentials: AICredential
     });
   } catch (error) {
     if (credentials.signal.aborted && operationId) return stopAgentAnalysis(claimed, operationId);
-    return update(claimed, { phase: "ai-error", leaseUntil: undefined, operationId: undefined,
+    return update(claimed, { phase: "ai-error", leaseUntil: undefined,
       cooldown: cooldownFrom(error, credentials),
+      errorCode: deadline.aborted && !credentials.signal.aborted ? "timeout" : error instanceof AIRequestError ? error.code : undefined,
       error: deadline.aborted && !credentials.signal.aborted ? "本次分析超时。可重试。"
         : error instanceof AIRequestError ? error.message : "分析失败。请重试。" });
   }
@@ -423,7 +438,7 @@ export async function decideAgentTask(task: AgentTask, credentials: AICredential
   if (result.action === "answer" || result.action === "explain") throw new Error("Invalid experiment action");
   const phase = { run: "confirm", finish: "finished", clarify: "clarify", unsupported: "unsupported" } as const;
   return update(claimed, {
-    phase: phase[result.action], leaseUntil: undefined, operationId: undefined,
+    phase: phase[result.action], leaseUntil: undefined,
     ...(result.action === "run" && { autoContinue: true }),
     plan: task.plan.length ? task.plan : result.plan,
     pending: result.calls, question: result.action === "clarify" ? result.observation : undefined,
@@ -436,7 +451,7 @@ export async function stopAgentAnalysis(task: AgentTask, operationId: string) {
   if (dialogue?.pending && dialogue.operationId === operationId) {
     const scope = task.tutorContext;
     return update(task, { dialogue: { focus: dialogue.focus, requests: dialogue.requests,
-      turns: [...dialogue.turns, { message: dialogue.pending, stopped: true,
+      turns: [...dialogue.turns, { message: dialogue.pending, stopped: true, operationId,
         ...((scope?.includeExperiment || scope?.includePractice) && { tutorScope: scope }) }] } });
   }
   if (task.phase === "deciding" && task.operationId === operationId) {
@@ -449,12 +464,11 @@ export async function approveAgentTools(task: AgentTask) {
   if (task.dialogue?.pending) throw new AIRequestError("请先处理当前消息。", 409);
   if (task.phase !== "confirm" && task.phase !== "tool-error"
     && !(task.phase === "running" && !leaseActive(task))) throw new AIRequestError("当前不能运行。", 409);
-  if (!task.pending.length || task.runs.length + task.pending.length > agentLimits.runs
-    || task.steps + task.pending.length > agentLimits.steps) {
+  const steps = task.steps + (task.phase === "confirm" ? task.pending.length : 0);
+  if (!task.pending.length || task.runs.length + task.pending.length > agentLimits.runs || steps > agentLimits.steps) {
     return update(task, { phase: "limit", pending: [], error: "已到运行上限。" });
   }
-  const claimed = await update(task, { phase: "running", steps: task.steps + task.pending.length,
-    leaseUntil: Date.now() + leaseMs, error: undefined });
+  const claimed = await update(task, { phase: "running", steps, leaseUntil: Date.now() + leaseMs, error: undefined, errorCode: undefined });
   const runs = [...task.runs];
   let pending = task.pending;
   try {

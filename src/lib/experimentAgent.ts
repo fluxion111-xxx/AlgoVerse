@@ -1,6 +1,7 @@
 import type { EngineId, ExperimentConfig } from "./experimentEngines";
 import type { TutorCodeBlock } from "./tutorReply";
 import type { AICooldown } from "./aiRateLimit";
+import type { AIErrorCode } from "./aiSettings";
 
 export const agentLimits = { decisions: 6, runs: 4, steps: 12, batch: 2, outputTokens: 1000 } as const;
 export const agentDialogueLimits = { requests: 24, context: 10, outputTokens: 1200 } as const;
@@ -31,7 +32,7 @@ export type TutorContext = { topicId?: string; runId?: string; includeExperiment
 export type TutorConversationSummary = { id: string; title: string; updatedAt: string };
 export type TutorReference = { title: string; href: string };
 export type TutorTurnDetails = { codeBlocks?: TutorCodeBlock[]; sources: TutorReference[]; recommendation?: TutorReference };
-export type AgentTurn = { message: string; stopped?: boolean; tutorScope?: TutorContext; tutor?: TutorTurnDetails } & (
+export type AgentTurn = { message: string; operationId?: string; stopped?: boolean; tutorScope?: TutorContext; tutor?: TutorTurnDetails } & (
   { reply: string; model: string; action: AgentTurnAction; evidence: AgentEvidence[]; scheduling?: SchedulingEvidence[]; proposalIds?: string[] }
   | { reply?: never; model?: never; action?: never; evidence?: never; scheduling?: never; proposalIds?: never }
 );
@@ -54,6 +55,7 @@ export type AgentDialogue = {
   activeUntil?: number;
   operationId?: string;
   error?: string;
+  errorCode?: AIErrorCode;
 };
 export type AgentTask = {
   id: string;
@@ -74,6 +76,7 @@ export type AgentTask = {
   referenceConfig?: Pick<AgentCall, "tool" | "version" | "config">;
   question?: string;
   error?: string;
+  errorCode?: AIErrorCode;
   leaseUntil?: number;
   cooldown?: AICooldown;
   operationId?: string;
@@ -99,6 +102,17 @@ export function isAgentConfirmation(task: AgentTask, message: string) {
 
 export function agentDialogueActive(task: Pick<AgentTask, "dialogue">) {
   return (task.dialogue?.activeUntil ?? 0) > Date.now();
+}
+
+export function isAgentOperationId(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+}
+
+export function hasAgentOperation(task: Pick<AgentTask, "dialogue">, operationId?: string) {
+  if (!operationId) return false;
+  const dialogue = task.dialogue;
+  return dialogue?.turns.some((turn) => turn.operationId === operationId)
+    || (dialogue?.operationId === operationId && (agentDialogueActive(task) || !!dialogue.error));
 }
 
 export function agentFinished(phase: AgentTask["phase"]) {

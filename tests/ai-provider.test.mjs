@@ -16,7 +16,7 @@ const hooks = registerHooks({
     return nextResolve(specifier, context);
   },
 });
-const { POST } = await import("../src/app/api/ai/connection/route.ts");
+const { POST, GET: configurationGET, DELETE: configurationDELETE } = await import("../src/app/api/ai/connection/route.ts");
 const { POST: tutorPOST } = await import("../src/app/api/ai/tutor/route.ts");
 const { fetchAI, readAIResponse } = await import("../src/lib/aiHttp.ts");
 const { readAICredentials, requestAIJson, reusePendingAI } = await import("../src/lib/server/aiProvider.ts");
@@ -660,6 +660,179 @@ function isolatePersonalLimits(t) {
   delete globalThis.algoVerseAILimits;
   t.after(() => { globalThis.algoVerseAILimits = previous; });
 }
+
+test("verified keys survive reload, stay isolated by browser and Qwen region, and expire", async (t) => {
+  isolatePersonalLimits(t);
+  const deepseekKey = "sk-test-session-deepseek";
+  const qwenKey = "sk-test-session-qwen";
+  const upstream = t.mock.method(globalThis, "fetch", async (url, init) => {
+    const { model } = JSON.parse(init.body);
+    const personal = model === "deepseek-flash";
+    assert.ok(init.headers.Authorization === `Bearer ${personal ? deepseekKey : qwenKey}`);
+    assert.equal(new URL(url).hostname, personal ? "api.deepseek.com" : "dashscope-intl.aliyuncs.com");
+    return completion(undefined, model);
+  });
+  const save = { "X-AI-Save-Credential": "1" };
+  const first = await POST(request({ ...deepseek(), ...save }, deepseekKey));
+  assert.equal(first.status, 200);
+  const setCookie = first.headers.get("Set-Cookie");
+  assert.match(setCookie, /Path=\/api; Max-Age=28800; HttpOnly; SameSite=Strict; Secure/);
+  const cookie = setCookie.split(";")[0];
+  const second = await POST(request({ ...qwen("qwen3.8-flash", "ap-southeast-1"), ...save, Cookie: cookie }, qwenKey));
+  assert.equal(second.status, 200);
+  assert.ok(second.headers.get("Set-Cookie")?.startsWith(cookie + ";"));
+
+  const config = (value = cookie, headers = {}) => configurationGET(new Request("https://algoverse.test/api/ai/connection", {
+    headers: { Cookie: value, ...headers },
+  }));
+  const publicConfig = await config().json();
+  assert.equal(publicConfig.providers.deepseek.verifications[0].model, "deepseek-flash");
+  assert.equal(publicConfig.providers.qwen.selection.region, "ap-southeast-1");
+  assert.ok(![deepseekKey, qwenKey].some((key) => JSON.stringify(publicConfig).includes(key)));
+  assert.deepEqual((await config("").json()).providers, {});
+  assert.equal(config(cookie, { Origin: "https://foreign.test" }).status, 403);
+  assert.equal(config().headers.get("Cache-Control"), "private, no-store");
+
+  assert.ok(readAICredentials(request({ ...deepseek("deepseek-v4-pro"), Cookie: cookie }, "")).apiKey === deepseekKey);
+  assert.ok(readAICredentials(request({ ...qwen("qwen3.8-flash", "ap-southeast-1"), Cookie: cookie }, "")).apiKey === qwenKey);
+  assert.throws(() => readAICredentials(request({ ...qwen("qwen3.8-flash", "cn-beijing"), Cookie: cookie }, "")), { status: 400 });
+  assert.throws(() => readAICredentials(request({ ...qwen("qwen3-coder-flash", "ap-southeast-1"), Cookie: cookie }, ""), true), { status: 422 });
+  assert.equal(upstream.mock.callCount(), 2);
+
+  const expired = Date.now() + Math.max(...Object.values(publicConfig.providers).map((entry) => entry.expiresInMs)) + 1000;
+  t.mock.method(Date, "now", () => expired);
+  assert.deepEqual((await config().json()).providers, {});
+  assert.throws(() => readAICredentials(request({ ...deepseek(), Cookie: cookie }, "")), { status: 400 });
+});
+
+test("transient retest and failed replacements keep a saved key, while saved-key authentication failure updates status", async (t) => {
+  isolatePersonalLimits(t);
+  let reply = () => completion(undefined, "deepseek-flash");
+  t.mock.method(globalThis, "fetch", async () => reply());
+  const selected = { ...deepseek(), "X-AI-Save-Credential": "1" };
+  const key = "sk-test-retained-deepseek";
+  const first = await POST(request(selected, key));
+  const cookie = first.headers.get("Set-Cookie").split(";")[0];
+  const headers = { ...selected, Cookie: cookie };
+  const configured = () => configurationGET(request(headers, "")).json();
+  reply = () => Response.json({}, { status: 429, headers: { "Retry-After": "14" } });
+  const limited = await POST(request(headers, ""));
+  assert.equal(limited.status, 429);
+  assert.equal(limited.headers.get("Retry-After"), "14");
+  assert.equal((await configured()).providers.deepseek.verifications.length, 1);
+  reply = () => Response.json({}, { status: 401 });
+  assert.equal((await POST(request(headers, "sk-test-wrong-replacement"))).status, 401);
+  assert.ok(readAICredentials(request(headers, "")).apiKey === key);
+  assert.equal((await configured()).providers.deepseek.verifications.length, 1);
+  assert.equal((await POST(request(headers, ""))).status, 401);
+  assert.equal((await configured()).providers.deepseek.authenticationFailed, true);
+  assert.deepEqual((await configured()).providers.deepseek.verifications, []);
+  reply = () => completion(undefined, "deepseek-flash");
+  assert.equal((await POST(request(headers, ""))).status, 200);
+  assert.equal((await configured()).providers.deepseek.authenticationFailed, undefined);
+  const cleared = await configurationDELETE(new Request("https://algoverse.test/api/ai/connection", { method: "DELETE", headers, body: "{}" }));
+  assert.ok(cleared.ok);
+  assert.deepEqual((await configured()).providers, {});
+});
+
+test("a request from a stale tab cannot silently use a replaced credential", async (t) => {
+  isolatePersonalLimits(t);
+  t.mock.method(globalThis, "fetch", async () => completion(undefined, "deepseek-flash"));
+  const headers = { ...deepseek(), "X-AI-Save-Credential": "1" };
+  const first = await POST(request(headers, "sk-test-first-workspace"));
+  const cookie = first.headers.get("Set-Cookie").split(";")[0];
+  const previous = (await first.json()).configuration.providers.deepseek;
+  const next = await POST(request({ ...headers, Cookie: cookie }, "sk-test-other-workspace"));
+  assert.equal(next.status, 200);
+  assert.throws(() => readAICredentials(request({
+    ...deepseek(), Cookie: cookie, "X-AI-Credential-Version": previous.credentialVersion ?? "old",
+  }, "")), { status: 409 });
+});
+
+test("a temporary upstream failure retries the same personal chat model", async (t) => {
+  isolatePersonalLimits(t);
+  let attempts = 0;
+  t.mock.method(globalThis, "fetch", async (_url, init) => {
+    assert.equal(JSON.parse(init.body).model, "deepseek-flash");
+    return ++attempts === 1 ? new Response(null, { status: 503 }) : completion(undefined, "deepseek-flash");
+  });
+  const credentials = readAICredentials(request(deepseek(), "sk-test-recovery"));
+  const result = await requestAIJson(credentials, { operation: "tutor", instructions: "Return JSON.", input: "hello",
+    maxTokens: 32, validate: (value) => value.ok === true ? true : null });
+  assert.equal(result.result, true);
+  assert.equal(attempts, 2);
+});
+
+test("personal completion backoff handles network errors and timeouts without retrying long limits or invalid keys", async (t) => {
+  isolatePersonalLimits(t);
+  const options = { operation: "tutor", instructions: "Return JSON.", input: "hello", maxTokens: 32, validate: (value) => value.ok === true ? true : null };
+  let respond;
+  let attempts = 0;
+  t.mock.method(globalThis, "fetch", async () => { attempts++; return respond(); });
+  const cases = [
+    ["network", () => { throw new TypeError("temporary socket failure"); }, 200, 2],
+    ["timeout", () => new Response(null, { status: 504 }), 200, 2],
+    ["short rate limit", () => new Response(null, { status: 429, headers: { "Retry-After": "1" } }), 200, 2],
+    ["long rate limit", () => new Response(null, { status: 429, headers: { "Retry-After": "9" } }), 429, 1],
+    ["auth", () => new Response(null, { status: 401 }), 401, 1],
+    ["permissions", () => new Response(null, { status: 403 }), 403, 1],
+    ["balance", () => new Response(null, { status: 402 }), 402, 1],
+  ];
+  for (const [name, fail, status, count] of cases) {
+    attempts = 0;
+    respond = () => attempts === 1 ? fail() : completion(undefined, "deepseek-flash");
+    const credentials = readAICredentials(request(deepseek(), `sk-test-backoff-${name.replaceAll(" ", "-")}`));
+    if (status === 200) assert.equal((await requestAIJson(credentials, options)).result, true);
+    else await assert.rejects(requestAIJson(credentials, options), { status });
+    assert.equal(attempts, count, name);
+  }
+  const controller = new AbortController();
+  attempts = 0;
+  respond = () => {
+    setTimeout(() => controller.abort(), 10);
+    return new Response(null, { status: 503 });
+  };
+  const credentials = readAICredentials(request(deepseek(), "sk-cancel-retry"));
+  await assert.rejects(requestAIJson({ ...credentials, signal: controller.signal }, options), { status: 499, code: "cancelled" });
+  assert.equal(attempts, 1);
+  attempts = 0;
+  await assert.rejects(requestAIJson(credentials, { ...options, input: "示".repeat(70_000) }), { status: 422, code: "context_limit" });
+  assert.equal(attempts, 0);
+});
+
+test("a verified Qwen workspace pins the endpoint and expires independently", async (t) => {
+  isolatePersonalLimits(t);
+  const start = Date.now();
+  let now = start;
+  t.mock.method(Date, "now", () => now);
+  const endpoints = [];
+  t.mock.method(globalThis, "fetch", async (url, init) => {
+    endpoints.push(url);
+    return completion(undefined, JSON.parse(init.body).model);
+  });
+  const save = { "X-AI-Save-Credential": "1" };
+  const first = await POST(request({ ...deepseek(), ...save }, "sk-age-deepseek"));
+  const cookie = first.headers.get("Set-Cookie").split(";")[0];
+  now += 60 * 60 * 1000;
+  const selection = { ...qwen("qwen3.8-flash", "cn-beijing"), Cookie: cookie };
+  const workspaceId = "llm-demo-project1";
+  for (const hostile of ["domain.com", "llm-demo/evil", "llm-demo.evil.com"]) {
+    assert.equal((await POST(request({ ...selection, ...save, "X-AI-Qwen-Workspace": hostile }, "sk-workspace-key"))).status, 400);
+  }
+  const saved = await POST(request({ ...selection, ...save, "X-AI-Qwen-Workspace": workspaceId }, "sk-workspace-key"));
+  const { configuration } = await saved.json();
+  assert.equal(configuration.providers.qwen.workspaceId, workspaceId);
+  const version = configuration.providers.qwen.credentialVersion;
+  await requestAIJson(readAICredentials(request({ ...selection, "X-AI-Credential-Version": version }, "")), {
+    operation: "tutor", instructions: "Return JSON.", input: "hello", maxTokens: 32, validate: (value) => value.ok === true ? true : null,
+  });
+  assert.deepEqual(endpoints, ["https://api.deepseek.com/chat/completions", ...Array(2).fill(
+    "https://llm-demo-project1.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/chat/completions")]);
+  now = start + 8 * 60 * 60 * 1000 + 1;
+  const refreshed = await configurationGET(request(selection, "")).json();
+  assert.deepEqual(Object.keys(refreshed.providers), ["qwen"]);
+  assert.ok(refreshed.providers.qwen.expiresInMs > 0);
+});
 
 test("deep lessons keep real topic links and validate each published answer", () => {
   const fixtures = {
@@ -2092,7 +2265,7 @@ test("connection tests report provider outages and enforce the existing per-key 
   for (let count = 0; count < 6; count++) {
     const response = await POST(request(deepseek(), key));
     assert.equal(response.status, 503);
-    assert.deepEqual(await response.json(), { status: "error", message: "AI 服务正忙。请稍后重试。" });
+    assert.deepEqual(await response.json(), { status: "error", code: "upstream", message: "AI 服务正忙。请稍后重试。" });
   }
   const limited = await POST(request(deepseek(), key));
   assert.equal(limited.status, 429);
@@ -2153,7 +2326,7 @@ test("timeouts use the same safe response for both providers", async (t) => {
   for (const headers of [qwen("qwen3.8-max", "cn-beijing"), deepseek()]) {
     const response = await POST(request(headers));
     assert.equal(response.status, 504);
-    assert.deepEqual(await response.json(), { status: "error", message: "AI 响应超时，请重试。" });
+    assert.deepEqual(await response.json(), { status: "error", code: "timeout", message: "AI 响应超时，请重试。" });
   }
   assert.equal(timeout.mock.callCount(), 2);
   assert.deepEqual(timeout.mock.calls.map(({ arguments: args }) => args[0]), [55_000, 25_000]);

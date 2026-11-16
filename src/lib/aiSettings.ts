@@ -13,6 +13,7 @@ type AIModel = {
   billing: "token";
   thinking: "enabled" | "disabled" | "provider-default";
   output: "json-object" | "text";
+  workbench: boolean;
   regions?: readonly QwenRegion[];
 };
 
@@ -20,17 +21,17 @@ export const aiProviders = {
   deepseek: {
     label: "DeepSeek",
     models: [
-      { apiId: "deepseek-flash", label: "DeepSeek V4.1 Flash", capability: "快速问答与实验设计", billing: "token", thinking: "disabled", output: "json-object" },
-      { apiId: "deepseek-v4-pro", label: "DeepSeek V4 Pro", capability: "复杂推理与代码分析", billing: "token", thinking: "enabled", output: "json-object" },
+      { apiId: "deepseek-flash", label: "DeepSeek V4.1 Flash", capability: "快速问答与实验设计", billing: "token", thinking: "disabled", output: "json-object", workbench: true },
+      { apiId: "deepseek-v4-pro", label: "DeepSeek V4 Pro", capability: "复杂推理与代码分析", billing: "token", thinking: "enabled", output: "json-object", workbench: true },
     ],
   },
   qwen: {
     label: "通义千问（阿里云百炼）",
     models: [
-      { apiId: "qwen3.8-flash", label: "Qwen3.8 Flash", capability: "快速问答", billing: "token", thinking: "disabled", output: "json-object", regions: supportedQwenRegions },
-      { apiId: "qwen3.7-plus", label: "Qwen3.7 Plus", capability: "综合问答与实验设计", billing: "token", thinking: "enabled", output: "json-object", regions: supportedQwenRegions },
-      { apiId: "qwen3.8-max", label: "Qwen3.8 Max", capability: "复杂推理", billing: "token", thinking: "enabled", output: "json-object", regions: supportedQwenRegions },
-      { apiId: "qwen3-coder-flash", label: "Qwen3 Coder Flash", capability: "编程与代码分析", billing: "token", thinking: "provider-default", output: "text", regions: supportedQwenRegions },
+      { apiId: "qwen3.8-flash", label: "Qwen3.8 Flash", capability: "快速问答", billing: "token", thinking: "disabled", output: "json-object", workbench: true, regions: supportedQwenRegions },
+      { apiId: "qwen3.7-plus", label: "Qwen3.7 Plus", capability: "综合问答与实验设计", billing: "token", thinking: "enabled", output: "json-object", workbench: true, regions: supportedQwenRegions },
+      { apiId: "qwen3.8-max", label: "Qwen3.8 Max", capability: "复杂推理", billing: "token", thinking: "enabled", output: "json-object", workbench: true, regions: supportedQwenRegions },
+      { apiId: "qwen3-coder-flash", label: "Qwen3 Coder Flash", capability: "编程与代码分析", billing: "token", thinking: "provider-default", output: "text", workbench: false, regions: supportedQwenRegions },
     ],
   },
 } as const satisfies Record<string, { label: string; models: readonly AIModel[] }>;
@@ -75,9 +76,9 @@ export function getAIModel(selection: AISelection): AIModel {
   return model;
 }
 
-export function aiRequestHeaders(selection: AISelection, apiKey: string) {
+export function aiRequestHeaders(selection: AISelection, apiKey?: string): Record<string, string> {
   return {
-    Authorization: `Bearer ${apiKey}`,
+    ...(apiKey && { Authorization: `Bearer ${apiKey}` }),
     "X-AI-Provider": selection.provider,
     "X-AI-Model": selection.model,
     ...(selection.provider === "qwen" && { "X-AI-Region": selection.region }),
@@ -88,8 +89,31 @@ export function isApiKey(value: string): boolean {
   return value.length <= maxApiKeyLength && /^sk-[A-Za-z0-9_-]+$/.test(value);
 }
 
+export function isQwenWorkspaceId(value: string) {
+  return /^llm-[a-z0-9](?:[a-z0-9-]{0,57}[a-z0-9])?$/.test(value);
+}
+
 export type TokenUsage = {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
 };
+
+export const workbenchModelMessage = "此模型暂不支持工作台实验方案。";
+export type ConnectionVerification = { model: string; usage: TokenUsage };
+export type SavedAIProvider = {
+  selection: AISelection;
+  credentialVersion: string;
+  workspaceId?: string;
+  verifications: ConnectionVerification[];
+  authenticationFailed?: boolean;
+  expiresInMs: number;
+};
+export type AIConfiguration = {
+  platformConfigured: boolean;
+  providers: Partial<Record<AIProvider, SavedAIProvider>>;
+  expiresInMs?: number;
+};
+
+export type AIErrorCode = "credential_changed" | "credential_missing" | "authentication" | "model_unavailable"
+  | "balance" | "invalid_parameters" | "upstream_rate_limit" | "network" | "timeout" | "upstream" | "cancelled" | "context_limit";
