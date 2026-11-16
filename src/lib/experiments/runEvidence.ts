@@ -62,7 +62,8 @@ function nativeTraces(result: ExperimentResults): Trace[] {
     case "network-transmission": return trace("events", "发包记录", result.events);
     case "knn-classification": return trace("neighbors", "邻居顺序", result.neighbors);
     case "page-replacement": return trace("references", "页面引用记录", result.policies[0]?.steps);
-    case "tree-traversal": return result.traversals.flatMap(({ order, steps }) => trace(order, "树节点访问", steps));
+    case "tree-traversal": return result.traversals.flatMap(({ order, steps }) =>
+      trace(order, ({ preorder: "先序访问", inorder: "中序访问", postorder: "后序访问", level: "层序访问" })[order], steps));
     case "graph-traversal": return [...trace("bfs", "BFS 访问", result.bfs), ...trace("dfs", "DFS 访问", result.dfs)];
     case "deadlock-avoidance": return [...trace("initial", "原状态检查", result.initial.steps),
       ...trace("trial", "试分配检查", result.trial?.steps, result.initial.steps.length + 1)];
@@ -137,12 +138,12 @@ function link(run: AdaptedRun, position: EvidencePosition, prefix = ""): Evidenc
   return target ? [{ label: prefix + target.label, reference }] : [];
 }
 
-function equal(before: unknown, after: unknown): boolean {
+export function sameExperimentValue(before: unknown, after: unknown): boolean {
   if (Object.is(before, after)) return true;
-  if (Array.isArray(before) && Array.isArray(after)) return before.length === after.length && before.every((value, i) => equal(value, after[i]));
+  if (Array.isArray(before) && Array.isArray(after)) return before.length === after.length && before.every((value, i) => sameExperimentValue(value, after[i]));
   if (!before || !after || typeof before !== "object" || typeof after !== "object" || Array.isArray(before) || Array.isArray(after)) return false;
   const left = Object.entries(before);
-  return left.length === Object.keys(after).length && left.every(([key, value]) => Object.hasOwn(after, key) && equal(value, (after as Record<string, unknown>)[key]));
+  return left.length === Object.keys(after).length && left.every(([key, value]) => Object.hasOwn(after, key) && sameExperimentValue(value, (after as Record<string, unknown>)[key]));
 }
 
 export function precedingEvidenceRound(rounds: AgentRun[], index: number, firstRound: number) {
@@ -157,7 +158,7 @@ export function compareEvidenceRuns(before: AdaptedRun, after: AdaptedRun) {
   const left = normalize(before.data.config) as Record<string, unknown>;
   const right = normalize(after.data.config) as Record<string, unknown>;
   const parameters = [...new Set([...Object.keys(left), ...Object.keys(right)])].filter((key) => key !== "goalLabel");
-  const changed = parameters.filter((key) => !equal(left[key], right[key]));
+  const changed = parameters.filter((key) => !sameExperimentValue(left[key], right[key]));
   const same = parameters.filter((key) => !changed.includes(key) && right[key] !== undefined);
   const metrics = Object.keys(after.metrics).filter((key) => Object.hasOwn(before.metrics, key));
   const controlsChanged = after.adapter.rule?.conditions?.filter((key) => changed.includes(key)) ?? [];

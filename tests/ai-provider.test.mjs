@@ -19,11 +19,12 @@ const hooks = registerHooks({
 const { POST, GET: configurationGET, DELETE: configurationDELETE } = await import("../src/app/api/ai/connection/route.ts");
 const { POST: tutorPOST } = await import("../src/app/api/ai/tutor/route.ts");
 const { fetchAI, readAIResponse } = await import("../src/lib/aiHttp.ts");
-const { readAICredentials, requestAIJson, reusePendingAI } = await import("../src/lib/server/aiProvider.ts");
+const { AIRequestError, readAICredentials, requestAIJson, reusePendingAI } = await import("../src/lib/server/aiProvider.ts");
 const { confirmZeroSiliconFlowPrice, hasZeroSiliconFlowPrice } = await import("../src/lib/server/siliconflowPricing.ts");
 const { reservePlatformCall } = await import("../src/lib/platformQuota.ts");
 const { platformQuota } = await import("../src/lib/platformAI.ts");
-const { aiProviders, aiRequestHeaders, availableAIModels, modelSelectionMessage, parseAISelection, qwenRegions } = await import("../src/lib/aiSettings.ts");
+const { aiKeyProviderMessage, aiProviders, aiRequestHeaders, availableAIModels, containsPossibleAIKey, isApiKey, isMaskedApiKey, modelSelectionMessage, normalizeApiKeyDraft, parseAISelection, parseQwenWorkspace, qwenRegions } = await import("../src/lib/aiSettings.ts");
+const { getAIModelChoices } = await import("../src/lib/temporaryAI.ts");
 const { interpretCreatorRequest } = await import("../src/lib/server/creatorAI.ts");
 const { diagnoseExperimentRun } = await import("../src/lib/server/experimentAI.ts");
 const { getExperimentEngine, registeredEngines } = await import("../src/lib/experimentEngines.ts");
@@ -703,6 +704,136 @@ test("verified keys survive reload, stay isolated by browser and Qwen region, an
   t.mock.method(Date, "now", () => expired);
   assert.deepEqual((await config().json()).providers, {});
   assert.throws(() => readAICredentials(request({ ...deepseek(), Cookie: cookie }, "")), { status: 400 });
+});
+
+test("Tutor and Workbench omit legacy DashScope models even with saved credentials and preferences", () => {
+  const model = "qwen3.8-flash";
+  const legacy = { provider: "qwen", model, region: "cn-beijing" };
+  const qianwen = { provider: "qianwen", model };
+  const snapshot = {
+    mode: "byok", provider: "qwen", platformModel: "primary", choices: { tutor: { selection: legacy } },
+    configuration: { platformConfigured: true, providers: {
+      qwen: { selection: legacy, credentialVersion: "dashscope-version", verifications: [] },
+      qianwen: { selection: qianwen, credentialVersion: "qianwen-version", verifications: [] },
+    } },
+  };
+
+  for (const surface of ["tutor", "workbench"]) {
+    const { current, options } = getAIModelChoices(snapshot, surface);
+    assert.ok(options.every(({ id }) => !id.startsWith("qwen:")));
+    assert.ok(options.some(({ id }) => id === "deepseek:deepseek-flash"));
+    assert.ok(options.some(({ id }) => id === "siliconflow:primary"));
+    assert.deepEqual(current.choice, { selection: qianwen });
+    assert.equal(current.credentialVersion, "qianwen-version");
+    assert.ok(options.some(({ id }) => id === current.id));
+  }
+
+  const { current } = getAIModelChoices({ ...snapshot, configuration: {
+    ...snapshot.configuration, providers: { qwen: snapshot.configuration.providers.qwen },
+  } }, "tutor");
+  assert.equal(current.id, "deepseek:deepseek-flash");
+  assert.ok(current.reason);
+  assert.equal(current.credentialVersion, undefined);
+});
+
+test("Qianwen AI Platform saves and reuses its key only on its own endpoint", async (t) => {
+  isolatePersonalLimits(t);
+  const model = "qwen3.8-flash";
+  const key = "sk-ws-qianwen-platform-fixture";
+  const qianwen = { "X-AI-Provider": "qianwen", "X-AI-Model": model };
+  let expectedModel = model;
+  const upstream = t.mock.method(globalThis, "fetch", async (url, init) => {
+    assert.equal(url, "https://maas.qianwenaiapi.com/compatible-mode/v1/chat/completions");
+    assert.equal(init.headers.Authorization, `Bearer ${key}`);
+    assert.equal(JSON.parse(init.body).model, expectedModel);
+    return completion(undefined, expectedModel);
+  });
+  const setup = { ...qianwen, "X-AI-Save-Credential": "1" };
+  assert.equal((await POST(request({ ...setup, "X-AI-Region": "cn-beijing" }, key))).status, 400);
+  assert.equal((await POST(request({ ...setup, "X-AI-Qwen-Workspace": "llm-example" }, key))).status, 400);
+  assert.equal((await POST(request(setup, "sk-sp-qianwen-fixture"))).status, 400);
+  assert.equal(upstream.mock.callCount(), 0);
+
+  const saved = await POST(request(setup, key));
+  assert.equal(saved.status, 200);
+  const cookie = saved.headers.get("Set-Cookie").split(";")[0];
+  const stored = request({ ...qianwen, Cookie: cookie }, "");
+  const metadata = await configurationGET(stored).json();
+  assert.deepEqual(metadata.providers.qianwen.selection, { provider: "qianwen", model });
+  assert.ok(!JSON.stringify(metadata).includes(key));
+  assert.equal((await POST(request({ ...qwen(model, "cn-beijing"), Cookie: cookie }, ""))).status, 400);
+  const credentials = readAICredentials(stored, true);
+  const result = await requestAIJson(credentials, {
+    operation: "experiment_exploration", instructions: "Return JSON.", input: "hello", maxTokens: 32,
+    validate: (value) => value.ok === true ? true : null,
+  });
+  assert.equal(result.result, true);
+
+  expectedModel = "qwen3.7-plus";
+  const version = metadata.providers.qianwen.credentialVersion;
+  const switched = await POST(request({ ...setup, Cookie: cookie, "X-AI-Model": expectedModel,
+    "X-AI-Credential-Version": version }, ""));
+  assert.equal(switched.status, 200);
+  const afterSwitch = (await switched.json()).configuration.providers.qianwen;
+  assert.equal(afterSwitch.selection.model, expectedModel);
+  assert.equal(afterSwitch.credentialVersion, version);
+  assert.deepEqual(afterSwitch.verifications.map(({ model }) => model), [model, expectedModel]);
+  assert.equal(upstream.mock.callCount(), 3);
+
+  const clear = new Request("https://algoverse.test/api/ai/connection", {
+    method: "DELETE", headers: { Cookie: cookie, "X-AI-Provider": "qianwen" }, body: "{}",
+  });
+  assert.deepEqual((await (await configurationDELETE(clear)).json()).providers, {});
+});
+
+test("pasted API keys remove copy formatting while retaining the token characters", () => {
+  const key = "sk-ws-example_123";
+  assert.equal(normalizeApiKeyDraft(" \ufeffBearer '" + key.replace("example", "ex\u200bample") + "' "), key);
+  assert.equal(normalizeApiKeyDraft('"Bearer sk-ws-exam\u00adple_\r\n  123"'), key);
+  assert.equal(normalizeApiKeyDraft(key), key);
+  assert.equal(isApiKey(normalizeApiKeyDraft("sk-ws-••••")), false);
+  assert.equal(isApiKey(normalizeApiKeyDraft("sk-ws-example,other")), false);
+  assert.equal(isApiKey("sk-ws-"), false);
+  assert.equal(isMaskedApiKey("sk-ws-abc••••xyz"), true);
+  assert.equal(aiKeyProviderMessage("qianwen", key), undefined);
+  assert.match(aiKeyProviderMessage("qwen", key), /千问 AI 平台/);
+});
+
+test("Qianwen accepts dotted keys beyond the legacy length limit", () => {
+  const key = "sk-ws-" + "abc_.123-".repeat(32);
+  const selected = { "X-AI-Provider": "qianwen", "X-AI-Model": "qwen3.8-flash" };
+  assert.ok(key.length > 256);
+  assert.ok(isApiKey(key, "qianwen"));
+  assert.ok(containsPossibleAIKey("Key: " + key));
+  assert.equal(readAICredentials(request(selected, key)).apiKey, key);
+  assert.equal(isApiKey("sk-hi.there", "deepseek"), false);
+  assert.equal(isApiKey("sk-" + "x".repeat(256), "qwen"), false);
+  assert.throws(() => readAICredentials(request(selected, "sk-ws-part,other")), { status: 400 });
+});
+
+test("Qianwen distinguishes upstream authentication failures and exposes only a validated request ID", async (t) => {
+  isolatePersonalLimits(t);
+  const key = "sk-ws-authentication-fixture";
+  const requestId = "649b2bbc-c541-9e16-9845-db7fe4fe5b2d";
+  const headers = { "X-AI-Provider": "qianwen", "X-AI-Model": "qwen3.8-flash" };
+  const upstream = t.mock.method(globalThis, "fetch", async () => new Response(null, { status: 401 }));
+  const cases = [
+    ["No API-key provided.", requestId, /未收到鉴权信息/],
+    ["Incorrect API key provided.", key, /千问拒绝了此 Key/],
+    ["You are not authorized to access this workspace.", requestId, /拒绝访问该业务空间/],
+  ];
+  for (const [message, id, expected] of cases) {
+    upstream.mock.mockImplementation(async () => Response.json({
+      error: { code: "invalid_api_key", message: message + " " + key }, request_id: id,
+    }, { status: 401 }));
+    const response = await POST(request(headers, key));
+    assert.equal(response.status, 401);
+    const result = await response.json();
+    assert.equal(result.code, "authentication");
+    assert.match(result.message, expected);
+    assert.equal(result.message.includes(requestId), id === requestId);
+    assert.ok(!JSON.stringify(result).includes(key));
+  }
 });
 
 test("transient retest and failed replacements keep a saved key, while saved-key authentication failure updates status", async (t) => {
@@ -2138,6 +2269,27 @@ test("invalid, mixed, and missing credentials never reach a provider", async (t)
   assert.equal(fetch.mock.callCount(), 0);
 });
 
+test("Qwen settings accept the matching official workspace address and reject plan keys before sending", async (t) => {
+  const workspace = "llm-example";
+  const beijing = `${workspace}.cn-beijing.maas.aliyuncs.com`;
+  assert.equal(parseQwenWorkspace(workspace, "cn-beijing"), workspace);
+  assert.equal(parseQwenWorkspace(beijing, "cn-beijing"), workspace);
+  assert.equal(parseQwenWorkspace(` https://${beijing}/compatible-mode/v1 `, "cn-beijing"), workspace);
+  assert.equal(parseQwenWorkspace("", "cn-beijing"), "");
+  assert.equal(parseQwenWorkspace(beijing, "ap-southeast-1"), null);
+  assert.equal(parseQwenWorkspace(`https://${beijing}.example.org`, "cn-beijing"), null);
+  assert.equal(parseQwenWorkspace(`https://${beijing}/compatible-mode/v1?key=example`, "cn-beijing"), null);
+
+  const fetch = t.mock.method(globalThis, "fetch", async () => assert.fail("No request should reach the provider"));
+  const key = "sk-sp-fixture";
+  const response = await POST(request(qwen("qwen3.8-flash", "cn-beijing"), key));
+  assert.equal(response.status, 400);
+  const body = await response.json();
+  assert.match(body.message, /套餐 Key/);
+  assert.ok(!JSON.stringify(body).includes(key));
+  assert.equal(fetch.mock.callCount(), 0);
+});
+
 test("Qwen failures and malformed completions never show connected or echo provider errors", async (t) => {
   isolatePersonalLimits(t);
   const fetch = t.mock.method(globalThis, "fetch", async () => completion());
@@ -2145,6 +2297,8 @@ test("Qwen failures and malformed completions never show connected or echo provi
     [(key) => Response.json({ error: { code: "invalid_api_key", message: key } }, { status: 401 }), 401, /地域/],
     [(key) => Response.json({ error: { code: "Arrearage", message: key } }, { status: 403 }), 402, /余额不足/],
     [(key) => Response.json({ error: { code: "Model.AccessDenied", message: key } }, { status: 403 }), 403, /模型权限/],
+    [(key) => Response.json({ error: { code: "Workspace.AccessDenied", message: key } }, { status: 403 }), 403, /业务空间 ID/],
+    [(key) => Response.json({ error: { code: "Endpoint.AccessDenied", message: key } }, { status: 403 }), 403, /业务空间 ID/],
     [() => Response.json({ error: { code: "ModelNotFound" } }, { status: 400 }), 404, /所选模型不可用/],
     [(key) => Response.json({ error: { code: "InvalidParameter", message: key } }, { status: 400 }), 422, /拒绝请求参数/],
     [() => Response.json({ error: { code: "insufficient_quota" } }, { status: 429 }), 429, /额度不足/],
@@ -2295,6 +2449,22 @@ test("AI clients explain network failure and propagate explicit cancellation", a
     (error) => error === abort);
 });
 
+test("AI clients report a response body that disconnects or times out after headers", async (t) => {
+  let browser;
+  t.mock.method(globalThis, "fetch", async () => new Response(new ReadableStream({
+    start(stream) { browser = stream; },
+  })));
+  const lost = await fetchAI("/api/ai/tutor", {});
+  browser.error(new TypeError("socket closed"));
+  await assert.rejects(readAIResponse(lost), { status: 0, code: "network" });
+
+  const controller = new AbortController();
+  const slow = await fetchAI("/api/experiments/agent", { signal: controller.signal });
+  controller.abort(new DOMException("Timeout", "TimeoutError"));
+  browser.error(new DOMException("Aborted", "AbortError"));
+  await assert.rejects(readAIResponse(slow), { status: 504, code: "timeout" });
+});
+
 test("a busy personal provider passes its Retry-After through connection testing", async (t) => {
   isolatePersonalLimits(t);
   const mock = t.mock.method(globalThis, "fetch", async () => new Response("private", {
@@ -2367,6 +2537,24 @@ test("pending generation is shared only by the same selection and key", async ()
   assert.throws(() => reusePendingAI(pending, "run", otherProvider, begin), { status: 409 });
   resolve();
   await task;
+  assert.equal(pending.size, 0);
+});
+
+test("a cancelled evidence request cannot cancel a connected caller or clear its replacement", async () => {
+  const credentials = readAICredentials(request(deepseek(), "sk-fixture-evidence"));
+  const pending = new Map();
+  const controller = new AbortController();
+  const first = Promise.withResolvers();
+  const replacement = Promise.withResolvers();
+  const abandoned = reusePendingAI(pending, "evidence", { ...credentials, signal: controller.signal }, () => first.promise);
+  const joined = reusePendingAI(pending, "evidence", credentials, () => assert.fail("Duplicate generation"));
+  controller.abort();
+  const next = reusePendingAI(pending, "evidence", credentials, () => replacement.promise);
+  first.reject(new AIRequestError("请求已取消。", 499));
+  await assert.rejects(abandoned, { status: 499 });
+  assert.equal(pending.get("evidence").task, next);
+  replacement.resolve("已读到实测证据。");
+  assert.deepEqual(await Promise.all([joined, next]), ["已读到实测证据。", "已读到实测证据。"]);
   assert.equal(pending.size, 0);
 });
 

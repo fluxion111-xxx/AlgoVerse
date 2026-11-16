@@ -153,10 +153,6 @@
   border: 1px solid #8da080; border-radius: 50%; color: #31573c;
   background: linear-gradient(145deg, #eaf0e0, #dbe7d2);
 }
-.ai-settings-result[data-result="error"] .ai-settings-result-mark {
-  color: #87392f; border-color: #ba8373;
-  background: linear-gradient(145deg, #f5eae0, #ecd7ca);
-}
 .ai-settings-result-model { margin-top: 13px; border-block: 1px solid var(--settings-rule); padding-block: 8px; }
 .ai-settings-result-model > div { display: grid; grid-template-columns: 4rem minmax(0, 1fr); gap: 6px; padding-block: 2px; }
 .ai-settings-result-model dt, .ai-settings-result > p { color: var(--settings-muted); font-size: 14px; }

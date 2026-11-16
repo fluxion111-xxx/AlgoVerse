@@ -1,3 +1,4 @@
+import { containsPossibleAIKey } from "@/lib/aiSettings";
 import { maxCreatorHistory, maxCreatorReplyLength, maxQuestionLength, type CreatorResponse } from "@/lib/experimentCreator";
 import { getExperimentEngine } from "@/lib/experimentEngines";
 import { experimentEvidence } from "@/lib/experiments/evidence";
@@ -70,7 +71,7 @@ export async function POST(request: Request) {
       ...(run && { metrics: experimentEvidence(run.results) }) } : null;
     // Keep accidentally pasted credentials out of model inputs and experiment files.
     const input = JSON.stringify({ question, turns, current });
-    if (input.includes(credentials.apiKey) || /\bsk-[A-Za-z0-9_-]{16,}\b/i.test(input)) {
+    if (input.includes(credentials.apiKey) || containsPossibleAIKey(input)) {
       return aiJson({ status: "error", message: "请先移除问题里的 Key。" }, 400);
     }
 

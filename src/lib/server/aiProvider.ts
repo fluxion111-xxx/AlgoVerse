@@ -1,7 +1,7 @@
 import "server-only";
 import { createHmac, randomBytes } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { aiProviders, getAIModel, isApiKey, isQwenWorkspaceId, modelSelectionMessage, parseAISelection, workbenchModelMessage, type AIErrorCode, type AIProvider, type AISelection, type TokenUsage } from "@/lib/aiSettings";
+import { aiKeyProviderMessage, aiProviders, getAIModel, isApiKey, isQwenWorkspaceId, modelSelectionMessage, parseAISelection, workbenchModelMessage, type AIErrorCode, type AIProvider, type AISelection, type TokenUsage } from "@/lib/aiSettings";
 import { isPlatformModel, platformModelIds, type PlatformModel } from "@/lib/platformAI";
 import { retryAfterSeconds } from "@/lib/aiRateLimit";
 import { platformQuotaConfigured, platformVisitor, reservePlatformAttempt } from "./platformLimits";
@@ -13,6 +13,7 @@ const qwenEndpoints = {
   "cn-beijing": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
   "ap-southeast-1": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
 } satisfies Record<Extract<AISelection, { provider: "qwen" }>["region"], string>;
+const qianwenEndpoint = "https://maas.qianwenaiapi.com/compatible-mode/v1/chat/completions";
 const requestTimeoutMs = 25_000;
 const reasoningTimeoutMs = 55_000;
 const minuteMs = 60_000;
@@ -34,8 +35,8 @@ const siliconFlowModels = {
   backup: { id: platformModelIds.backup, thinking: true, timeoutMs: 25_000 },
 } as const;
 const siliconFlowEndpoint = "https://api.siliconflow.cn/v1/chat/completions";
-export type PendingAIRequest<T> = { fingerprint: string; task: Promise<T> };
-type Operation = "connection_test" | "quick_start_plan" | "experiment_diagnosis" | "experiment_creator" | "experiment_agent" | "tutor" | "learning_advice";
+export type PendingAIRequest<T> = { fingerprint: string; task: Promise<T>; signal: AbortSignal };
+type Operation = "connection_test" | "quick_start_plan" | "experiment_diagnosis" | "experiment_keyframe" | "experiment_exploration" | "experiment_creator" | "experiment_agent" | "tutor" | "learning_advice";
 type DialogueMessage = { role: "user" | "assistant"; content: string };
 type RequestOptions<T> = {
   operation: Operation;
@@ -81,17 +82,25 @@ export function sharePersonalOperation(credentials: AICredentials): AICredential
   return credentials.visitor === undefined ? { ...credentials, operation: credentials.operation ?? {} } : credentials;
 }
 
-export function reusePendingAI<T>(pending: Map<string, PendingAIRequest<T>>, id: string, credentials: AICredentials, generate: () => Promise<T>) {
+export function reusePendingAI<T>(pending: Map<string, PendingAIRequest<T>>, id: string, credentials: AICredentials, generate: () => Promise<T>): Promise<T> {
+  const { signal } = credentials;
+  if (signal.aborted) throw new AIRequestError("请求已取消。", 499, undefined, "cancelled");
   const fingerprint = createHmac("sha256", pendingRequestSecret)
     .update(JSON.stringify([credentials.selection, credentials.apiKey, credentials.visitor,
       credentials.visitor === undefined ? credentials.workspaceId : undefined])).digest("hex");
   const existing = pending.get(id);
-  if (existing) {
+  if (existing && !existing.signal.aborted) {
     if (existing.fingerprint !== fingerprint) throw new AIRequestError("本轮正在生成。请稍后重试。", 409);
-    return existing.task;
+    if (existing.signal === signal) return existing.task;
+    return existing.task.catch((error: unknown) => {
+      if (signal.aborted || !existing.signal.aborted || !(error instanceof AIRequestError) || error.status !== 499) throw error;
+      return reusePendingAI(pending, id, credentials, generate);
+    });
   }
-  const task = generate().finally(() => pending.delete(id));
-  pending.set(id, { fingerprint, task });
+  const task: Promise<T> = generate().finally(() => {
+    if (pending.get(id)?.task === task) pending.delete(id);
+  });
+  pending.set(id, { fingerprint, task, signal });
   return task;
 }
 
@@ -199,7 +208,9 @@ export function readAICredentials(request: Request, workbench = false, configuri
       signal: request.signal, onAuthFailure: credentialAuthFailure(request, selection.provider) };
   }
   const apiKey = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
-  if (!isApiKey(apiKey)) throw new AIRequestError("请检查 Key 格式。", 400);
+  const providerMessage = aiKeyProviderMessage(selection.provider, apiKey);
+  if (providerMessage) throw new AIRequestError(providerMessage, 400, undefined, "invalid_parameters");
+  if (!isApiKey(apiKey, selection.provider)) throw new AIRequestError("请检查 Key 格式。", 400);
   return { apiKey, selection, signal: request.signal, workspaceId: workspaceId ?? undefined };
 }
 
@@ -239,8 +250,8 @@ function readUsage(value: unknown): TokenUsage | null {
 class PlatformUpstreamError extends AIRequestError {
   readonly retryable: boolean;
 
-  constructor(status: number, retryable: boolean, retryAfter?: number) {
-    super(retryable ? "平台免费 AI 暂不可用。" : "免费服务异常。请联系管理员。", status, retryAfter);
+  constructor(status: number, retryable: boolean, retryAfter?: number, code?: AIErrorCode) {
+    super(retryable ? "平台免费 AI 暂不可用。" : "免费服务异常。请联系管理员。", status, retryAfter, code);
     this.retryable = retryable;
   }
 }
@@ -276,6 +287,11 @@ function repairInstructions(instructions: string) {
   return `${instructions}\n上次回复为空、未写完或未通过格式校验。请重新作答。只输出一个完整的 JSON 对象。保留用户的要求，缩短解释，按上面的字段和类型输出。省略用不到的可选字段。`;
 }
 
+function isInteractiveModelCall(operation: Operation) {
+  return operation === "tutor" || operation === "experiment_agent" || operation === "experiment_diagnosis"
+    || operation === "experiment_keyframe" || operation === "experiment_exploration";
+}
+
 async function providerError(provider: AIProvider | "siliconflow", response: Response) {
   const { status } = response;
   const retryAfter = status === 429 || status === 503 ? retryAfterSeconds(response.headers.get("Retry-After")) : undefined;
@@ -288,7 +304,10 @@ async function providerError(provider: AIProvider | "siliconflow", response: Res
     console.warn("AlgoVerse SiliconFlow request rejected.", { status });
     return new PlatformUpstreamError(503, false);
   }
-  if ([400, 422].includes(status) || (provider === "qwen" && [401, 403, 429].includes(status))) {
+  const vendor = provider === "qwen" ? "百炼" : aiProviders[provider].label;
+  const authMessage = provider === "qwen" ? "授权失败。请检查 Key、地域和工作空间。"
+    : provider === "qianwen" ? "授权失败。请检查千问 AI 平台的按量 Key。" : "授权失败，请检查 Key。";
+  if ([400, 422].includes(status) || (provider !== "deepseek" && [401, 403, 429].includes(status))) {
     const body = asObject(await response.json().catch((error: unknown) => {
       if (error instanceof SyntaxError) return null;
       throw error;
@@ -300,29 +319,46 @@ async function providerError(provider: AIProvider | "siliconflow", response: Res
       || (typeof message === "string" && /maximum context length|range of input length|input length exceeds/i.test(message)))) {
       return new AIRequestError("上下文超长。请缩短输入。", 422, undefined, "context_limit");
     }
-    if (provider === "qwen" && (status === 400 || status === 422) && typeof message === "string"
+    if (provider !== "deepseek" && (status === 400 || status === 422) && typeof message === "string"
       && /json mode response is not supported when enable_thinking is true/i.test(message)) {
       return new QwenThinkingFormatError();
     }
-    if (code === "Arrearage" || code === "isv.OUT_OF_SERVICE") return new AIRequestError("百炼余额不足。请充值后重试。", 402, undefined, "balance");
-    if (code === "InvalidApiKey" || code === "invalid_api_key") return new AIRequestError("授权失败。请检查 Key、地域和工作空间。", 401, undefined, "authentication");
-    if (code === "insufficient_quota" || code === "Throttling.AllocationQuota") return new AIRequestError("百炼额度不足。请检查用量。", 429);
+    if (code === "Arrearage" || code === "isv.OUT_OF_SERVICE") return new AIRequestError(`${vendor}余额不足。请充值后重试。`, 402, undefined, "balance");
+    const invalidKey = code === "InvalidApiKey" || code === "invalid_api_key";
+    if (provider === "qianwen" && (status === 401 || invalidKey)) {
+      const providerMessage = typeof message === "string" ? message : "";
+      const missing = /no api[- ]key provided|missing api[- ]key/i.test(providerMessage);
+      const workspace = /not authorized to access this workspace|workspace does not exist/i.test(providerMessage);
+      const requestId = [body?.request_id, detail?.request_id, response.headers.get("x-request-id"), response.headers.get("x-dashscope-request-id")]
+        .find((id): id is string => typeof id === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id));
+      console.warn("AlgoVerse Qianwen authentication", JSON.stringify({
+        status, reason: missing ? "missing_key" : workspace ? "workspace" : invalidKey ? "rejected_key" : "unspecified", requestId,
+      }));
+      const hint = missing ? "千问 AI 平台未收到鉴权信息。" : workspace ? "千问 AI 平台拒绝访问该业务空间。"
+        : invalidKey ? "千问拒绝了此 Key。请核对完整按量 Key。" : authMessage;
+      return new AIRequestError(requestId ? hint + " 请求编号 " + requestId : hint, 401, undefined, "authentication");
+    }
+    if (invalidKey) return new AIRequestError(authMessage, 401, undefined, "authentication");
+    if (code === "insufficient_quota" || code === "Throttling.AllocationQuota") return new AIRequestError(`${vendor}额度不足。请检查用量。`, 429);
     if (code === "model_not_found" || code === "ModelNotFound" || code === "model_not_supported") {
       return new AIRequestError(modelSelectionMessage, 404, undefined, "model_unavailable");
     }
+    if (provider === "qwen" && (code === "Workspace.AccessDenied" || code === "Endpoint.AccessDenied")) {
+      return new AIRequestError("百炼拒绝访问。请核对业务空间 ID 和 Key 权限。", 403, undefined, "invalid_parameters");
+    }
     if (code === "Model.AccessDenied" || code === "access_denied") {
-      return new AIRequestError("百炼拒绝访问。请检查模型权限。", 403, undefined, "model_unavailable");
+      return new AIRequestError(`${vendor}拒绝访问。请检查模型权限。`, 403, undefined, "model_unavailable");
     }
   } else {
     void response.body?.cancel().catch(() => {});
   }
-  if (status === 401) return new AIRequestError(provider === "qwen" ? "授权失败。请检查 Key、地域和权限。" : "授权失败，请检查 Key。", 401, undefined, "authentication");
+  if (status === 401) return new AIRequestError(authMessage, 401, undefined, "authentication");
   if (status === 403) return new AIRequestError("访问受限。请检查模型权限。", 403, undefined, "model_unavailable");
   if (status === 402) return new AIRequestError("余额不足，请充值后重试。", 402, undefined, "balance");
   if (status === 404) return new AIRequestError(modelSelectionMessage, 404, undefined, "model_unavailable");
   if (status === 429) return new AIRequestError("服务商限流。请稍后重试。", 429, retryAfter ?? 30, "upstream_rate_limit");
   if (status === 400 || status === 422) {
-    return new AIRequestError(provider === "qwen" ? "百炼拒绝请求参数。请检查所选模型。" : "DeepSeek 拒绝请求参数。请检查所选模型。", 422, undefined, "invalid_parameters");
+    return new AIRequestError(`${vendor}拒绝请求参数。请检查所选模型。`, 422, undefined, "invalid_parameters");
   }
   if (status === 408 || status === 504 || status === 524) return new AIRequestError("AI 响应超时，请重试。", 504, undefined, "timeout");
   if (status >= 500) return new AIRequestError("AI 服务正忙。请稍后重试。", 503, retryAfter, "upstream");
@@ -345,9 +381,9 @@ export async function requestAIJson<T>(credentials: AICredentials, options: Requ
   const reasoning = profile.thinking === "enabled";
   const testing = options.operation === "connection_test";
   const reasoningBudget = testing ? 1024 : 4096;
-  const endpoint = provider !== "qwen" ? "https://api.deepseek.com/chat/completions"
-    : credentials.workspaceId ? `https://${credentials.workspaceId}.${byok.region}.maas.aliyuncs.com/compatible-mode/v1/chat/completions`
-    : qwenEndpoints[byok.region];
+  const endpoint = byok.provider === "qwen"
+    ? credentials.workspaceId ? `https://${credentials.workspaceId}.${byok.region}.maas.aliyuncs.com/compatible-mode/v1/chat/completions` : qwenEndpoints[byok.region]
+    : provider === "qianwen" ? qianwenEndpoint : "https://api.deepseek.com/chat/completions";
   const parameters = provider === "deepseek"
     ? { thinking: { type: profile.thinking }, ...(reasoning && { reasoning_effort: testing ? "low" : "high" }),
       max_tokens: options.maxTokens + (reasoning ? reasoningBudget : 0) }
@@ -356,8 +392,9 @@ export async function requestAIJson<T>(credentials: AICredentials, options: Requ
       ...(profile.thinking !== "provider-default" && { enable_thinking: reasoning }),
       ...(reasoning && { thinking_budget: reasoningBudget }),
     };
-  const qwenThinkingModel = byok.provider === "qwen" && reasoning && profile.output === "json-object" ? `${byok.region}:${model}` : undefined;
-  const retryTransient = options.operation === "tutor" || options.operation === "experiment_agent";
+  const qwenThinkingModel = provider !== "deepseek" && reasoning && profile.output === "json-object"
+    ? `${provider}:${byok.provider === "qwen" ? byok.region : ""}:${model}` : undefined;
+  const retryTransient = isInteractiveModelCall(options.operation);
   const deadline = retryTransient ? AbortSignal.timeout(62_000) : undefined;
   const signal = deadline ? AbortSignal.any([deadline, credentials.signal]) : credentials.signal;
   let output = qwenThinkingModel && (qwenTextModeUntil.get(qwenThinkingModel) ?? 0) > Date.now() ? "text" : profile.output;
@@ -416,21 +453,34 @@ function transientRetryDelay(error: unknown, retries: number) {
 
 async function requestPlatformAI<T>(credentials: PlatformCredentials, options: RequestOptions<T>) {
   const preferred = credentials.selection.model;
-  const keepSelectedModel = credentials.exactModel || options.operation === "connection_test" || options.operation === "experiment_agent";
+  const keepSelectedModel = credentials.exactModel || options.operation === "connection_test" || options.operation === "experiment_agent"
+    || options.operation === "experiment_keyframe" || options.operation === "experiment_exploration";
   const choices: PlatformModel[] = preferred === "primary" && !keepSelectedModel ? ["primary", "backup"] : [preferred];
   let retriedFormat = false;
+  let retriedNetwork = false;
   for (const choice of choices) {
     try {
       const backupTutor = choice === "backup" && !!options.backupTutorFormat;
-      return await retryCompletionFormat(!retriedFormat && (!!options.retryFormat || backupTutor), (retry) => {
+      return await retryCompletionFormat(!retriedFormat && (!!options.retryFormat || backupTutor), async (retry) => {
         if (retry) retriedFormat = true;
-        return requestPlatformCompletion(credentials, options, choice, retry);
+        try {
+          return await requestPlatformCompletion(credentials, options, choice, retry);
+        } catch (error) {
+          if (retriedNetwork || !keepSelectedModel || !isInteractiveModelCall(options.operation)
+            || credentials.signal.aborted || !(error instanceof PlatformUpstreamError) || error.code !== "network") throw error;
+          retriedNetwork = true;
+          await delay(300, undefined, { signal: credentials.signal }).catch(() => {
+            throw new AIRequestError("请求已取消。", 499, undefined, "cancelled");
+          });
+          return requestPlatformCompletion(credentials, options, choice, retry);
+        }
       });
     } catch (error) {
       if (!(error instanceof PlatformUpstreamError) || !error.retryable) throw error;
       if (choice === choices.at(-1)) {
-        if (error.status === 429) throw new AIRequestError("服务商限流。请稍后重试。", 429, error.retryAfter);
-        if (choices.length === 1 && error.status === 504) throw new AIRequestError("AI 响应超时，请重试。", 504);
+        if (error.status === 429) throw new AIRequestError("服务商限流。请稍后重试。", 429, error.retryAfter, "upstream_rate_limit");
+        if (choices.length === 1 && error.status === 504) throw new AIRequestError("AI 响应超时，请重试。", 504, undefined, "timeout");
+        if (choices.length === 1 && error.code === "network") throw new AIRequestError("模型连接中断。请重试。", error.status, undefined, "network");
         const message = choices.length === 2 ? "两个免费模型暂不可用。" : "所选免费模型暂不可用。";
         throw new AIRequestError(message, error.status, error.retryAfter);
       }
@@ -477,6 +527,7 @@ async function requestCompletion<T>({ apiKey, selection: { provider }, signal }:
   const timeout = AbortSignal.timeout(timeoutMs);
   let usage: TokenUsage | null = null;
   let outcome = 500;
+  let errorCode: AIErrorCode | undefined;
   let format: "normalized" | CompletionFormatError | undefined;
   try {
     const body = JSON.stringify({
@@ -516,11 +567,12 @@ async function requestCompletion<T>({ apiKey, selection: { provider }, signal }:
       const code = asObject(payload.error)?.code;
       if (code === 50505 || code === "50505") throw new PlatformUpstreamError(503, true);
     }
+    if (choice?.finish_reason === "insufficient_system_resource" || choice?.finish_reason === "aborted") {
+      if (provider === "siliconflow") throw new PlatformUpstreamError(503, true, undefined, "network");
+      throw new AIRequestError("AI 服务中断。请稍后重试。", 503, undefined, "upstream");
+    }
     if (provider !== "siliconflow") {
       if (choice?.finish_reason === "content_filter" || message?.refusal) throw new AIRequestError("服务商拦截了本次内容。", 400);
-      if (choice?.finish_reason === "insufficient_system_resource" || choice?.finish_reason === "aborted") {
-        throw new AIRequestError("AI 服务中断。请稍后重试。", 503);
-      }
     }
     if (payload?.error || !usage || !message || message.refusal) throw invalidResult;
     if (provider === "siliconflow" && payload?.model !== model) {
@@ -557,18 +609,21 @@ async function requestCompletion<T>({ apiKey, selection: { provider }, signal }:
     outcome = 200;
     return { result, model, usage };
   } catch (error) {
+    const timedOut = timeout.aborted || (error instanceof DOMException && error.name === "TimeoutError");
     const failure = signal.aborted ? new AIRequestError("请求已取消。", 499, undefined, "cancelled")
       : error instanceof AIRequestError ? error
-      : provider === "siliconflow" ? new PlatformUpstreamError(timeout.aborted ? 504 : 503, true)
-      : timeout.aborted ? new AIRequestError("AI 响应超时，请重试。", 504, undefined, "timeout")
-      : new AIRequestError(`无法连接${provider === "qwen" ? "百炼" : " DeepSeek"}。请稍后重试。`, 502, undefined, "network");
+      : provider === "siliconflow" ? new PlatformUpstreamError(timedOut ? 504 : 503, true, undefined, timedOut ? "timeout" : "network")
+      : timedOut ? new AIRequestError("AI 响应超时，请重试。", 504, undefined, "timeout")
+      : new AIRequestError(`无法连接${provider === "qwen" ? "百炼" : aiProviders[provider].label}。请稍后重试。`, 502, undefined, "network");
     outcome = failure.status;
+    errorCode = failure.code;
     if (failure instanceof AICompletionFormatError) format = failure.reason;
     throw failure;
   } finally {
     // Log only allowlisted metadata. Never log headers, prompts, or provider bodies.
-    console.info("AlgoVerse AI", { operation: options.operation, provider: provider === "siliconflow" ? "SiliconFlow" : aiProviders[provider].label, model,
-      ...(region && { region }), ...(format && { format }),
-      status: outcome, elapsedMs: Date.now() - started, usage });
+    console.info("AlgoVerse AI", JSON.stringify({
+      operation: options.operation, provider: provider === "siliconflow" ? "SiliconFlow" : aiProviders[provider].label, model,
+      region, format, status: outcome, code: errorCode, elapsedMs: Date.now() - started, usage,
+    }));
   }
 }

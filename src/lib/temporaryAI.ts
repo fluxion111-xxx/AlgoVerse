@@ -2,7 +2,7 @@
 
 import { useEffect, useSyncExternalStore } from "react";
 import {
-  aiProviders, aiRequestHeaders, availableAIModels, getAIModel, parseAISelection, qwenRegions, workbenchModelMessage,
+  aiProviderIds, aiProviders, aiRequestHeaders, availableAIModels, containsPossibleAIKey, getAIModel, isAIProvider, parseAISelection, qwenRegions, selectableAIProviderIds, workbenchModelMessage,
   type AIConfiguration, type AIProvider, type AISelection, type ConnectionVerification,
 } from "./aiSettings";
 import { AIResponseError, fetchAI, readAIResponse } from "./aiHttp";
@@ -59,7 +59,7 @@ function restorePreferences() {
       else if (selection) choices[surface] = { selection };
     }
     updateState({
-      ...state, mode: saved.mode === "byok" ? "byok" : "platform", provider: saved.provider === "qwen" ? "qwen" : "deepseek",
+      ...state, mode: saved.mode === "byok" ? "byok" : "platform", provider: isAIProvider(saved.provider) ? saved.provider : "deepseek",
       platformModel: isPlatformModel(saved.platformModel) ? saved.platformModel : "primary", choices,
     });
   } catch { /* An unavailable or invalid preference does not affect credentials. */ }
@@ -82,7 +82,7 @@ export function setAIConfiguration(configuration: AIConfiguration) {
     expiry = window.setTimeout(() => {
       const providers = { ...configuration.providers };
       let nextExpiry: number | undefined;
-      for (const provider of ["deepseek", "qwen"] as const) {
+      for (const provider of aiProviderIds) {
         const saved = providers[provider];
         if (!saved) continue;
         if (saved.expiresInMs <= expiresInMs) delete providers[provider];
@@ -162,8 +162,10 @@ function defaultChoice(snapshot: TemporaryAI): ModelChoice {
   if (snapshot.mode === "platform") return { platformModel: snapshot.platformModel };
   const saved = snapshot.configuration?.providers[snapshot.provider];
   if (saved) return { selection: saved.selection };
-  return snapshot.provider === "deepseek" ? { selection: { provider: "deepseek", model: aiProviders.deepseek.models[0].apiId } }
-    : { selection: { provider: "qwen", model: aiProviders.qwen.models[0].apiId, region: qwenRegions[0].id } };
+  const { provider } = snapshot;
+  const model = aiProviders[provider].models[0].apiId;
+  const selection = parseAISelection(provider, model, provider === "qwen" ? qwenRegions[0].id : undefined);
+  return selection ? { selection } : { platformModel: snapshot.platformModel };
 }
 
 function choiceId(choice: ModelChoice) {
@@ -190,7 +192,7 @@ function modelOption(choice: ModelChoice, { configuration, configurationError }:
   if (surface === "workbench" && !profile.workbench) reason = workbenchModelMessage;
   else if (!hasKey) reason ||= "未配置 Key，或凭据已过期。";
   else reason = saved?.authenticationFailed ? "认证失败，请检查 Key。" : "";
-  const provider = selection.provider === "qwen" ? "通义千问" : aiProviders[selection.provider].label;
+  const provider = aiProviders[selection.provider].label;
   return {
     id, choice, label: `${provider} · ${profile.label}`, model: profile.apiId, reason, credentialVersion: saved?.credentialVersion,
     verified: !!(hasKey && saved?.verifications.some(({ model }) => model === selection.model)),
@@ -203,19 +205,26 @@ export function useActiveAI(): ActiveConnection | undefined {
   return current.reason ? undefined : { ...current.choice, credentialVersion: current.credentialVersion };
 }
 
-export function useAIModelChoices(surface: Surface) {
-  const snapshot = useTemporaryAI();
-  const current = modelOption(snapshot.choices[surface] ?? defaultChoice(snapshot), snapshot, surface);
+export function getAIModelChoices(snapshot: TemporaryAI, surface: Surface) {
+  const preferred = snapshot.choices[surface];
+  const provider = snapshot.provider === "qwen"
+    ? snapshot.configuration?.providers.qianwen ? "qianwen" : "deepseek"
+    : snapshot.provider;
+  const choice = preferred && !("selection" in preferred && preferred.selection.provider === "qwen")
+    ? preferred : defaultChoice({ ...snapshot, provider });
+  const current = modelOption(choice, snapshot, surface);
   const options = (["primary", "backup"] as const).map((platformModel) => modelOption({ platformModel }, snapshot, surface));
-  for (const provider of ["deepseek", "qwen"] as const) {
-    const saved = snapshot.configuration?.providers[provider]?.selection;
-    const region = saved?.provider === "qwen" ? saved.region : provider === "qwen" ? qwenRegions[0].id : undefined;
-    for (const { apiId } of availableAIModels(provider, region)) {
-      const selection = parseAISelection(provider, apiId, region);
+  for (const provider of selectableAIProviderIds) {
+    for (const { apiId } of availableAIModels(provider)) {
+      const selection = parseAISelection(provider, apiId, undefined);
       if (selection) options.push(modelOption({ selection }, snapshot, surface));
     }
   }
-  if (!options.some(({ id }) => id === current.id)) options.push(current);
+  return { current, options };
+}
+
+export function useAIModelChoices(surface: Surface) {
+  const { current, options } = getAIModelChoices(useTemporaryAI(), surface);
   return {
     current, options,
     active: current.reason ? undefined : { ...current.choice, credentialVersion: current.credentialVersion, exactModel: true },
@@ -227,7 +236,7 @@ export function useAIModelChoices(surface: Surface) {
 }
 
 export function containsTemporaryAIKey(value: string) {
-  return /\bsk-[A-Za-z0-9_-]{16,}\b/i.test(value);
+  return containsPossibleAIKey(value);
 }
 
 export async function fetchWithTemporaryAI(url: string, connection: ActiveConnection | undefined, body: unknown, signal?: AbortSignal) {
@@ -259,6 +268,20 @@ export async function requestAgentTask(body: object, connection?: ActiveConnecti
     void refreshAIConfiguration();
   }
   return task;
+}
+
+export async function recoverAgentTask(id: string, matches: (task: AgentTask) => boolean, signal: AbortSignal) {
+  let snapshot: AgentTask | undefined;
+  for (let attempt = 0; attempt < 3 && !signal.aborted; attempt += 1) {
+    if (attempt) await new Promise((resolve) => window.setTimeout(resolve, 350));
+    if (signal.aborted) break;
+    const latest = await requestAgentTask({ action: "status", id }, undefined,
+      AbortSignal.any([signal, AbortSignal.timeout(3_000)])).catch(() => undefined);
+    if (latest?.id !== id) continue;
+    snapshot = latest;
+    if (matches(latest)) break;
+  }
+  return signal.aborted ? undefined : snapshot;
 }
 
 export function useTemporaryAI() {

@@ -1,6 +1,6 @@
 import "server-only";
 import { randomBytes, randomUUID } from "node:crypto";
-import type { AIProvider, AISelection, ConnectionVerification, SavedAIProvider } from "@/lib/aiSettings";
+import { aiProviderIds, type AIProvider, type AISelection, type ConnectionVerification, type SavedAIProvider } from "@/lib/aiSettings";
 
 const cookieName = "algoverse_ai_session";
 const lifetimeSeconds = 8 * 60 * 60;
@@ -52,7 +52,7 @@ export function credentialMetadata(session: CredentialSession | undefined) {
   const providers: Partial<Record<AIProvider, SavedAIProvider>> = {};
   const now = Date.now();
   let expiresInMs: number | undefined;
-  for (const provider of ["deepseek", "qwen"] as const) {
+  for (const provider of aiProviderIds) {
     const saved = session?.providers[provider];
     if (!saved || saved.expiresAt <= now) continue;
     const remaining = saved.expiresAt - now;

@@ -16,20 +16,35 @@ export class AIResponseError extends Error {
   }
 }
 
+const responseSignals = new WeakMap<Response, AbortSignal>();
+
+function transportError(error: unknown, signal?: AbortSignal | null) {
+  if (signal?.aborted) {
+    return signal.reason?.name === "TimeoutError"
+      ? new AIResponseError("连接超时。请重试。", 504, undefined, false, "timeout") : signal.reason ?? error;
+  }
+  return new AIResponseError("连不上本站。请检查网络。", 0, undefined, false, "network");
+}
+
 export async function fetchAI(url: string, init: RequestInit): Promise<Response> {
   try {
-    return await fetch(url, init);
+    const response = await fetch(url, init);
+    if (init.signal) responseSignals.set(response, init.signal);
+    return response;
   } catch (error) {
-    if (init.signal?.aborted) {
-      if (init.signal.reason?.name === "TimeoutError") throw new AIResponseError("连接超时。请重试。", 504, undefined, false, "timeout");
-      throw error;
-    }
-    throw new AIResponseError("连不上本站。请检查网络。", 0);
+    throw transportError(error, init.signal);
   }
 }
 
 export async function readAIResponse<T>(response: Response): Promise<T> {
-  const value: unknown = await response.json().catch(() => null);
+  const value: unknown = await response.json().catch((error: unknown) => {
+    const signal = responseSignals.get(response);
+    if (signal?.aborted) throw transportError(error, signal);
+    if (response.ok && !(error instanceof SyntaxError)) {
+      throw new AIResponseError("接收回复时断开。请重试。", 0, undefined, false, "network");
+    }
+    return null;
+  });
   const body = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
   if (response.ok) {
     if (!body) throw new AIResponseError("服务响应异常。请重试。", 502);

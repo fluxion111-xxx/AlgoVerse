@@ -1,3 +1,4 @@
+import { containsPossibleAIKey } from "@/lib/aiSettings";
 import { maxQuestionLength } from "@/lib/experimentCreator";
 import { isWorkbenchFocus } from "@/lib/workbenchHistory";
 import { parseEvidencePosition } from "@/lib/experiments/evidencePosition";
@@ -23,7 +24,7 @@ function sameOrigin(request: Request) {
 
 function containsKey(request: Request, text: string) {
   const platformKey = process.env.SILICONFLOW_API_KEY?.trim();
-  return /\bsk-[A-Za-z0-9_-]{16,}\b/i.test(text) || (!!platformKey && text.includes(platformKey)) || containsSavedAIKey(request, text);
+  return containsPossibleAIKey(text) || (!!platformKey && text.includes(platformKey)) || containsSavedAIKey(request, text);
 }
 
 export async function POST(request: Request) {

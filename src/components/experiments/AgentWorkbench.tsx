@@ -3,14 +3,14 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { agentCooldown, agentDialogueActive, isAgentConfirmation, type AgentRun, type AgentTask } from "@/lib/experimentAgent";
+import { agentCooldown, agentDialogueActive, hasAgentOperation, isAgentConfirmation, type AgentRun, type AgentTask } from "@/lib/experimentAgent";
 import { AIResponseError, readAIResponse } from "@/lib/aiHttp";
 import { formatAIRetryTime, type AICooldown } from "@/lib/aiRateLimit";
 import { maxQuestionLength } from "@/lib/experimentCreator";
 import { getExperimentEngine } from "@/lib/experimentEngines";
 import { agentWorkbenchLink, workbenchFocus, workflowAISettingsRoute, workflowSteps, type ExperimentTask, type WorkbenchFocus, type WorkflowStep } from "@/lib/navigation";
 import type { Diagnosis } from "@/lib/quickStart";
-import { containsTemporaryAIKey, fetchWithTemporaryAI, requestAgentTask as agentRequest, useAIModelChoices } from "@/lib/temporaryAI";
+import { containsTemporaryAIKey, fetchWithTemporaryAI, recoverAgentTask, requestAgentTask as agentRequest, useAIModelChoices } from "@/lib/temporaryAI";
 import { AIModelSelect } from "./AIModelSelect";
 import { WorkbenchIcon } from "./WorkbenchIcon";
 import { WorkbenchActivity, agentPhases } from "./WorkbenchActivity";
@@ -18,6 +18,8 @@ import { useWorkbenchView, WorkbenchHistory, workbenchHistoryRequest } from "./W
 import { AnalysisStage, PlanStage, ResearchStage, RoundPicker, RunStage, StageEmpty, proposalHypothesis, type Plan, type RunDetails } from "./WorkbenchStages";
 import { adaptEvidenceRun, resolveEvidence } from "@/lib/experiments/runEvidence";
 import { evidencePositionToken, parseEvidencePosition, type RunEvidenceReference } from "@/lib/experiments/evidencePosition";
+import type { EvidenceExplanation } from "@/lib/experiments/keyframeEvidence";
+import type { ExplorationChange, ExplorationSuggestion } from "@/lib/experiments/exploration";
 
 const steps = Object.keys(workflowSteps) as WorkflowStep[];
 const stageDetails = {
@@ -27,7 +29,7 @@ const stageDetails = {
   analysis: { icon: "scan-search", description: "对照证据，想想下一轮。" },
 } as const;
 
-type SendAction = "message" | "retry-message" | "decide" | "approve" | "import" | "status";
+type SendAction = "message" | "retry-message" | "decide" | "approve" | "import" | "status" | "adopt-exploration";
 type ActiveRequest = { controller: AbortController; operationId: string; taskId?: string };
 
 const statusReadError = "读取状态失败。请刷新状态。";
@@ -54,6 +56,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
   const [guess, setGuess] = useState(initialGuess);
   const [selectedRun, setSelectedRun] = useState(selectedRunId);
   const [evidence, setEvidence] = useState(initialEvidence);
+  const [evidenceNavigation, setEvidenceNavigation] = useState(0);
   const [evidenceError, setEvidenceError] = useState("");
   const [collapsed, setCollapsed] = useState(false);
   const [drawer, setDrawer] = useState(false);
@@ -67,6 +70,8 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
   const [runDetails, setRunDetails] = useState<Record<string, RunDetails>>({});
   const [reports, setReports] = useState(diagnoses);
   const [diagnosing, setDiagnosing] = useState<string>();
+  const [explaining, setExplaining] = useState(false);
+  const [exploring, setExploring] = useState(false);
   const [diagnosisError, setDiagnosisError] = useState<{ id: string; message: string }>();
   const [requestCooldown, setRequestCooldown] = useState<AICooldown>();
   const [clock, setClock] = useState<number>();
@@ -74,7 +79,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
   const connection = models.active;
   const active = useRef<ActiveRequest | null>(null);
   const uncertainOperation = useRef<{ operationId: string; input: string; message?: string } | null>(null);
-  const diagnosisRequest = useRef<AbortController | null>(null);
+  const analysisRequest = useRef<AbortController | null>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const canvas = useRef<HTMLDivElement>(null);
   const drawerToggle = useRef<HTMLButtonElement>(null);
@@ -108,7 +113,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
   const retryUntil = cooldown?.until ?? 0;
   const retrySeconds = clock === undefined ? undefined : Math.max(0, Math.ceil((retryUntil - clock) / 1000));
   const modelCooling = !!cooldown && (retrySeconds === undefined || retrySeconds > 0);
-  const modelBlocked = blocked || modelCooling || !!diagnosing || !connection;
+  const modelBlocked = blocked || modelCooling || !!diagnosing || explaining || exploring || !connection;
   const maySend = !blocked && (!modelBlocked || !!task && isAgentConfirmation(task, message));
   const waitHint = modelCooling ? (retrySeconds === undefined ? "等待恢复" : formatAIRetryTime(retrySeconds)) : "";
   const runningNow = busy === "running" || (workBusy && task?.phase === "running");
@@ -204,7 +209,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
     input.current?.focus();
   }
 
-  async function send(action: SendAction, text = message, startingGoal?: string) {
+  async function send(action: SendAction, text = message, startingGoal?: string, exploration?: { run: AgentRun; change: ExplorationChange }) {
     text = text.trim();
     if (active.current || blocked || (action === "message" && !text)) return false;
     if (action === "message" && text.length > maxQuestionLength) {
@@ -219,7 +224,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
     }
     const needsModel = (action === "message" && !confirmation) || action === "retry-message" || action === "decide";
     if (needsModel && !connection) { setError(models.current.reason); return false; }
-    if (needsModel && (diagnosisRequest.current || retryUntil > Date.now())) return false;
+    if (needsModel && (analysisRequest.current || retryUntil > Date.now())) return false;
     const running = action === "approve" || (confirmation && task?.phase === "confirm");
     if (running && !canApprove) return false;
     const sentText = action === "retry-message" ? waiting?.pending : action === "message" ? text : undefined;
@@ -234,12 +239,14 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
     setError("");
     setRecovery("");
     setBusy(running ? "running" : needsModel ? "deciding" : "status");
+    let autoAnalysis = false;
     try {
       let current = task;
-      if (!current && (action === "message" || action === "import")) {
+      if (!current && (action === "message" || action === "import" || exploration)) {
         current = await agentRequest({
-          action: "start", operationId: request.operationId, goal: startingGoal ?? (draftQuestion || (action === "import" ? savedPlan?.config.goalLabel : text)),
-          ...reference, ...(action === "import" && { importPlan: true }),
+          action: "start", operationId: request.operationId,
+          goal: startingGoal ?? (draftQuestion || (action === "import" ? savedPlan?.config.goalLabel : exploration?.run.config.goalLabel ?? text)),
+          ...reference, ...(exploration && { runId: exploration.run.id, sessionId: exploration.run.sessionId }), ...(action === "import" && { importPlan: true }),
         }, connection, signal);
         if (signal.aborted) return false;
         request.taskId = current.id;
@@ -251,6 +258,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
         action, operationId: request.operationId, id: current.id, revision: current.revision,
         ...(needsModel && explicitRun && { selectedRunId: explicitRun.id }),
         ...(action === "message" && { message: text }),
+        ...(exploration && { runId: exploration.run.id, sessionId: exploration.run.sessionId, change: exploration.change }),
       }, needsModel ? connection : undefined, signal);
       if (signal.aborted) return false;
       setTask(next);
@@ -266,16 +274,21 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
       } else if (!navigated && newTurn?.action === "explain" && newTurn.evidence.length) {
         const cited = newTurn.evidence.at(-1);
         show("analysis", next.runs[(cited?.to ?? 1) - 1]?.id, next, false);
-      } else if (!navigated && (newTurn?.action === "run" || (action === "decide" && next.phase === "confirm"))) {
+      } else if (!navigated && (newTurn?.action === "run" || ((action === "decide" || action === "adopt-exploration") && next.phase === "confirm"))) {
         show("plan", view.current.selectedRun, next, false);
       } else if (!navigated && action === "decide" && next.phase === "finished") {
         show("analysis", view.current.selectedRun, next, false);
       }
       if (running && next.phase === "observe" && next.autoContinue === true && connection
-        && !diagnosisRequest.current && retryUntil <= Date.now()) {
+        && !analysisRequest.current && retryUntil <= Date.now()) {
+        autoAnalysis = true;
+        uncertainOperation.current = { input: JSON.stringify(["decide", undefined, explicitRun?.id]), operationId: request.operationId };
         setBusy("deciding");
         const analyzed = await agentRequest({ action: "decide", id: next.id, revision: next.revision, operationId: request.operationId }, connection, signal);
-        if (!signal.aborted) setTask(analyzed);
+        if (!signal.aborted) {
+          setTask(analyzed);
+          if (analyzed.phase !== "deciding") uncertainOperation.current = null;
+        }
       }
       return !signal.aborted && !next.dialogue?.error;
     } catch (failure) {
@@ -285,16 +298,18 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
         }
         setError(failure instanceof Error ? failure.message : "请求失败。请重试。");
         if (request.taskId && action !== "status" && failure instanceof AIResponseError && !failure.retryAfter
-          && (failure.status === 0 || failure.status === 409 || failure.status >= 500)) {
-          const snapshot = await agentRequest({ action: "status", id: request.taskId }, undefined, signal).catch(() => null);
+          && (failure.status === 0 || failure.status === 408 || failure.status === 409 || failure.status >= 500)) {
+          const snapshot = await recoverAgentTask(request.taskId, (next) =>
+            autoAnalysis || action === "decide" || action === "adopt-exploration" ? next.operationId === request.operationId
+              : running ? next.runs.length > runs.length : hasAgentOperation(next, request.operationId) === true, signal);
           if (snapshot?.id === request.taskId && !signal.aborted) {
             setTask((current) => current?.id === snapshot.id && current.revision <= snapshot.revision ? snapshot : current);
             const stayed = navigation.current === startNavigation;
-            if (running && snapshot.runs.length > runs.length) {
+            if (running && !autoAnalysis && snapshot.runs.length > runs.length) {
               if (stayed) show("run", "", snapshot, false);
               setError("");
               setRecovery("运行记录已同步。");
-            } else if (!confirmation && (action === "message" || action === "retry-message")) {
+            } else if (!autoAnalysis && !confirmation && (action === "message" || action === "retry-message")) {
               const sent = action === "retry-message" ? waiting?.pending : text;
               const restored = snapshot.dialogue?.turns.at(-1);
               if (snapshot.dialogue && !snapshot.dialogue.pending && snapshot.dialogue.turns.length > (waiting?.turns.length ?? 0)
@@ -306,8 +321,15 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
                 setRecovery("Agent 回复已同步。");
                 return true;
               }
-              if (snapshot.dialogue?.operationId === request.operationId && snapshot.dialogue.error) uncertainOperation.current = null;
-            } else if (action === "decide" && snapshot.operationId === request.operationId && snapshot.phase !== "deciding") {
+              if (snapshot.dialogue?.operationId === request.operationId && snapshot.dialogue.error) {
+                uncertainOperation.current = null;
+                setError("");
+              }
+            } else if (action === "adopt-exploration" && snapshot.operationId === request.operationId && snapshot.phase === "confirm") {
+              if (stayed) show("plan", view.current.selectedRun, snapshot, false);
+              setError("");
+              return true;
+            } else if ((autoAnalysis || action === "decide") && snapshot.operationId === request.operationId && snapshot.phase !== "deciding") {
               uncertainOperation.current = null;
               setError("");
             }
@@ -374,12 +396,13 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
           const uncertain = uncertainOperation.current;
           if (uncertain && !agentDialogueActive(next) && next.phase !== "deciding") {
             const savedReply = next.dialogue?.turns.some(({ action, operationId }) => !!action && operationId === uncertain.operationId);
-            if (savedReply || next.dialogue?.operationId === uncertain.operationId || next.operationId === uncertain.operationId) {
+            const savedAnalysis = next.operationId === uncertain.operationId;
+            if (savedReply || next.dialogue?.operationId === uncertain.operationId || savedAnalysis) {
               uncertainOperation.current = null;
-              if (savedReply) {
+              setError("");
+              if (savedReply || savedAnalysis) {
                 setMessage((draft) => draft.trim() === uncertain.message ? "" : draft);
-                setError("");
-                setRecovery("Agent 回复已同步。");
+                if (savedReply || !next.error) setRecovery(savedReply ? "Agent 回复已同步。" : "分析已同步。");
               }
             }
           }
@@ -422,14 +445,16 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
     const adapted = researchId && target ? adaptEvidenceRun(researchId, target, runDetails[target.id]) : null;
     if (!target || !resolveEvidence(adapted, reference)) {
       setEvidenceError("找不到这条证据。");
-      return;
+      return false;
     }
     show("run", target.id, task, true, evidencePositionToken(reference.position));
+    setEvidenceNavigation((count) => count + 1);
+    return true;
   }
 
   useEffect(() => () => {
     active.current?.controller.abort();
-    diagnosisRequest.current?.abort();
+    analysisRequest.current?.abort();
   }, []);
 
   useEffect(() => {
@@ -442,9 +467,9 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
   }, [drawer]);
 
   async function diagnose(runId: string) {
-    if (diagnosisRequest.current || active.current || !connection || blocked || retryUntil > Date.now()) return;
+    if (analysisRequest.current || active.current || !connection || blocked || retryUntil > Date.now()) return;
     const controller = new AbortController();
-    diagnosisRequest.current = controller;
+    analysisRequest.current = controller;
     setDiagnosing(runId);
     setDiagnosisError(undefined);
     try {
@@ -460,9 +485,67 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
         setDiagnosisError({ id: runId, message: failure instanceof Error ? failure.message : "诊断失败。请重试。" });
       }
     } finally {
-      if (diagnosisRequest.current === controller) {
-        diagnosisRequest.current = null;
+      if (analysisRequest.current === controller) {
+        analysisRequest.current = null;
         setDiagnosing(undefined);
+      }
+    }
+  }
+
+  async function explainEvidence(reference: RunEvidenceReference, controller: AbortController) {
+    if ((analysisRequest.current && !analysisRequest.current.signal.aborted) || active.current || blocked || retryUntil > Date.now()) {
+      throw new Error("请等当前请求结束。");
+    }
+    if (!connection) throw new Error("请先选择 AI 模型。");
+    analysisRequest.current = controller;
+    setExplaining(true);
+    const position = evidencePositionToken(reference.position);
+    try {
+      const response = await fetchWithTemporaryAI(`/api/experiments/runs/${reference.runId}/explanation`, connection,
+        { researchId: reference.researchId, sessionId: reference.sessionId, position }, controller.signal);
+      const result = await readAIResponse<EvidenceExplanation>(response);
+      const echoed = result.reference;
+      if (echoed?.runId !== reference.runId || echoed.sessionId !== reference.sessionId || echoed.researchId !== reference.researchId
+        || !echoed.position || evidencePositionToken(echoed.position) !== position || typeof result.explanation !== "string") {
+        throw new Error("讲解与证据不匹配。");
+      }
+      return result;
+    } catch (failure) {
+      if (!controller.signal.aborted && provider && failure instanceof AIResponseError && failure.retryAfter) {
+        setRequestCooldown({ provider, until: Date.now() + failure.retryAfter * 1000, message: failure.message });
+      }
+      throw failure;
+    } finally {
+      if (analysisRequest.current === controller) {
+        analysisRequest.current = null;
+        setExplaining(false);
+      }
+    }
+  }
+
+  async function exploreRound(run: AgentRun, controller: AbortController) {
+    if ((analysisRequest.current && !analysisRequest.current.signal.aborted) || active.current || blocked || retryUntil > Date.now()) {
+      throw new Error("请等当前请求结束。");
+    }
+    if (!connection) throw new Error("请先选择 AI 模型。");
+    analysisRequest.current = controller;
+    setExploring(true);
+    try {
+      const response = await fetchWithTemporaryAI("/api/experiments/agent", connection, {
+        action: "exploration", id: task?.id, revision: task?.revision, runId: run.id, sessionId: run.sessionId, hypothesis,
+      }, controller.signal);
+      const { suggestions } = await readAIResponse<{ suggestions?: ExplorationSuggestion[] }>(response);
+      if (!Array.isArray(suggestions)) throw new Error("未收到建议。请重试。");
+      return suggestions;
+    } catch (failure) {
+      if (!controller.signal.aborted && provider && failure instanceof AIResponseError && failure.retryAfter) {
+        setRequestCooldown({ provider, until: Date.now() + failure.retryAfter * 1000, message: failure.message });
+      }
+      throw failure;
+    } finally {
+      if (analysisRequest.current === controller) {
+        analysisRequest.current = null;
+        setExploring(false);
       }
     }
   }
@@ -514,7 +597,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
       </div>
       <nav className="wb-top-tools" aria-label="工作台操作">
         <div className="wb-model-picker">
-          <AIModelSelect id="wb-ai-model" models={models} disabled={blocked || !!diagnosing} />
+          <AIModelSelect id="wb-ai-model" models={models} disabled={blocked || !!diagnosing || explaining || exploring} />
           <WorkbenchIcon icon="chevron-down" width={15} />
         </div>
         <button type="button" className="wb-button wb-top-link" title="实验历史" aria-label="实验历史" aria-haspopup="dialog"
@@ -580,6 +663,10 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
               showRun={() => show("run", latest?.id)} ask={hasResearch ? planResearch : promptForQuestion} />}
             {focus === "run" && (run ? <RunStage run={run} runs={runs} details={details} number={number} selectRound={selectRound}
               researchId={researchId} evidence={evidence}
+              evidenceNavigation={evidenceNavigation} evidenceError={evidenceError}
+              canExplain={!blocked && !modelCooling && !diagnosing && !!connection}
+              explanationModel={`${models.current.id}:${models.current.credentialVersion ?? ""}`}
+              locateEvidence={showEvidence} explainEvidence={explainEvidence}
               retry={retryDetails} showAnalysis={() => show("analysis")} />
               : <StageEmpty icon="chart-no-axes-column" title={runningNow ? "正在运行实验" : "这里还没有实测"}
                 description={runningNow ? "结果就绪后会显示在这里。" : activePlan ? "先确认方案，再运行。" : "先设计方案，再确认运行。"}>
@@ -588,9 +675,10 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
             {focus === "analysis" && (run ? <AnalysisStage run={run} runs={runs} task={task} details={details} diagnosis={reports[run.id]}
               researchId={researchId} runDetails={runDetails} showEvidence={showEvidence} evidenceError={evidenceError}
               diagnosing={diagnosing === run.id} diagnosisError={diagnosisError?.id === run.id ? diagnosisError.message : ""}
-              blocked={blocked} modelBlocked={modelBlocked} canDiagnose={!!connection} canAdopt={run.id === latest?.id && !activePlan}
-              retry={retryDetails} diagnose={() => void diagnose(run.id)} stopDiagnosis={() => diagnosisRequest.current?.abort()}
-              discuss={prefill} adopt={(text) => void send("message", text)} />
+              blocked={blocked} modelBlocked={modelBlocked} canDiagnose={!!connection}
+              retry={retryDetails} diagnose={() => void diagnose(run.id)} stopDiagnosis={() => analysisRequest.current?.abort()}
+              discuss={prefill} guess={hypothesis} explore={(controller) => exploreRound(run, controller)}
+              adopt={(change) => void send("adopt-exploration", "", undefined, { run, change })} />
               : <StageEmpty icon="scan-search" title="暂无可验证证据" description="跑完一轮，再来看证据。">
                 <button type="button" className="wb-button" onClick={() => show("run")}>查看运行区 <WorkbenchIcon icon="arrow-right" width={16} /></button>
               </StageEmpty>)}
@@ -607,8 +695,8 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
               onClick={() => setCollapsed(!collapsed)}><WorkbenchIcon icon={collapsed ? "panel-right-open" : "panel-right-close"} width={19} /></button>
           </header>
           <div className="wb-activity-content" id="wb-activity-content">
-            <WorkbenchActivity task={task} status={diagnosing ? "AI 正在诊断" : activityStatus} error={visibleError} blocked={blocked} modelBlocked={modelBlocked}
-              inFlight={busy === "deciding" || busy === "running" || dialogueBusy || workBusy || !!diagnosing}
+            <WorkbenchActivity task={task} status={exploring ? "AI 正在给建议" : explaining ? "AI 正在讲解" : diagnosing ? "AI 正在诊断" : activityStatus} error={visibleError} blocked={blocked} modelBlocked={modelBlocked}
+              inFlight={busy === "deciding" || busy === "running" || dialogueBusy || workBusy || !!diagnosing || explaining || exploring}
               retryReply={() => void send("retry-message")} retryAnalysis={canContinue ? () => void send("decide") : undefined}
               recover={task && error ? () => void send("status") : undefined} openRun={openRun} />
           </div>

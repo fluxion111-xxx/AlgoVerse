@@ -492,6 +492,11 @@ export async function getAgentTask(id: unknown): Promise<AgentTask | null> {
   return path ? readAgentRevision(path, id) : null;
 }
 
+export async function agentOperationKey(taskId: string, operationId?: string) {
+  const owner = operationId ? await visitor() : null;
+  return owner ? `${owner}:${taskId}:${operationId}` : undefined;
+}
+
 async function readAgentRevision(path: string, id: string) {
   const task = await readRecord<AgentTask>(path);
   if (task && (task.id !== id || typeof task.goal !== "string" || typeof task.phase !== "string" || !Number.isSafeInteger(task.revision)

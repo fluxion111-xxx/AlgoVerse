@@ -1,11 +1,11 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent, type RefObject } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { CatalogIcon } from "@/components/experiments/CatalogEffects";
-import { aiProviders, aiRequestHeaders, availableAIModels, billingLabels, isApiKey, isQwenWorkspaceId, maxApiKeyLength, modelSelectionMessage, parseAISelection, qwenRegions, type AIProvider, type TokenUsage } from "@/lib/aiSettings";
+import { aiKeyProviderMessage, aiProviders, aiRequestHeaders, availableAIModels, billingLabels, isApiKey, isMaskedApiKey, maxApiKeyLength, modelSelectionMessage, normalizeApiKeyDraft, parseAISelection, parseQwenWorkspace, qwenRegions, selectableAIProviderIds, type AIProvider, type TokenUsage } from "@/lib/aiSettings";
 import { isPlatformModel, platformModelIds, platformModels, platformQuota } from "@/lib/platformAI";
 import { clearAIProvider, refreshAIConfiguration, selectAIMode, selectPlatformAIModel, selectTemporaryAIProvider, setAIConfiguration, setPlatformAIVerification, useTemporaryAI } from "@/lib/temporaryAI";
-import { ConnectionResult, useConnectionTest, type ConnectionTest } from "./ConnectionFeedback";
+import { ConnectionResult, httpsHint, useConnectionTest, type ConnectionTest } from "./ConnectionFeedback";
 
 type ConnectionState = "unconfigured" | "unverified" | "pending" | "connected" | "error" | "auth";
 const modeOptions = [
@@ -19,7 +19,6 @@ const connectionLabels: Record<ConnectionState, string> = {
 export function AISettingsForm({ configured }: { configured: boolean }) {
   const { mode, configurationError } = useTemporaryAI();
   const test = useConnectionTest();
-  const form = useRef<HTMLFormElement>(null);
   useEffect(() => { void refreshAIConfiguration(); }, []);
   return (
     <div className="ai-settings-layout">
@@ -42,9 +41,9 @@ export function AISettingsForm({ configured }: { configured: boolean }) {
         {configurationError && <p className="ai-settings-feedback" role="status">
           {configurationError} <button className="ai-settings-clear" type="button" onClick={() => void refreshAIConfiguration()}>重读配置</button>
         </p>}
-        {mode === "platform" ? <PlatformConnectionForm configured={configured} test={test} form={form} /> : <CustomConnection test={test} form={form} />}
+        {mode === "platform" ? <PlatformConnectionForm configured={configured} test={test} /> : <CustomConnection test={test} />}
       </section>
-      {test.result && <ConnectionResult result={test.result} dismiss={test.dismiss} cooling={test.cooling} retry={() => form.current?.requestSubmit()} />}
+      {test.result && <ConnectionResult result={test.result} dismiss={test.dismiss} />}
     </div>
   );
 }
@@ -63,11 +62,20 @@ function ConnectionSummary({ provider, model, state, usage }: { provider: string
   </header>;
 }
 
-type FormProps = { test: ConnectionTest; form: RefObject<HTMLFormElement | null> };
+type FormProps = { test: ConnectionTest };
 
-function CustomConnection({ test, form }: FormProps) {
-  const { provider } = useTemporaryAI();
-  return <ProviderConnectionForm key={provider} provider={provider} test={test} form={form} />;
+function CustomConnection({ test }: FormProps) {
+  const { provider, configuration, configurationError } = useTemporaryAI();
+  const legacy = configuration?.providers.qwen;
+  const fallback = configuration?.providers.qianwen ? "qianwen" : "deepseek";
+  const selected = provider === "qwen" && !legacy ? fallback : provider;
+
+  useEffect(() => {
+    if (configuration && selected !== provider) selectTemporaryAIProvider(selected);
+  }, [configuration, provider, selected]);
+
+  if (provider === "qwen" && !configuration && !configurationError) return <p role="status">正在读取 AI 配置…</p>;
+  return <ProviderConnectionForm key={selected} provider={selected} test={test} />;
 }
 
 function TestButton({ test, disabled, label }: { test: ConnectionTest; disabled: boolean; label: string }) {
@@ -78,7 +86,7 @@ function TestButton({ test, disabled, label }: { test: ConnectionTest; disabled:
   </button>;
 }
 
-function PlatformConnectionForm({ configured, test, form }: FormProps & { configured: boolean }) {
+function PlatformConnectionForm({ configured, test }: FormProps & { configured: boolean }) {
   const { platformModel, platformVerification } = useTemporaryAI();
 
   function testConnection(event: FormEvent<HTMLFormElement>) {
@@ -94,7 +102,7 @@ function PlatformConnectionForm({ configured, test, form }: FormProps & { config
   const message = configured ? test.message : "等待管理员配置。";
   return <>
     <ConnectionSummary provider="硅基流动" model={platformModels[platformModel]} state={state} usage={state === "connected" ? platformVerification?.usage : undefined} />
-    <form className="ai-settings-fields" ref={form} onSubmit={testConnection}>
+    <form className="ai-settings-fields" onSubmit={testConnection}>
       <label htmlFor="ai-platform-model">模型</label>
       <select id="ai-platform-model" value={platformModel} aria-describedby="ai-platform-help" onChange={(event) => {
         const model = event.target.value;
@@ -117,7 +125,7 @@ function PlatformConnectionForm({ configured, test, form }: FormProps & { config
   </>;
 }
 
-function ProviderConnectionForm({ provider, test, form }: FormProps & { provider: AIProvider }) {
+function ProviderConnectionForm({ provider, test }: FormProps & { provider: AIProvider }) {
   const { configuration, configurationError } = useTemporaryAI();
   const saved = configuration?.providers[provider];
   const [draft, setDraft] = useState("");
@@ -126,7 +134,7 @@ function ProviderConnectionForm({ provider, test, form }: FormProps & { provider
   const [workspaceOverride, setWorkspace] = useState<string>();
   const region = regionOverride ?? (saved?.selection.provider === "qwen" ? saved.selection.region : qwenRegions[0].id);
   const savedWorkspace = saved?.selection.provider === "qwen" && saved.selection.region === region ? saved.workspaceId ?? "" : "";
-  const workspaceId = (workspaceOverride ?? savedWorkspace).trim();
+  const workspaceId = parseQwenWorkspace(workspaceOverride ?? savedWorkspace, region);
   const retainedKey = provider === "qwen"
     ? saved?.selection.provider === "qwen" && saved.selection.region === region && workspaceId === savedWorkspace : !!saved;
   const models = availableAIModels(provider, region);
@@ -148,6 +156,11 @@ function ProviderConnectionForm({ provider, test, form }: FormProps & { provider
     setAnnouncement("");
   }
 
+  function switchProvider(next: AIProvider) {
+    resetConnection();
+    selectTemporaryAIProvider(next);
+  }
+
   async function clearKey() {
     resetConnection();
     if (saved) {
@@ -164,19 +177,35 @@ function ProviderConnectionForm({ provider, test, form }: FormProps & { provider
   function testConnection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (test.isPending() || clearing || !test.canTest || test.cooling) return;
-    const apiKey = draft.trim();
+    const apiKey = normalizeApiKeyDraft(keyInput.current?.value ?? draft);
     const selection = parseAISelection(provider, modelValue, provider === "qwen" ? region : undefined);
     if (!selection) {
       test.unverified(modelSelectionMessage);
       return;
     }
-    if (provider === "qwen" && workspaceId && !isQwenWorkspaceId(workspaceId)) {
-      test.unverified("请检查百炼工作空间 ID。");
+    if (!apiKey && !retainedKey) {
+      test.unverified("请填写你的 API Key。");
+      keyInput.current?.focus();
       return;
     }
-    if (apiKey ? !isApiKey(apiKey) : !retainedKey) {
-      test.unverified(apiKey ? "请检查 Key 格式。" : "请填写你的 API Key。");
+    const providerMessage = aiKeyProviderMessage(provider, apiKey);
+    if (providerMessage) {
+      test.unverified(providerMessage);
       keyInput.current?.focus();
+      return;
+    }
+    if (apiKey && !isApiKey(apiKey, provider)) {
+      const hint = isMaskedApiKey(apiKey) ? "这是遮挡后的 Key。请粘贴创建时的完整值。"
+        : provider !== "qianwen" && apiKey.length > maxApiKeyLength ? "Key 太长。请只复制密钥。"
+        : /\s/.test(apiKey) ? "Key 中有空格。请重新粘贴。"
+        : !apiKey.startsWith("sk-") ? "Key 缺少 sk- 前缀。"
+        : "Key 格式有误。请只复制密钥。";
+      test.unverified(hint);
+      keyInput.current?.focus();
+      return;
+    }
+    if (provider === "qwen" && workspaceId === null) {
+      test.unverified("请填写同地域的业务空间 ID 或专属地址。");
       return;
     }
 
@@ -203,18 +232,16 @@ function ProviderConnectionForm({ provider, test, form }: FormProps & { provider
     <>
       <ConnectionSummary provider={aiProviders[provider].label} model={selected?.label}
         state={state} usage={state === "connected" ? verification?.usage : undefined} />
-      <form className="ai-settings-fields" ref={form} onSubmit={testConnection} autoComplete="off">
+      <form className="ai-settings-fields" onSubmit={testConnection} autoComplete="off">
         <div className="ai-settings-provider-fields">
           <div>
             <label htmlFor="ai-provider">选择服务商</label>
-            <select id="ai-provider" value={provider} onChange={(event) => {
-              const selected = event.target.value;
-              if (Object.hasOwn(aiProviders, selected)) {
-                test.reset();
-                selectTemporaryAIProvider(selected as AIProvider);
-              }
+            <select id="ai-provider" value={provider === "qwen" ? "" : provider} onChange={(event) => {
+              const selected = selectableAIProviderIds.find((id) => id === event.target.value);
+              if (selected) switchProvider(selected);
             }}>
-              {Object.entries(aiProviders).map(([id, option]) => <option key={id} value={id}>{option.label}</option>)}
+              {provider === "qwen" && <option value="" disabled hidden>选择新服务商</option>}
+              {selectableAIProviderIds.map((id) => <option key={id} value={id}>{aiProviders[id].label}</option>)}
             </select>
           </div>
           {provider === "qwen" && <div>
@@ -232,11 +259,11 @@ function ProviderConnectionForm({ provider, test, form }: FormProps & { provider
           </div>}
         </div>
         {provider === "qwen" && <>
-          <label htmlFor="ai-qwen-workspace">百炼工作空间 ID（可选）</label>
-          <input id="ai-qwen-workspace" type="text" value={workspaceOverride ?? savedWorkspace} maxLength={63}
+          <label htmlFor="ai-qwen-workspace">百炼业务空间（可选）</label>
+          <input id="ai-qwen-workspace" type="text" value={workspaceOverride ?? savedWorkspace} maxLength={160}
             placeholder="llm-…" spellCheck={false} autoCapitalize="none" aria-describedby="ai-qwen-workspace-help"
             onChange={(event) => { resetConnection(); setWorkspace(event.target.value); }} />
-          <p className="ai-settings-help" id="ai-qwen-workspace-help">留空使用所在地域的公共地址。</p>
+          <p className="ai-settings-help" id="ai-qwen-workspace-help">可填 ID 或专属地址。留空用公共地址。</p>
         </>}
 
         <label htmlFor="ai-model">模型</label>
@@ -253,17 +280,30 @@ function ProviderConnectionForm({ provider, test, form }: FormProps & { provider
         </div>
 
         <label htmlFor="ai-key">API Key</label>
-        <input id="ai-key" ref={keyInput} type="password" value={draft} maxLength={maxApiKeyLength}
+        <input id="ai-key" ref={keyInput} type="password" value={draft} maxLength={provider === "qianwen" ? undefined : maxApiKeyLength}
           autoComplete="off" spellCheck={false} autoCapitalize="none" disabled={!test.canTest} aria-describedby="ai-key-help"
           placeholder={state === "connected" ? "已验证。可输入新 Key。" : retainedKey ? "已保留 Key" : "粘贴你的 API Key"}
+          onPaste={(event) => {
+            const pasted = event.clipboardData.getData("text");
+            const key = normalizeApiKeyDraft(pasted);
+            if (pasted === key) return;
+            const input = event.currentTarget;
+            event.preventDefault();
+            resetConnection();
+            setDraft(input.value.slice(0, input.selectionStart ?? 0) + key + input.value.slice(input.selectionEnd ?? input.value.length));
+          }}
           onChange={(event) => { resetConnection(); setDraft(event.target.value); }} />
-        <p className="ai-settings-help" id="ai-key-help">验证后暂存于服务端，最多 8 小时。</p>
-        {test.message && <p className="ai-settings-feedback" data-state={state} role="status">{test.message}</p>}
+        <p className="ai-settings-help" id="ai-key-help">{test.canTest === false ? httpsHint
+          : provider === "qianwen" ? "请填千问 AI 平台的按量 Key。验证后保留 8 小时。"
+          : provider === "qwen" ? "请填同地域的阿里云百炼 Key。验证后保留 8 小时。" : "验证后暂存于服务端，最多 8 小时。"}</p>
+        {test.canTest !== false && test.message && <p className="ai-settings-feedback" data-state={state} role={state === "error" ? "alert" : "status"}>{test.message}</p>}
 
         <div className="ai-settings-actions">
-          <TestButton test={test} disabled={clearing || !test.canTest || !modelValue || !hasKey} label="测试并保存" />
+          <TestButton test={test} disabled={clearing || !test.canTest} label="测试并保存" />
           <button className="ai-settings-clear" type="button" disabled={clearing || test.isPending() || (!draft && !saved)}
             onClick={() => void clearKey()}>清除 Key</button>
+          {provider !== "qwen" && configuration?.providers.qwen && <button className="ai-settings-clear" type="button"
+            disabled={clearing || test.isPending()} onClick={() => switchProvider("qwen")}>管理已存百炼 Key</button>}
           {announcement && <span className="ai-settings-help" role="status">{announcement}</span>}
         </div>
       </form>

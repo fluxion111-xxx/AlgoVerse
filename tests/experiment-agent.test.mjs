@@ -23,6 +23,7 @@ const { POST } = await import("../src/app/api/experiments/agent/route.ts");
 const historyAPI = await import("../src/app/api/experiments/history/route.ts");
 const { POST: diagnosisPOST } = await import("../src/app/api/experiments/runs/[runId]/diagnosis/route.ts");
 const { GET: replayGET } = await import("../src/app/api/experiments/runs/[runId]/replay/route.ts");
+const { POST: explanationPOST } = await import("../src/app/api/experiments/runs/[runId]/explanation/route.ts");
 const { POST: tutorPOST } = await import("../src/app/api/ai/tutor/route.ts");
 const connectionAPI = await import("../src/app/api/ai/connection/route.ts");
 const { recentAgentTurns } = await import("../src/lib/server/experimentAgent.ts");
@@ -41,6 +42,8 @@ const { experimentEvidence } = await import("../src/lib/experiments/evidence.ts"
 const { adaptEvidenceRun, citedRunEvidence, compareEvidenceRuns, precedingEvidenceRound, referenceFor, resolveEvidence, verifyRunEvidence } =
   await import("../src/lib/experiments/runEvidence.ts");
 const { evidencePositionToken, parseEvidencePosition } = await import("../src/lib/experiments/evidencePosition.ts");
+const { keyframeCandidates, keyframeContext } = await import("../src/lib/experiments/keyframeEvidence.ts");
+const { explorationBaseline, verifyExplorationChange } = await import("../src/lib/server/experimentExploration.ts");
 const { schedulingWaitReport } = await import("../src/lib/experimentAgent.ts");
 const model = "Qwen/Qwen3.5-4B";
 const key = "sk-agent-fixture-secret-key";
@@ -123,7 +126,7 @@ async function setup(t, ip, respond) {
     const upstream = JSON.parse(init.body);
     assert.equal(upstream.model, url.includes("deepseek") ? "deepseek-flash" : model);
     const input = JSON.parse(upstream.messages[1].content);
-    const expectedTokens = Object.hasOwn(input, "angle") ? 600
+    const expectedTokens = Object.hasOwn(input, "alreadyTried") ? 1200 : Object.hasOwn(input, "angle") ? 600
       : Object.hasOwn(input, "question") ? 1100 : Object.hasOwn(input, "message") || input.stage === "plan" ? 1200 : 1000;
     assert.equal(upstream.max_tokens, expectedTokens);
     if (Object.hasOwn(input, "message")) {
@@ -138,9 +141,9 @@ async function setup(t, ip, respond) {
     if (output instanceof Response) return output;
     return modelReply(JSON.stringify(output));
   });
-  async function post(action, task, extra = {}, headers = {}) {
+  async function post(action, task, extra = {}, headers = {}, signal) {
     const response = await POST(new Request("https://algoverse.test/api/experiments/agent", {
-      method: "POST",
+      method: "POST", signal,
       headers: { "Content-Type": "application/json", "X-AI-Provider": "siliconflow", "CF-Connecting-IP": ip, ...headers },
       body: JSON.stringify({ action, id: task?.id, revision: task?.revision, ...extra }),
     }));
@@ -149,11 +152,11 @@ async function setup(t, ip, respond) {
     return { ...payload, http: response.status,
       ...(response.headers.has("Retry-After") && { retryAfter: Number(response.headers.get("Retry-After")) }) };
   }
-  async function ask(question, task) {
+  async function ask(question, task, extra = {}, signal) {
     const response = await tutorPOST(new Request("https://algoverse.test/api/ai/tutor", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-AI-Provider": "siliconflow", "CF-Connecting-IP": ip },
-      body: JSON.stringify({ conversation: true, question, agentId: task?.id, revision: task?.revision }),
+      method: "POST", signal,
+      headers: { "Content-Type": "application/json", "X-AI-Provider": "siliconflow", "X-AI-Exact-Model": "1", "CF-Connecting-IP": ip },
+      body: JSON.stringify({ conversation: true, question, agentId: task?.id, revision: task?.revision, ...extra }),
     }));
     const payload = await response.json();
     assert.ok(!JSON.stringify(payload).includes(key));
@@ -167,8 +170,155 @@ function modelReply(content, finishReason = "stop") {
     usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 } });
 }
 
+for (const surface of ["tutor", "workbench", "analysis"]) {
+  test(`${surface} saves an in-flight result after disconnect and reuses it on reconnect`, async (t) => {
+    const entered = Promise.withResolvers();
+    const result = Promise.withResolvers();
+    const { ask, post, upstreamFetch } = await setup(t, "192.0.2.53", () => {
+      entered.resolve();
+      return result.promise;
+    });
+    const question = "比较排序方案。";
+    const operationId = randomUUID();
+    const task = surface === "tutor" ? (await ask(question, undefined, { action: "start", operationId })).task
+      : (await post("start", null, { goal: question })).task;
+    assert.ok(task);
+    const submit = (signal) => surface === "tutor" ? ask(question, task, { operationId }, signal)
+      : post(surface === "analysis" ? "decide" : "message", task, { message: question, operationId }, {}, signal);
+    const browser = new AbortController();
+    const request = submit(browser.signal);
+    await entered.promise;
+    const modelSignal = upstreamFetch.mock.calls.at(-1).arguments[1].signal;
+    browser.abort();
+    assert.equal(modelSignal.aborted, false);
+    const active = (await submit()).task;
+    assert.equal(surface === "analysis" ? active.operationId : active.dialogue.operationId, operationId);
+    result.resolve(surface === "tutor" ? { answer: "先固定输入。" } : first);
+    assert.equal((await request).http, 200);
+    const restored = (await post("status", task)).task;
+    if (surface === "analysis") {
+      assert.equal(restored.phase, "confirm");
+      assert.equal(restored.decisions.length, 1);
+    } else {
+      assert.equal(restored.dialogue.turns.length, 1);
+      assert.equal(restored.dialogue.turns[0].operationId, operationId);
+    }
+    assert.deepEqual((await submit()).task, restored);
+    assert.equal(upstreamFetch.mock.calls.filter(({ arguments: [url] }) => url.includes("chat/completions")).length, 1);
+  });
+}
+
+test("both pages retry an interrupted transport on the selected free model", async (t) => {
+  let attempts = 0;
+  const { ask, post, upstreamFetch } = await setup(t, "192.0.2.54", (input) => {
+    if (++attempts % 2 === 1) throw new TypeError("socket closed");
+    return input.question ? { answer: "先固定输入。" } : { action: "answer", observation: "先固定输入。" };
+  });
+  const question = "怎么比较排序？";
+  assert.equal((await ask(question)).status, "shared");
+  const task = (await post("start", null, { goal: question })).task;
+  assert.equal((await post("message", task, { message: question })).task.dialogue.turns[0].action, "answer");
+  const modelCalls = upstreamFetch.mock.calls.filter(({ arguments: [url] }) => url.includes("chat/completions"));
+  assert.equal(modelCalls.length, 4);
+  assert.ok(modelCalls.every(({ arguments: [, init] }) => JSON.parse(init.body).model === model));
+});
+
 const sortingPlan = { action: "run", plan: ["比较两种排序"], observation: "用同一组数比较。",
   calls: [{ tool: "sorting", parameters: { goalLabel: "比较排序", values: [5, 2, 9, 1] } }] };
+
+test("AI exploration uses a saved Run and adopts the exact validated proposal without executing it", async (t) => {
+  const goal = "研究 RR 时间片与等待时间";
+  const hypothesis = "时间片缩短后等待时间会变长。";
+  const change = { key: "quantum", value: 4, metrics: ["waiting", "turnaround"], purpose: "时间片会影响等待吗？", reason: "检验时间片和等待的关系。" };
+  const otherChange = { ...change, value: 1, purpose: "更短时间片会怎样？" };
+  let input;
+  let output = { suggestions: [change, { ...change, metrics: ["accuracy"] }, otherChange] };
+  const { post, upstreamFetch, values } = await setup(t, "192.0.2.119", (payload) => {
+    if (payload.alreadyTried) { input = payload; return output; }
+    return { action: "run", plan: ["跑 RR 基线"], observation: "固定进程输入。", calls: [call("rr", 2)] };
+  });
+  const initial = (await post("start", null, { goal })).task;
+  const plan = (await post("message", initial, { message: "设计 RR 实验" })).task;
+  const task = (await post("approve", plan)).task;
+  const [round] = task.runs;
+  const saved = await getExperimentRun(round.id);
+  const body = { sessionId: round.sessionId, runId: round.id, hypothesis };
+  const response = await post("exploration", task, body);
+  assert.equal(response.http, 200);
+  assert.equal(input.question, goal);
+  assert.equal(input.hypothesis, hypothesis);
+  assert.deepEqual(input.baseline, { runId: saved.id, config: saved.session.config, metrics: experimentEvidence(saved.results) });
+  const [suggestion, alternate] = response.suggestions;
+  assert.deepEqual(suggestion.change, change);
+  assert.deepEqual(alternate.change, otherChange);
+  assert.deepEqual(suggestion.parameter, { label: "时间片", before: 2 });
+  assert.deepEqual(Object.fromEntries(suggestion.controls.map(({ key, value }) => [key, value])), { policy: "rr", processes });
+  assert.deepEqual(suggestion.metrics.map(({ key, baseline }) => [key, baseline]), change.metrics.map((metric) => [metric, round.metrics[metric]]));
+  assert.deepEqual(await getAgentTask(task.id), task);
+  output = { suggestions: [change, change] };
+  assert.deepEqual((await post("exploration", task, body)).suggestions, [suggestion]);
+
+  const other = (await post("start", null, { goal: "不同的研究" })).task;
+  const upstreamCount = upstreamFetch.mock.callCount();
+  assert.equal((await post("exploration", other, body)).http, 404);
+  assert.equal((await post("exploration", task, { ...body, sessionId: randomUUID() })).http, 404);
+  assert.equal((await post("exploration", task, { ...body, hypothesis: key })).http, 400);
+  assert.equal((await post("exploration", task, { ...body, hypothesis: "", revision: 0 })).http, 409);
+  for (const invalid of [{ ...change, value: 0 }, { ...change, value: 2 }, { ...change, key: "seed" }, { ...change, metrics: ["accuracy"] }]) {
+    assert.equal((await post("adopt-exploration", task, { ...body, change: invalid })).http, 422);
+  }
+  assert.equal(upstreamFetch.mock.callCount(), upstreamCount);
+  const adopt = { ...body, change: suggestion.change, operationId: randomUUID() };
+  const draft = (await post("adopt-exploration", task, adopt)).task;
+  assert.equal(draft.phase, "confirm");
+  assert.equal(draft.autoContinue, false);
+  assert.deepEqual(draft.runs, [round]);
+  assert.deepEqual(draft.dialogue, task.dialogue);
+  assert.deepEqual(draft.pending[0].config, { ...saved.session.config, quantum: 4 });
+  assert.equal(await getExperimentRun(draft.pending[0].id), null);
+  assert.deepEqual((await post("adopt-exploration", task, adopt)).task, draft);
+  assert.equal((await post("adopt-exploration", draft, { ...adopt, operationId: randomUUID() })).http, 409);
+  assert.equal(upstreamFetch.mock.callCount(), upstreamCount);
+
+  const approved = (await post("approve", draft)).task;
+  const nextRun = await getExperimentRun(approved.runs[1].id);
+  assert.deepEqual(nextRun.session.config, draft.pending[0].config);
+  assert.deepEqual(await getExperimentRun(round.id), saved);
+  assert.equal((await post("exploration", approved, body)).http, 409);
+  assert.equal((await post("adopt-exploration", approved, { ...adopt, operationId: randomUUID(), runId: nextRun.id,
+    sessionId: nextRun.session.id, change: { ...change, value: 2 } })).http, 422);
+
+  output = { suggestions: [] };
+  assert.deepEqual((await post("exploration", approved, { ...body, runId: nextRun.id, sessionId: nextRun.session.id })).suggestions, []);
+  assert.ok(input.alreadyTried.some(({ quantum }) => quantum === 2));
+  values.clear();
+  assert.equal((await post("exploration", approved, { ...body, runId: nextRun.id, sessionId: nextRun.session.id })).http, 404);
+});
+
+test("exploration validates real KNN metrics, sorting inputs and custom pathfinding fields", async (t) => {
+  const reason = "检查输入变化的影响。";
+  const { post } = await setup(t, "192.0.2.120", () => ({ suggestions: [
+    { key: "k", value: 4, metrics: ["accuracy"], purpose: "准确率会提高吗？", reason },
+  ] }));
+  const knn = await saveEvidenceTrial(getExperimentEngine("knn-classification"));
+  const knnContext = await explorationBaseline(null, knn);
+  const k = knn.session.config.k === 1 ? 2 : 1;
+  assert.ok(verifyExplorationChange(knnContext, { key: "k", value: k, metrics: ["prediction", "votes"], purpose: "投票会变吗？", reason }));
+  assert.equal((await post("exploration", null, { runId: knn.id, sessionId: knn.session.id, hypothesis: "" })).http, 502);
+
+  const sorting = await saveEvidenceTrial(getExperimentEngine("sorting"));
+  const sortContext = await explorationBaseline(null, sorting);
+  const values = [4, 3, 2, 1];
+  const valid = verifyExplorationChange(sortContext, { key: "values", value: values, metrics: ["comparisons", "swaps"], purpose: "逆序会多比几次？", reason });
+  assert.deepEqual(valid?.config, { ...sorting.session.config, values });
+  assert.equal(verifyExplorationChange(sortContext, { key: "values", value: values, metrics: ["elapsedMs"], purpose: "排序会更快吗？", reason }), null);
+
+  const pathfinding = await saveEvidenceTrial(getExperimentEngine("pathfinding"));
+  const mapContext = await explorationBaseline(null, pathfinding);
+  const { walls } = pathfinding.session.config;
+  assert.ok(verifyExplorationChange(mapContext, { key: "walls", value: [], metrics: ["visited"], purpose: "少了障碍会怎样？", reason }));
+  assert.equal(verifyExplorationChange(mapContext, { key: "walls", value: [...walls].reverse(), metrics: ["visited"], purpose: "访问量会变吗？", reason }), null);
+});
 
 test("retrying an acknowledged instruction returns the saved turn without another model call", async (t) => {
   const { post, upstreamFetch } = await setup(t, "192.0.2.85", () => ({ action: "answer", observation: "已记下。" }));
@@ -197,7 +347,7 @@ test("an expired approval can recover its saved Run at the step limit", async (t
   assert.equal((await getExperimentRun(saved.id)).completedAt, saved.completedAt);
 });
 
-test("the same BYOK settings drive both providers in Tutor and real workbench runs across retries", async (t) => {
+test("BYOK settings drive Tutor and real workbench runs for current and legacy providers across retries", async (t) => {
   const limits = globalThis.algoVerseAILimits;
   delete globalThis.algoVerseAILimits;
   t.after(() => { globalThis.algoVerseAILimits = limits; });
@@ -206,6 +356,7 @@ test("the same BYOK settings drive both providers in Tutor and real workbench ru
     { provider: "deepseek", model: "deepseek-flash", endpoint: "api.deepseek.com", key: "sk-byok-integration-deepseek" },
     { provider: "qwen", model: "qwen3.8-flash", endpoint: "dashscope-intl.aliyuncs.com", key: "sk-byok-integration-qwen",
       region: "ap-southeast-1" },
+    { provider: "qianwen", model: "qwen3.7-plus", endpoint: "maas.qianwenaiapi.com", key: "sk-ws-byok-integration-qianwen" },
   ];
   const calls = [];
   upstreamFetch.mock.mockImplementation(async (endpoint, init) => {
@@ -278,7 +429,7 @@ test("the same BYOK settings drive both providers in Tutor and real workbench ru
     assert.ok(calls.at(-1).roles.includes("assistant"));
   }
   assert.deepEqual(tutorTask.dialogue.turns.map((turn) => turn.model),
-    ["deepseek-flash", "deepseek-flash", "qwen3.8-flash", "qwen3.8-flash"]);
+    ["deepseek-flash", "deepseek-flash", "qwen3.8-flash", "qwen3.8-flash", "qwen3.7-plus", "qwen3.7-plus"]);
 });
 
 test("a long conversation keeps recent full turns within the model context budget", () => {
@@ -678,23 +829,123 @@ test("every registered engine persists a readable Run, verifiable metrics and re
       assert.equal(resolveEvidence(adapted, referenceFor(adapted, { kind: "step", key, step: items.length + 1 })), null, engine.id);
     }
     assert.equal(resolveEvidence(adapted, referenceFor(adapted, { kind: "metric", key: "fake" })), null, engine.id);
+    const candidates = keyframeCandidates(adapted);
+    assert.ok(candidates.length, engine.id);
+    assert.equal(candidates.some(({ reference }) => reference.position.kind === "step"), engine.id !== "knn-classification", engine.id);
+    for (const { reference } of candidates) {
+      const context = keyframeContext(adapted, reference);
+      assert.equal(context?.runId, saved.id, engine.id);
+      assert.equal(context.evidence.token, evidencePositionToken(reference.position), engine.id);
+      if (reference.position.kind === "step") {
+        const { key, step } = reference.position;
+        const source = adapted.traces.find((trace) => trace.key === key);
+        assert.deepEqual(context.evidence.current, source.items[step - 1], engine.id);
+        assert.deepEqual(context.evidence.previous, source.items[step - 2], engine.id);
+      }
+    }
     const track = adapted.traces.map(({ label }) => label).join("、");
+    const explanation = candidates[0].reference.position.kind === "step" ? "保存的步骤"
+      : engine.id === "knn-classification" ? "邻居、距离及投票结果" : "实测指标或结果";
     matrix.push(`| ${engine.creator.title.replaceAll("|", "\\|")} (${engine.id}) | 是 | ${engine.id === "knn-classification" || engine.id === "sorting" ||
-      engine.id === "cpu-scheduling" || engine.id === "pointer-write" ? "通用 + 专用规则" : "通用"} | 指标${adapted.results.length ? "、结果" : ""}${track ? "、播放器步骤" : ""} | ${track || "该预设无可定位轨迹"} | 通过 | ${check.limitations.slice(0, -2).join(" ") || "仅限本轮指标与已有轨迹。"} |`);
+      engine.id === "cpu-scheduling" || engine.id === "pointer-write" ? "通用 + 专用规则" : "通用"} | 指标${adapted.results.length ? "、结果" : ""}${track ? "、播放器步骤" : ""} | ${track || "该预设无可定位轨迹"} | ${explanation} | 通过 | ${check.limitations.slice(0, -2).join(" ") || "仅限本轮指标与已有轨迹。"} |`);
   }
   assert.equal(matrix.length, registeredEngines.length);
   if (process.env.ALGOVERSE_EVIDENCE_COMPAT_REPORT) await writeFile(process.env.ALGOVERSE_EVIDENCE_COMPAT_REPORT, [
-    "# 实验诊断兼容性清单",
+    "# 实验诊断与讲解兼容性清单",
     "",
-    `共 ${matrix.length} 个注册引擎。每项均用真实引擎执行默认配置，保存 Run，再由回放接口读回。自动化测试核对指标、证据位置和轨迹边界。浏览器验证范围见交付报告。`,
+    `共 ${matrix.length} 个注册引擎。每项均用真实引擎执行默认配置，保存 Run，再由回放接口读回。自动化测试核对指标、证据位置、轨迹边界和发给 Agent 的片段。浏览器和模型接口验证范围见交付报告。`,
     "",
     "通用规则核对同一研究里的引擎版本、输入参数和共同指标。通用判断仅描述已测现象。轨迹列指默认配置生成的数据。分支未发生或数据缺失时，只定位实际存在的指标或结果。",
+    "讲解按所选 Run 取证。排序、CPU 调度和网络传输按事件选择关键步骤。其余有轨迹的实验选首、中、末等已保存的步骤。KNN 的邻居顺序属于结果展示。实际 Run 缺少轨迹时，讲解范围为已保存的指标或结果。",
     "",
-    "| 实验类型 | 真实 Run 可读取 | 可信度检查 | 定位粒度 | 默认配置的真实轨迹 | 实际测试 | 限制 |",
-    "| --- | --- | --- | --- | --- | --- | --- |",
+    "| 实验类型 | 真实 Run 可读取 | 可信度检查 | 定位粒度 | 默认配置的真实轨迹 | 03 讲解 | 实际测试 | 限制 |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ...matrix,
     "",
   ].join("\n"), "utf8");
+});
+
+test("Agent explains an exact sorting frame without modifying the task or invoking tools", async (t) => {
+  const { post, values, upstreamFetch } = await setup(t, "192.0.2.96", () => sortingPlan);
+  const draft = (await post("start", null, { goal: "比较排序" })).task;
+  const plan = (await post("message", draft, { message: "设计排序实验" })).task;
+  const task = (await post("approve", plan)).task;
+  const [round] = task.runs;
+  const saved = await getExperimentRun(round.id);
+  const data = evidenceMetadata(saved);
+  const adapted = adaptEvidenceRun(task.id, round, data);
+  const swap = keyframeCandidates(adapted).find(({ label }) => label.includes("冒泡") && label.includes("首次交换")).reference;
+  const body = { researchId: task.id, sessionId: round.sessionId, position: evidencePositionToken(swap.position) };
+  const headers = { "Content-Type": "application/json", Authorization: "Bearer sk-fixture-keyframe-sorting", "X-AI-Provider": "deepseek", "X-AI-Model": "deepseek-flash" };
+  let sent;
+  let valid = true;
+  let calls = 0;
+  upstreamFetch.mock.mockImplementation(async (_url, init) => {
+    calls++;
+    sent = JSON.parse(JSON.parse(init.body).messages[1].content);
+    return modelReply(JSON.stringify(valid ? { token: sent.evidence.token, explanation: "本步交换了相邻元素。" }
+      : { token: "metric:fake", explanation: "错误引用。", calls: [] }));
+  });
+  const explain = (input, origin) => explanationPOST(new Request(`https://algoverse.test/api/experiments/runs/${round.id}/explanation`, {
+    method: "POST", headers: { ...headers, ...(origin && { Origin: origin }) }, body: JSON.stringify(input),
+  }), { params: Promise.resolve({ runId: round.id }) });
+  for (const unsafe of [{ ...body, researchId: randomUUID() }, { ...body, sessionId: randomUUID() }, { ...body, position: "step:bubble:99999" }]) {
+    assert.equal((await explain(unsafe)).status, 404);
+  }
+  assert.equal((await explain(body, "https://foreign.test")).status, 403);
+  assert.equal((await explain({ ...body, data: "client override" })).status, 400);
+  assert.equal(calls, 0);
+  const response = await explain(body);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { reference: swap, explanation: "本步交换了相邻元素。" });
+  assert.equal(sent.runId, round.id);
+  assert.deepEqual(sent.evidence.current, saved.results.bubble.frames[swap.position.step - 1]);
+  assert.deepEqual(sent.evidence.previous, saved.results.bubble.frames[swap.position.step - 2]);
+  assert.equal(calls, 1);
+
+  valid = false;
+  assert.equal((await explain(body)).status, 502);
+  assert.deepEqual(await getAgentTask(task.id), task);
+  assert.deepEqual(await getExperimentRun(round.id), saved);
+  values.clear();
+  assert.equal((await explain(body)).status, 404);
+});
+
+test("result-only explanations use saved values and no frame positions", async (t) => {
+  const { upstreamFetch } = await setup(t, "192.0.2.97", () => assert.fail("Unexpected request"));
+  const knn = await saveEvidenceTrial(getExperimentEngine("knn-classification"));
+  const data = evidenceMetadata(knn);
+  const run = adaptEvidenceRun(knn.session.id, data, data);
+  const results = keyframeCandidates(run);
+  assert.deepEqual(results.map(({ reference }) => reference.position), [
+    { kind: "result", key: "neighbors" }, { kind: "result", key: "votes" },
+  ]);
+  const vote = results[1].reference;
+  const explain = (position) => explanationPOST(new Request(`https://algoverse.test/api/experiments/runs/${knn.id}/explanation`, {
+    method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer sk-fixture-keyframe-results",
+      "X-AI-Provider": "deepseek", "X-AI-Model": "deepseek-flash" },
+    body: JSON.stringify({ researchId: vote.researchId, sessionId: vote.sessionId, position }),
+  }), { params: Promise.resolve({ runId: knn.id }) });
+  upstreamFetch.mock.mockImplementation(async (_url, init) => {
+    const { evidence } = JSON.parse(JSON.parse(init.body).messages[1].content);
+    assert.equal(evidence.kind, "result");
+    assert.equal(evidence.step, undefined);
+    assert.deepEqual(evidence.value, { votes: knn.results.votes, prediction: knn.results.prediction });
+    return modelReply(JSON.stringify({ token: evidence.token, explanation: "预测来自保存的邻居投票。" }));
+  });
+  assert.equal((await explain("step:neighbors:1")).status, 404);
+  assert.equal((await explain("result:votes")).status, 200);
+  assert.equal(upstreamFetch.mock.callCount(), 1);
+
+  const pointer = await saveEvidenceTrial(getExperimentEngine("pointer-write"));
+  const pointerData = evidenceMetadata(pointer);
+  const noTrace = adaptEvidenceRun(pointer.session.id, pointerData, { ...pointerData, results: { ...pointerData.results, steps: [] } });
+  const fallback = keyframeCandidates(noTrace);
+  assert.ok(fallback.length);
+  assert.ok(fallback.every(({ reference }) => reference.position.kind === "metric"));
+  const context = keyframeContext(noTrace, fallback[0].reference);
+  assert.equal(context.evidence.value, pointer.results.metrics[fallback[0].reference.position.key]);
+  assert.equal(context.evidence.step, undefined);
 });
 
 test("KNN, sorting, CPU and pointer checks reference the correct runs and refuse unsupported claims", async (t) => {
@@ -925,7 +1176,7 @@ test("cancelling during model analysis prevents the late decision from publishin
 test("stopping one reply preserves its proposal and ignores unrelated stop requests", async (t) => {
   const entered = Promise.withResolvers();
   const result = Promise.withResolvers();
-  const { post } = await setup(t, "192.0.2.24", ({ message }) => {
+  const { post, upstreamFetch } = await setup(t, "192.0.2.24", ({ message }) => {
     if (message === "比较排序。") return sortingPlan;
     entered.resolve();
     return result.promise;
@@ -941,6 +1192,7 @@ test("stopping one reply preserves its proposal and ignores unrelated stop reque
   const unrelated = (await post("stop", proposal, { operationId: randomUUID() })).task;
   assert.equal(unrelated.dialogue.pending, "把输入改一下。");
   const stopped = (await post("stop", proposal, { operationId })).task;
+  assert.equal(upstreamFetch.mock.calls.at(-1).arguments[1].signal.aborted, true);
   assert.equal(stopped.dialogue.pending, undefined);
   assert.deepEqual(stopped.dialogue.turns.at(-1), { message: "把输入改一下。", stopped: true, operationId });
   assert.deepEqual(stopped.pending, proposal.pending);

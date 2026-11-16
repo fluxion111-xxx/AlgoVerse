@@ -2,6 +2,7 @@
 
 import { notFound, redirect } from "next/navigation";
 import { randomBytes, randomUUID } from "node:crypto";
+import { containsPossibleAIKey } from "@/lib/aiSettings";
 import { getExperimentEngine, pathfindingEngine, type ExperimentConfig } from "@/lib/experimentEngines";
 import { agentWorkbenchLink, workflowRoute, withExperimentTask } from "@/lib/navigation";
 import { maxQuestionLength } from "@/lib/experimentCreator";
@@ -12,7 +13,7 @@ export async function saveExperimentQuestion(form: FormData): Promise<{ sessionI
   const input = form.get("question");
   const question = typeof input === "string" ? input.trim() : "";
   if (!question || question.length > maxQuestionLength) return { error: "请输入 1–300 字。" };
-  if (/\bsk-[A-Za-z0-9_-]{16,}\b/i.test(question)) return { error: "请先移除问题里的 Key。" };
+  if (containsPossibleAIKey(question)) return { error: "请先移除问题里的 Key。" };
   const id = form.get("sessionId");
   if (id !== null) {
     const current = await getExperimentWorkflow(id);

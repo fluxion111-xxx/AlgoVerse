@@ -9,7 +9,7 @@ import { formatAIRetryTime } from "@/lib/aiRateLimit";
 import { agentDialogueActive, hasAgentOperation, type AgentTask, type TutorConversationSummary } from "@/lib/experimentAgent";
 import { maxQuestionLength } from "@/lib/experimentCreator";
 import { agentWorkbenchLink, tutorConversationLink, tutorResumeCookie, tutorRoute, workflowAISettingsRoute } from "@/lib/navigation";
-import { fetchWithTemporaryAI, refreshAIConfiguration, requestAgentTask, useAIModelChoices } from "@/lib/temporaryAI";
+import { fetchWithTemporaryAI, recoverAgentTask, refreshAIConfiguration, requestAgentTask, useAIModelChoices } from "@/lib/temporaryAI";
 import { NavigationLink } from "../NavigationLink";
 import { CatalogIcon } from "./CatalogEffects";
 import { LazyTutorReply } from "./LazyTutorReply";
@@ -77,6 +77,8 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
   const transcriptContent = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const restored = task && agentDialogueActive(task) ? task.dialogue : undefined;
+  const activeUntil = restored?.activeUntil;
+  const restoredOperationId = restored?.operationId;
   const activeText = requestText || restored?.pending;
   const busy = !!activeText || stopping;
   const provider = "selection" in models.current.choice ? models.current.choice.selection.provider : "siliconflow";
@@ -147,10 +149,16 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
 
   useEffect(() => {
     const id = task?.id;
-    if (!id || !restored || requestText || stopping) return;
+    if (!id || !activeUntil || requestText || stopping) return;
+    const deadline = activeUntil;
     const controller = new AbortController();
-    const timer = window.setInterval(() => {
-      void requestAgentTask({ action: "status", id }, undefined, controller.signal).then((next) => {
+    const { signal } = controller;
+    const expire = window.setTimeout(() => setClock(Date.now()), Math.max(0, deadline - Date.now()) + 20);
+    async function poll() {
+      let wait = 1500;
+      try {
+        const next = await requestAgentTask({ action: "status", id }, undefined, signal);
+        if (signal.aborted) return;
         setTask((current) => current?.id === next.id && current.revision <= next.revision ? next : current);
         const uncertain = uncertainTurn.current;
         if (uncertain && !agentDialogueActive(next) && hasAgentOperation(next, uncertain.operationId)) {
@@ -159,11 +167,23 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
             setQuestion((draft) => draft.trim() === uncertain.question ? "" : draft);
             setFeedback(null);
           } else if (next.dialogue?.error) setFeedback({ kind: "error", text: next.dialogue.error });
+        } else if (next.dialogue?.error && next.dialogue.operationId === restoredOperationId) {
+          const { error, pending } = next.dialogue;
+          setQuestion((draft) => draft || pending || "");
+          setFeedback({ kind: "error", text: error });
         }
-      }).catch(() => {});
-    }, 1500);
-    return () => { window.clearInterval(timer); controller.abort(); };
-  }, [task?.id, restored, requestText, stopping]);
+      } catch {
+        wait = 3000;
+      }
+      if (!signal.aborted && Date.now() < deadline) timer = window.setTimeout(() => void poll(), wait);
+    }
+    let timer = window.setTimeout(() => void poll(), 1500);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+      window.clearTimeout(expire);
+    };
+  }, [task?.id, activeUntil, restoredOperationId, requestText, stopping]);
 
   function closePanel() {
     setPanelOpen(false);
@@ -276,11 +296,10 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
       const response = await fetchWithTemporaryAI("/api/ai/tutor", connection, {
         ...body, agentId: current.id, revision: current.revision,
       }, request.controller.signal);
-      const result = await response.clone().json().catch(() => null);
+      const result = await readAIResponse<{ task?: Conversation; status?: string; message?: string; code?: string; workbench?: string }>(response);
       if (pending.current !== request) return;
       if (result?.task) rememberConversation(result.task);
       if (result?.status === "pending") return;
-      if (!response.ok) await readAIResponse(response);
       if (result?.status === "stopped") {
         uncertainTurn.current = null;
         setFeedback({ kind: "stopped", text: "已停止。可以重试。" });
@@ -299,14 +318,19 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
     } catch (error) {
       if (pending.current !== request) return;
       setFeedback({ kind: "error", text: error instanceof AIResponseError ? error.message : "请求失败，请重试。" });
-      if (request.taskId && error instanceof AIResponseError && (error.status === 0 || error.status >= 500)) {
-        const snapshot = await requestAgentTask({ action: "status", id: request.taskId }, undefined, request.controller.signal).catch(() => null);
+      if (request.taskId && error instanceof AIResponseError && (error.status === 0 || error.status === 408 || error.status === 409 || error.status >= 500)) {
+        const snapshot = await recoverAgentTask(request.taskId, (next) => hasAgentOperation(next, request.operationId) === true,
+          request.controller.signal);
         if (pending.current !== request || !snapshot) return;
         rememberConversation(snapshot);
-        if (snapshot.dialogue?.turns.some((turn) => turn.operationId === request.operationId && turn.action)) {
+        const turn = snapshot.dialogue?.turns.find((entry) => entry.operationId === request.operationId);
+        if (turn?.action) {
           uncertainTurn.current = null;
           setQuestion((draft) => draft.trim() === text ? "" : draft);
           setFeedback({ kind: "stopped", text: "回复已同步。" });
+          if (turn === snapshot.dialogue?.turns.at(-1) && turn.action === "run" && snapshot.phase === "confirm") {
+            router.push(agentWorkbenchLink({ agentId: snapshot.id }));
+          }
         } else if (snapshot.dialogue?.error && snapshot.dialogue.operationId === request.operationId) {
           uncertainTurn.current = null;
           setFeedback({ kind: "error", text: snapshot.dialogue.error });

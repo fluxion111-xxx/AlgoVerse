@@ -1,3 +1,4 @@
+import { containsPossibleAIKey } from "@/lib/aiSettings";
 import { maxCreatorHistory, maxCreatorReplyLength, maxQuestionLength, type CreatorTurn } from "@/lib/experimentCreator";
 import { agentDialogueActive, hasAgentOperation, isAgentOperationId, type AgentFocus, type AgentTask, type TutorContext } from "@/lib/experimentAgent";
 import { registeredEngines } from "@/lib/experimentEngines";
@@ -120,7 +121,7 @@ export async function POST(request: Request) {
     }
     const credentials = readAICredentials(request);
     if (question.includes(credentials.apiKey) || containsSavedAIKey(request, question)
-      || (shared && /\bsk-[A-Za-z0-9_-]{16,}\b/i.test(question))) {
+      || (shared && containsPossibleAIKey(question))) {
       return aiJson({ status: "error", message: "请先移除问题里的 Key。" }, 400);
     }
     const run = access.includeExperiment ? selected : null;

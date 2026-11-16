@@ -10,12 +10,16 @@ import { evidenceLabels } from "@/lib/experiments/evidence";
 import { parseEvidencePosition, type RunEvidenceReference } from "@/lib/experiments/evidencePosition";
 import { experimentReport } from "@/lib/experiments/report";
 import { adaptEvidenceRun, citedRunEvidence, precedingEvidenceRound, referenceFor, resolveEvidence, verifyRunEvidence, type EvidenceRunData } from "@/lib/experiments/runEvidence";
+import type { EvidenceExplanation } from "@/lib/experiments/keyframeEvidence";
+import { explorationBlock, type ExplorationChange, type ExplorationSuggestion } from "@/lib/experiments/exploration";
 import { parameterLabels } from "@/lib/experiments/runComparison";
 import { runAnalysisLink } from "@/lib/navigation";
 import type { Diagnosis } from "@/lib/quickStart";
 import { WorkbenchIcon, type WorkbenchIconName } from "./WorkbenchIcon";
 import { DiagnosisSummary } from "./QuickStartDiagnosis";
 import { ConfidenceCheck, DecisionDetails, EvidenceLinks, RoundDifferences, SchedulingDetails } from "./WorkbenchEvidence";
+import { KeyframeExplanation } from "./KeyframeExplanation";
+import { ExplorationNavigation } from "./ExplorationNavigation";
 
 const Replay = dynamic(() => import("./WorkbenchReplay").then((module) => module.WorkbenchReplay), {
   loading: () => <p role="status">正在载入播放器。</p>,
@@ -266,16 +270,21 @@ function RunMetrics({ run, highlight }: { run: AgentRun; highlight?: string }) {
   </div>;
 }
 
-export function RunStage({ run, runs, details, number, researchId, evidence, selectRound, retry, showAnalysis }: {
+export function RunStage({ run, runs, details, number, researchId, evidence, evidenceNavigation, evidenceError,
+  canExplain, explanationModel, locateEvidence, explainEvidence, selectRound, retry, showAnalysis }: {
   run: AgentRun; runs: AgentRun[]; details: RunDetails; number: number; selectRound: (id: string) => void;
   researchId?: string; evidence?: string; retry: () => void; showAnalysis: () => void;
+  evidenceNavigation: number; evidenceError: string; canExplain: boolean; explanationModel: string;
+  locateEvidence: (reference: RunEvidenceReference) => boolean;
+  explainEvidence: (reference: RunEvidenceReference, controller: AbortController) => Promise<EvidenceExplanation>;
 }) {
   const engine = getExperimentEngine(run.tool, run.version);
   const metrics = useRef<HTMLElement>(null);
   const stage = useRef<HTMLDivElement>(null);
   const position = parseEvidencePosition(evidence);
   const data = researchId ? adaptEvidenceRun(researchId, run, details) : null;
-  const target = data && position ? resolveEvidence(data, referenceFor(data, position)) : null;
+  const reference = data && position ? referenceFor(data, position) : undefined;
+  const target = reference ? resolveEvidence(data, reference) : null;
   const token = target?.token;
   const playbackTarget = token && position?.kind !== "metric" ? token : undefined;
   useEffect(() => {
@@ -284,7 +293,7 @@ export function RunStage({ run, runs, details, number, researchId, evidence, sel
       .find((node) => node.dataset.evidenceTarget === token);
     element?.focus({ preventScroll: true });
     element?.scrollIntoView({ block: "nearest", behavior: "instant" });
-  }, [run.id, token]);
+  }, [run.id, token, evidenceNavigation]);
   return <div className="wb-run" id={`agent-run-${run.id}`} ref={stage}>
     <header className="wb-panel-head wb-run-title">
       <div>
@@ -302,17 +311,20 @@ export function RunStage({ run, runs, details, number, researchId, evidence, sel
     {evidence && <p className={target ? "wb-evidence-status" : "wb-muted"} role="status">
       {target ? `第 ${number} 轮 · ${target.label}` : details === undefined && position ? "正在定位证据。" : "找不到这条证据。"}
     </p>}
+    {evidenceError && <p className="wb-alert" role="alert">{evidenceError}</p>}
     <div className="wb-run-grid">
       <section className="wb-run-playback" aria-labelledby="wb-run-playback-title" data-evidence-target={playbackTarget}
         data-evidence-highlight={!!playbackTarget || undefined} data-evidence-position={position?.kind === "result" && target ? position.key : undefined}
         tabIndex={playbackTarget ? -1 : undefined}>
         <h3 className="sr-only" id="wb-run-playback-title">运行回放</h3>
         <div className="wb-replay">
-          {data ? <Replay key={`${run.id}:${playbackTarget ?? ""}`} run={{ ...run, config: data.data.config }} results={data.data.results} evidenceStep={target?.replayStep} />
+          {data ? <Replay key={playbackTarget ? `${run.id}:${playbackTarget}:${evidenceNavigation}` : run.id}
+            run={{ ...run, config: data.data.config }} results={data.data.results} evidenceStep={target?.replayStep} />
             : details !== undefined ? <p role="alert">回放加载失败。 <button className="wb-button" type="button" onClick={retry}>重试</button></p>
             : <p role="status">正在读取运行记录。</p>}
         </div>
-        <p className="wb-panel-copy wb-muted">AI 关键帧讲解尚未开放。</p>
+        {data && <KeyframeExplanation key={`${run.id}:${explanationModel}`} run={data} reference={reference}
+          canExplain={canExplain} locate={locateEvidence} explain={explainEvidence} />}
       </section>
       <section className="wb-run-summary" ref={metrics} tabIndex={-1} aria-labelledby="wb-run-metrics-title">
         <h3 id="wb-run-metrics-title">实测指标</h3>
@@ -327,12 +339,13 @@ export function RunStage({ run, runs, details, number, researchId, evidence, sel
   </div>;
 }
 
-export function AnalysisStage({ run, runs, details, diagnosis, task, researchId, runDetails, evidenceError, showEvidence, diagnosing, diagnosisError, blocked, modelBlocked, canDiagnose, canAdopt, diagnose, stopDiagnosis, discuss, adopt, retry }: {
+export function AnalysisStage({ run, runs, details, diagnosis, task, researchId, runDetails, evidenceError, showEvidence, diagnosing, diagnosisError, blocked, modelBlocked, canDiagnose, diagnose, stopDiagnosis, discuss, guess, explore, adopt, retry }: {
   run: AgentRun; runs: AgentRun[]; details: RunDetails; diagnosis?: Diagnosis; task: AgentTask | null; diagnosing: boolean;
   researchId?: string; runDetails: Record<string, RunDetails>; evidenceError: string;
   showEvidence: (reference: RunEvidenceReference) => void;
-  diagnosisError: string; blocked: boolean; modelBlocked: boolean; canDiagnose: boolean; canAdopt: boolean; diagnose: () => void; stopDiagnosis: () => void;
-  discuss: (message: string) => void; adopt: (message: string) => void; retry: () => void;
+  diagnosisError: string; blocked: boolean; modelBlocked: boolean; canDiagnose: boolean; diagnose: () => void; stopDiagnosis: () => void;
+  discuss: (message: string) => void; guess: string; explore: (controller: AbortController) => Promise<ExplorationSuggestion[]>;
+  adopt: (change: ExplorationChange) => void; retry: () => void;
 }) {
   const number = runs.findIndex(({ id }) => id === run.id) + 1;
   const turns = task?.dialogue?.turns ?? [];
@@ -395,14 +408,8 @@ export function AnalysisStage({ run, runs, details, diagnosis, task, researchId,
           : <p className="wb-muted">暂无可验证证据</p>}
       </div>
     </section>
-    <section className="wb-panel">
-      <header className="wb-panel-head"><h2>下一轮怎么试</h2></header>
-      <div className="wb-panel-body"><p>{suggestion ?? "可请 Agent 给个复测方向。"}</p></div>
-      <footer className="wb-panel-foot">
-        <button type="button" className="wb-button" disabled={blocked} onClick={() => discuss(`结合第 ${number} 轮实测，建议下一轮实验。`)}>请 Agent 给建议</button>
-        {suggestion && canAdopt && <button type="button" className="wb-button wb-primary" disabled={modelBlocked}
-          onClick={() => adopt(`沿用第 ${number} 轮配置。拟个新草稿。避开已跑的配置。建议：${suggestion}`)}>采纳并生成草稿</button>}
-      </footer>
-    </section>
+    <ExplorationNavigation key={JSON.stringify([run.id, task?.revision, guess])} legacySuggestion={suggestion}
+      unavailable={current ? explorationBlock(task, run.id) : details === undefined ? "正在读取本轮实测。" : "暂无可验证证据。"}
+      modelBlocked={modelBlocked} blocked={blocked} generate={explore} adopt={adopt} />
   </div>;
 }

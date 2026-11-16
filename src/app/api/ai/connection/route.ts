@@ -1,3 +1,4 @@
+import { isAIProvider } from "@/lib/aiSettings";
 import { clearSavedCredential, credentialMetadata, readCredentialSession, saveVerifiedCredential } from "@/lib/server/aiCredentialSession";
 import { AIRequestError, AIUnverifiedError, aiErrorResponse, aiJson, asObject, assertAIRequestOrigin, platformAIConfigured, readAICredentials, requestAIJson } from "@/lib/server/aiProvider";
 
@@ -18,7 +19,7 @@ export async function DELETE(request: Request) {
   try {
     assertAIRequestOrigin(request);
     const provider = request.headers.get("x-ai-provider");
-    if ((provider !== "deepseek" && provider !== "qwen") || !await hasEmptyPayload(request)) {
+    if (!isAIProvider(provider) || !await hasEmptyPayload(request)) {
       throw new AIRequestError("请选择要清除的服务商。", 400);
     }
     const session = readCredentialSession(request);

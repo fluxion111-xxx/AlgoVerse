@@ -1,11 +1,16 @@
+import { containsPossibleAIKey } from "@/lib/aiSettings";
 import { maxQuestionLength } from "@/lib/experimentCreator";
 import { hasAgentOperation, isAgentConfirmation, isAgentOperationId } from "@/lib/experimentAgent";
 import { sortingEngine } from "@/lib/experiments/sorting";
 import { getExperimentEngine } from "@/lib/experimentEngines";
-import { aiErrorResponse, aiJson, asObject, readAICredentials } from "@/lib/server/aiProvider";
+import { aiErrorResponse, aiJson, asObject, readAICredentials, reusePendingAI, type PendingAIRequest } from "@/lib/server/aiProvider";
 import { containsSavedAIKey } from "@/lib/server/aiCredentialSession";
 import { approveAgentTools, cancelAgentTask, clarifyAgentTask, decideAgentTask, replyToAgentMessage, stopAgentAnalysis } from "@/lib/server/experimentAgent";
 import { createAgentTask, getAgentTask, getExperimentRun, getExperimentWorkflow } from "@/lib/server/experimentRecords";
+import { adoptExploration, explorationBaseline, explorationInput, suggestExploration } from "@/lib/server/experimentExploration";
+import type { ExplorationSuggestion } from "@/lib/experiments/exploration";
+
+const explorationRequests = new Map<string, PendingAIRequest<ExplorationSuggestion[]>>();
 
 function inputText(value: unknown) {
   return typeof value === "string" && value.length <= maxQuestionLength ? value.trim() : "";
@@ -15,7 +20,7 @@ function containsKey(request: Request, value: string) {
   const platformKey = process.env.SILICONFLOW_API_KEY?.trim();
   const auth = request.headers.get("authorization");
   const key = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
-  return /\bsk-[A-Za-z0-9_-]{16,}\b/i.test(value) || (!!platformKey && value.includes(platformKey))
+  return containsPossibleAIKey(value) || (!!platformKey && value.includes(platformKey))
     || (!!key && value.includes(key)) || containsSavedAIKey(request, value);
 }
 
@@ -53,6 +58,22 @@ export async function POST(request: Request) {
       }) }, 201);
     }
     const task = await getAgentTask(body.id);
+    if (body.action === "exploration") {
+      if (body.id !== undefined && !task) return aiJson({ message: "找不到这项任务。" }, 404);
+      if (task && task.revision !== body.revision) return aiJson({ message: "任务已更新。请刷新。" }, 409);
+      const run = await getExperimentRun(body.runId);
+      if (!run || run.session.id !== body.sessionId) return aiJson({ message: "找不到本轮实测。" }, 404);
+      if (typeof body.hypothesis !== "string" || body.hypothesis.length > maxQuestionLength) return aiJson({ message: "猜想太长。" }, 400);
+      const context = await explorationBaseline(task, run);
+      const input = explorationInput(context, run, task, body.hypothesis.trim());
+      if (containsKey(request, JSON.stringify(input))) return aiJson({ message: "请移除实验内容里的 Key。" }, 400);
+      const credentials = readAICredentials(request, true);
+      const suggestions = await reusePendingAI(explorationRequests, JSON.stringify([task?.id, task?.revision, run.id, input.hypothesis]), credentials,
+        () => suggestExploration(context, input, credentials));
+      const output = JSON.stringify(suggestions);
+      if (output.includes(credentials.apiKey) || containsKey(request, output)) return aiJson({ message: "建议含有敏感内容。" }, 422);
+      return aiJson({ suggestions });
+    }
     if (!task) return aiJson({ message: "找不到这项任务。" }, 404);
     if (body.action === "status") return aiJson({ task });
     if (body.action === "stop" && operationId) return aiJson({ task: await stopAgentAnalysis(task, operationId) });
@@ -69,8 +90,16 @@ export async function POST(request: Request) {
     if ((body.action === "message" || body.action === "retry-message") && hasAgentOperation(task, operationId)) return aiJson({ task });
     if (body.action === "decide" && operationId && task.operationId === operationId
       && (task.phase !== "deciding" || (task.leaseUntil ?? 0) > Date.now())) return aiJson({ task });
+    if (body.action === "adopt-exploration" && operationId && task.operationId === operationId && task.phase === "confirm") return aiJson({ task });
     if (body.revision !== task.revision) return aiJson({ message: "任务已更新。请刷新。" }, 409);
     switch (body.action) {
+      case "adopt-exploration": {
+        const change = asObject(body.change);
+        if (!change || containsKey(request, JSON.stringify(change))) return aiJson({ message: "建议参数有误。" }, 422);
+        const run = await getExperimentRun(body.runId);
+        if (!run || run.session.id !== body.sessionId) return aiJson({ message: "找不到本轮实测。" }, 404);
+        return aiJson({ task: await adoptExploration(task, await explorationBaseline(task, run), change, operationId) });
+      }
       case "message":
       case "retry-message": {
         const message = inputText(body.action === "message" ? body.message : task.dialogue?.pending);

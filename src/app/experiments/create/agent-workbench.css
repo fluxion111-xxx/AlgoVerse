@@ -451,6 +451,13 @@
 .wb-run-grid { display: grid; align-items: start; gap: 18px; min-width: 0; }
 .wb-run-playback, .wb-run-summary { min-width: 0; }
 .wb-run-playback .wb-panel-copy { padding-block: 4px 0; font-size: 12px; }
+.wb-keyframe { margin-block-start: 12px; padding-block-start: 10px; border-block-start: 1px solid var(--wb-line); min-width: 0; }
+.wb-keyframe > h3 { color: var(--wb-ink); font-size: 15px; }
+.wb-keyframe > .wb-evidence-links { margin-block: 5px; }
+.wb-keyframe .wb-button[aria-pressed="true"] { border-color: var(--wb-accent); color: var(--wb-accent); }
+.wb-keyframe-response { display: grid; gap: 6px; padding-inline-start: 10px; border-inline-start: 2px solid var(--wb-accent); overflow-wrap: anywhere; }
+.wb-keyframe-response > button { justify-self: start; }
+.wb-keyframe-response p { white-space: pre-wrap; }
 .wb-confidence { padding-block: 10px; border-block: 1px solid var(--wb-line); }
 .wb-confidence > h3 { font-size: 15px; color: var(--wb-ink); }
 .wb-confidence .wb-details > p, .wb-confidence .wb-details > .wb-evidence-links { margin-block-start: 7px; }
@@ -504,6 +511,13 @@
 .wb-hypothesis-result { padding-block: 0 9px; }
 .wb-hypothesis-result p { margin-bottom: 8px; }
 .wb-panel-body > .wb-details + .wb-details { border-top: 1px solid var(--wb-line); }
+.wb-exploration-choice { padding-block: 12px; border-block-start: 1px solid var(--wb-line); overflow-wrap: anywhere; }
+.wb-exploration-choice h3 { color: var(--wb-ink); font-size: 1rem; font-weight: 650; margin: 0; }
+.wb-exploration-choice dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); align-items: start; gap: 6px 12px; margin-block: 9px 12px; }
+.wb-exploration-choice dt { color: var(--wb-muted); }
+.wb-exploration-choice dd, .wb-exploration-choice ul { margin: 0; }
+.wb-exploration-choice ul { padding-inline-start: 0; list-style: none; }
+.wb-exploration-choice .wb-details { padding-block: 0; }
 .wb-table, .algoverse-workbench .tutor-markdown-table { overflow: auto; }
 .algoverse-workbench table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .algoverse-workbench :is(th, td) { text-align: start; padding: 6px 8px; border-bottom: 1px solid var(--wb-line); }

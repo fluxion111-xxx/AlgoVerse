@@ -9,8 +9,8 @@ import { withCredentialMutation } from "@/lib/temporaryAI";
 
 type ResponseBody = { status: "connected"; model: string; usage: TokenUsage; configuration?: AIConfiguration };
 type Attempt = { kind: "pending" } | { kind: "error" | "unverified"; message: string };
-type Result = { kind: "success"; provider: string; model: string } | { kind: "error"; message: string };
-const httpsHint = "请通过 HTTPS 打开此页。";
+type Result = { provider: string; model: string };
+export const httpsHint = "请通过 HTTPS 打开此页。";
 const invalidResponse = "验证结果有误。请重试。";
 
 export function useConnectionTest() {
@@ -69,24 +69,28 @@ export function useConnectionTest() {
 
     function fail(message: string) {
       setAttempt({ kind: "error", message });
-      setResult({ kind: "error", message });
     }
 
     try {
+      const saving = headers["X-AI-Save-Credential"] === "1";
       const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(75_000)]);
       const send = () => fetchAI("/api/ai/connection", {
         method: "POST", cache: "no-store", redirect: "error", signal,
         headers: { "Content-Type": "application/json", ...headers }, body: "{}",
       });
-      const response = await (headers["X-AI-Save-Credential"] === "1" ? withCredentialMutation(send, signal) : send());
+      const response = await (saving ? withCredentialMutation(send, signal) : send());
       const body = await readAIResponse<ResponseBody>(response);
       if (pending.current !== controller) return;
 
       if (body.status === "connected" && typeof body.model === "string" && body.model
         && (!model || body.model === model) && Number.isSafeInteger(body.usage?.totalTokens)) {
+        if (saving && !body.configuration) {
+          fail("Key 未保存。请重试。");
+          return;
+        }
         onVerified({ model: body.model, usage: body.usage }, body.configuration);
         setAttempt(null);
-        setResult({ kind: "success", provider, model: body.model });
+        setResult({ provider, model: body.model });
       } else {
         fail(invalidResponse);
       }
@@ -116,7 +120,7 @@ export function useConnectionTest() {
   const remaining = Math.max(0, Math.ceil((retryAt - clock) / 1000));
   const wait = remaining ? ` ${formatAIRetryTime(remaining)}` : "";
   return {
-    attempt, result: result?.kind === "error" && wait ? { ...result, message: result.message + wait } : result,
+    attempt, result,
     canTest, cooling: remaining > 0, run, reset,
     isPending: () => !!pending.current,
     message: attempt && "message" in attempt ? attempt.message + wait : canTest === false ? httpsHint : "",
@@ -127,34 +131,27 @@ export function useConnectionTest() {
 
 export type ConnectionTest = ReturnType<typeof useConnectionTest>;
 
-// Lucide check and x from Iconify. Bundle the result marks for offline use.
-const marks = {
-  success: "m20 6-11 11-5-5",
-  error: "m18 6-12 12M6 6l12 12",
-};
-
-export function ConnectionResult({ result, dismiss, retry, cooling }: { result: Result; dismiss: () => void; retry: () => void; cooling: boolean }) {
+export function ConnectionResult({ result, dismiss }: { result: Result; dismiss: () => void }) {
   const dialog = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     if (dialog.current && !dialog.current.open) dialog.current.showModal();
   }, []);
 
-  return <dialog className="ai-settings-result" ref={dialog} data-result={result.kind} onClose={dismiss}
+  return <dialog className="ai-settings-result" ref={dialog} onClose={dismiss}
     aria-labelledby="ai-result-title" aria-describedby="ai-result-detail">
     <header>
       <span className="ai-settings-result-mark">
-        <Icon icon={{ width: 24, height: 24, body: `<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="${marks[result.kind]}"/>` }}
+        <Icon icon={{ width: 24, height: 24, body: '<path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m20 6-11 11-5-5"/>' }}
           width={20} aria-hidden="true" />
       </span>
-      <h2 id="ai-result-title">{result.kind === "success" ? "连接成功" : "连接失败"}</h2>
+      <h2 id="ai-result-title">连接成功</h2>
     </header>
-    {result.kind === "success" && <dl className="ai-settings-result-model">
+    <dl className="ai-settings-result-model">
       <div><dt>服务商</dt><dd>{result.provider}</dd></div>
       <div><dt>模型</dt><dd><code lang="en">{result.model}</code></dd></div>
-    </dl>}
-    <p id="ai-result-detail">{result.kind === "success" ? <>当前模型已通过验证，可以开始使用<span className="ai-settings-result-name">阿洛</span></> : result.message}</p>
+    </dl>
+    <p id="ai-result-detail">当前模型已通过验证，可以开始使用<span className="ai-settings-result-name">阿洛</span></p>
     <div className="ai-settings-actions">
-      {result.kind === "error" && <button className="ai-settings-test" type="button" disabled={cooling} onClick={() => { dismiss(); retry(); }}>重新测试</button>}
       <button className="ai-settings-clear" type="button" autoFocus onClick={() => dialog.current?.close()}>关闭</button>
     </div>
   </dialog>;
