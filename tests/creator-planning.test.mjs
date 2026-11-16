@@ -102,7 +102,7 @@ test("real engines run validated plans only after confirmation, including DNS ca
   let index = 0;
   const { ask } = await setup(t, ({ question, capabilities }) => {
     assert.equal(question, examples[index][0]);
-    assert.equal(capabilities.length, 66);
+    assert.equal(capabilities.length, 114);
     const join = capabilities.find(({ id }) => id === "join-strategies");
     assert.deepEqual(Object.keys(join.parameters), ["goalLabel", "leftRows", "rightRows"]);
     assert.match(join.comparison, /哈希分组/);
@@ -140,7 +140,61 @@ test("real engines run validated plans only after confirmation, including DNS ca
   assert.match(dns.steps[1][2], /缓存.*NXDOMAIN/);
 });
 
-test("all 48 curriculum labs run and retest from their learning-path entries", async (t) => {
+test("AI Workbench plans WAL recovery with custom page values and runs the confirmed plan", async (t) => {
+  const { ask } = await setup(t, ({ capabilities }) => {
+    assert.match(capabilities.find(({ id }) => id === "wal-checkpoint").comparison, /从检查点重做/);
+    return { intent: "compare", engine: "wal-checkpoint", version: 1,
+      parameters: { goalLabel: "核对检查点之后的重做", walInitialPages: [1, 2], walUpdates: [[0, 9], [1, 8], [0, 7]],
+        walDurableCount: 2, walCheckpointCount: 1 } };
+  });
+  const response = await ask("比较有无检查点的断电恢复。");
+  assert.equal(response.httpStatus, 201);
+  const workflow = await getExperimentWorkflow(response.sessionId);
+  assert.equal(workflow.plan.engineId, "wal-checkpoint");
+  const { results } = await confirmAndRun(workflow);
+  assert.deepEqual(results.metrics, { walScannedAll: "2", walScannedTail: "1", walLostPending: "1", walRecoveredPages: "9、8", walRedoSaved: "1" });
+  assert.deepEqual(results.steps.at(-1).slice(-2), ["9、8", "9、8"]);
+});
+
+test("AI Workbench can plan a lossy IPv6 MTU comparison with custom inputs", async (t) => {
+  const { ask } = await setup(t, ({ capabilities }) => {
+    const tool = capabilities.find(({ id }) => id === "ipv6-path-mtu");
+    assert.match(tool.comparison, /Packet Too Big/);
+    assert.deepEqual(Object.keys(tool.parameters), ["goalLabel", "pmtuLinkSizes", "pmtuStartingSize", "pmtuPayloadBytes"]);
+    return { intent: "compare", engine: "ipv6-path-mtu", version: 1,
+      parameters: { goalLabel: "核对两次 MTU 反馈后的送达量", pmtuLinkSizes: [1600, 1400], pmtuStartingSize: 1800, pmtuPayloadBytes: 2400 } };
+  });
+  const response = await ask("对比收到反馈和反馈被过滤时的 IPv6 送达量。");
+  assert.equal(response.httpStatus, 201);
+  const workflow = await getExperimentWorkflow(response.sessionId);
+  assert.equal(workflow.plan.engineId, "ipv6-path-mtu");
+  const { results } = await confirmAndRun(workflow);
+  assert.equal(results.metrics.pmtuFeedbackBytes, "2400");
+  assert.equal(results.metrics.pmtuFilteredBytes, "0");
+  assert.equal(results.metrics.pmtuFeedbackDrops, "2");
+  assert.match(results.steps[0][1], /链路 1 丢弃/);
+  assert.match(results.steps[1][1], /链路 2 丢弃/);
+});
+
+test("the AI Workbench configures a custom TCP handshake and executes after confirmation", async (t) => {
+  const { ask } = await setup(t, ({ capabilities }) => {
+    const tool = capabilities.find(({ id }) => id === "tcp-handshake");
+    assert.deepEqual(Object.keys(tool.parameters), ["goalLabel", "handshakeClientIsn", "handshakeServerIsn", "handshakeDrop"]);
+    return { intent: "create", engine: "tcp-handshake", version: 1,
+      parameters: { goalLabel: "观察首个 SYN 丢包后的重发", handshakeClientIsn: 4294967295, handshakeServerIsn: 30, handshakeDrop: 1 } };
+  });
+  const response = await ask("用最后一个 32 位序号做 TCP 握手，丢掉第一次 SYN。");
+  assert.equal(response.httpStatus, 201);
+  const workflow = await getExperimentWorkflow(response.sessionId);
+  assert.equal(workflow.plan.engineId, "tcp-handshake");
+  const { results } = await confirmAndRun(workflow);
+  assert.equal(results.metrics.handshakeTransmissions, "4");
+  assert.equal(results.metrics.handshakeClientNext, "0");
+  assert.equal(results.metrics.handshakeBothEstablished, "是");
+  assert.deepEqual(results.steps[0].slice(-3), ["丢失", "SYN-SENT", "LISTEN"]);
+});
+
+test("all 96 curriculum labs run and retest from their learning-path entries", async (t) => {
   await setup(t, () => assert.fail("Local runs should not call an AI service"));
   t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-01-01T00:00:00Z") });
   const cases = {
@@ -192,6 +246,99 @@ test("all 48 curriculum labs run and retest from their learning-path entries", a
     "candidate-keys": ["closureSeed", "AD", { closureSize: "3", closureMembers: "ABC", closureKeyCount: "3", closureKeyNames: "AD、BD、CD", closureSeedType: "未覆盖全表" }, { closureSize: "4", closureMembers: "ABCD", closureSeedType: "候选键" }, /反复检查直到无法扩展/],
     "ridge-regression": ["ridgePenalty", 2, { ordinaryRidgeSlope: "3", penalizedRidgeSlope: "1", ridgeTrainingMse: "4", ordinaryHoldoutMse: "16", ridgeHoldoutMse: "0" }, { penalizedRidgeSlope: "1.5", ridgeTrainingMse: "2.25", ridgeHoldoutMse: "1" }, /留出点只参与评分/],
     "stratified-validation": ["validationFolds", 2, { plainMissingFolds: "2", stratifiedMissingFolds: "0", plainValidationAccuracy: "100.0%", stratifiedValidationAccuracy: "91.7%" }, { plainMissingFolds: "2", stratifiedMissingFolds: "0", plainValidationAccuracy: "0.0%", stratifiedValidationAccuracy: "91.7%" }, /只用其他折找最近邻/],
+    "fenwick-prefix": ["fenwickOps", [[1, 8, 0], [0, 3, -2], [1, 6, 0], [1, 8, 0]], { fenwickLastSum: "24", fenwickScanReads: "22", fenwickTreeReads: "4", fenwickTreeWrites: "3" }, { fenwickLastSum: "18", fenwickScanReads: "22", fenwickTreeReads: "4" }, /最低位决定区间长度/],
+    "longest-subsequence": ["subsequenceRight", "XYZ", { subsequenceLength: "4", subsequenceExample: "BCBA", subsequenceCells: "42" }, { subsequenceLength: "0", subsequenceExample: "空", subsequenceCells: "21", subsequenceMatchCells: "0" }, /回溯遇平局先向上/],
+    "copy-on-write": ["cowOperations", [[1, 0, 0, 0], [1, 1, 1, 99], [0, 1, 1, 77], [0, 1, 1, 20], [1, 0, 1, 0]], { eagerPageCopies: "4", cowPageCopies: "2", cowSharedPages: "2", cowFinalChild: "10、99、30、40" }, { cowPageCopies: "1", cowSharedPages: "3", cowFinalParent: "10、20、30、40", cowFinalChild: "10、99、30、40" }, /再写私有页无需再复制/],
+    "reader-writer": ["rwJobs", [[0, 0, 3], [1, 1, 2], [7, 0, 3], [8, 0, 2]], { rwReaderPolicyWriteWait: "6", rwWriterPolicyWriteWait: "2", rwReaderPolicyReadWait: "0", rwWriterPolicyReadWait: "3" }, { rwReaderPolicyWriteWait: "2", rwWriterPolicyWriteWait: "2", rwWriterPolicyReadWait: "0" }, /多个读者能同时持锁/],
+    "ethernet-learning": ["switchVlans", [10, 20, 10, 20], { switchFloods: "2", switchUnicasts: "4", switchMoves: "1", switchCopies: "6" }, { switchFloods: "3", switchUnicasts: "3", switchMoves: "0", switchEntries: "4" }, /泛洪只发给同组其他口/],
+    "link-aggregation": ["aggregationMembers", 4, { aggregationFrames: "12", aggregationRoundRobinSplit: "3", aggregationRoundRobinLoads: "4、4、4", aggregationHashLoads: "10、2、0", aggregationHashGap: "10", aggregationHashCollisions: "1" }, { aggregationHashLoads: "6、2、0、4", aggregationRoundRobinLoads: "3、3、3、3", aggregationHashGap: "6", aggregationHashCollisions: "0" }, /同一流固定在同一成员/],
+    "microtask-queue": ["eventNestedDepth", 0, { eventFirstTimerStep: "7", eventBeforeFirstTimer: "5", eventMicroCount: "7", eventTimerRan: "2" }, { eventFirstTimerStep: "4", eventBeforeFirstTimer: "2", eventMicroCount: "4", eventTimerRan: "2" }, /新微任务进队尾/],
+    "vector-iterator": ["vectorReserveCapacity", 3, { vectorBaselineReallocations: "1", vectorReservedReallocations: "0", vectorBaselineFirstLoss: "1", vectorReservedFirstLoss: "仍有效", vectorEndLoss: "1" }, { vectorReservedReallocations: "1", vectorReservedFirstLoss: "1", vectorEndLoss: "1" }, /原地追加只让旧尾失效/],
+    "not-in-null": ["exclusionInner", "2", { notInKept: "0", notExistsKept: "3", notInUnknown: "3", exclusionDelta: "3" }, { notInKept: "3", notExistsKept: "3", notInUnknown: "0", exclusionDelta: "0" }, /等值 NOT EXISTS 只找真匹配/],
+    "wal-checkpoint": ["walCheckpointCount", 3, { walScannedAll: "4", walScannedTail: "2", walLostPending: "1", walRecoveredPages: "12、20、30" }, { walScannedTail: "1", walRedoSaved: "3", walRecoveredPages: "12、20、30" }, /检查点刷出已提交页/],
+    "silhouette-score": ["silhouetteLabels", [0, 0, 1, 1, 1, 1], { silhouetteMean: "0.8505", silhouetteNegative: "0", silhouetteWorstPoint: "3", silhouetteWorstScore: "0.8125" }, { silhouetteNegative: "1", silhouetteWorstPoint: "3", silhouetteWorstScore: "-0.8125" }, /组内均距排除自己/],
+    "probability-calibration": ["calibrationBins", 3, { calibrationAccuracyA: "50.0%", calibrationAccuracyB: "50.0%", calibrationBrierA: "0.41", calibrationBrierB: "0.26", calibrationGapA: "40", calibrationGapB: "10" }, { calibrationBrierA: "0.41", calibrationBrierB: "0.26", calibrationGapB: "0" }, /只改分箱不改 Brier/],
+    "interval-scheduling": ["intervalJobs", [[0, 1], [1, 3], [3, 5], [5, 7], [7, 9]], { intervalsStartCount: "1", intervalsEndCount: "4", intervalsExtra: "3", intervalsEndChoices: "2、3、4、5" }, { intervalsStartCount: "5", intervalsEndCount: "5", intervalsExtra: "0" }, /结束拍可接下个预约/],
+    "bloom-membership": ["bloomBitCount", 17, { bloomBitsSet: "3", bloomMaybe: "5", bloomFalsePositives: "2", bloomFalseNegatives: "0" }, { bloomBitsSet: "6", bloomMaybe: "3", bloomFalsePositives: "0", bloomFalseNegatives: "0" }, /全一时还需核对集合/],
+    "feedback-queue": ["feedbackBoostEvery", 0, { feedbackPlainFinish: "9", feedbackBoostFinish: "8", feedbackPlainWait: "6", feedbackBoostWait: "3", feedbackBoostShortWait: "2" }, { feedbackBoostFinish: "9", feedbackBoostWait: "6", feedbackBoostShortWait: "0", feedbackPromotions: "0" }, /到期先提级，再接新任务/],
+    "file-links": ["linkFileOps", [[0, 2], [1, 1], [0, 1], [0, 2], [2, 42], [0, 2]], { linkReadMisses: "1", linkDanglingReads: "1", linkReplacementReads: "1", linkOriginalRefs: "1", linkLastRead: "42" }, { linkReadMisses: "1", linkDanglingReads: "0", linkReplacementReads: "0", linkOriginalRefs: "1", linkLastRead: "7" }, /符号链接保存路径 A/],
+    "spanning-bridge": ["bridgeLinks", [[0, 1], [1, 2]], { bridgeBlocked: "1", bridgePlainFrames: "10", bridgeTreeFrames: "2", bridgePlainExtra: "8", bridgeTreeReached: "2" }, { bridgeBlocked: "0", bridgePlainFrames: "2", bridgeTreeFrames: "2", bridgePlainExtra: "0" }, /广播会避开来口/],
+    "ipv6-path-mtu": ["pmtuStartingSize", 1280, { pmtuActualLimit: "1280", pmtuFeedbackBytes: "3000", pmtuFilteredBytes: "0", pmtuFeedbackDrops: "1", pmtuFilteredDrops: "3" }, { pmtuFeedbackBytes: "3000", pmtuFilteredBytes: "3000", pmtuFeedbackDrops: "0", pmtuFilteredDrops: "0" }, /源端改小后重试/],
+    "generator-exhaustion": ["generatorTakeCounts", [1, 1, 1], { generatorReusedProduced: "4", generatorFreshProduced: "8", generatorReusedStops: "2", generatorFreshStops: "0" }, { generatorReusedProduced: "3", generatorFreshProduced: "3", generatorReusedStops: "0", generatorReusedLast: "6" }, /取完后再请求才遇耗尽/],
+    "mutable-hash-key": ["hashKeyAfter", 3, { hashKeyUnsafeFound: "否", hashKeySafeFound: "是", hashKeySameBucket: "是", hashKeyOriginalBucket: "3", hashKeyUpdatedBucket: "3" }, { hashKeyUnsafeFound: "是", hashKeySafeFound: "是" }, /同桶还要核对哈希和键/],
+    "buffer-pool": ["bufferFrameLimit", 3, { bufferDiskReads: "4", bufferDirtyWrites: "1", bufferAllPinned: "1", bufferEvictions: "2", bufferDiskResult: "99、20、30" }, { bufferDiskReads: "3", bufferDirtyWrites: "0", bufferAllPinned: "0", bufferPendingDirty: "1", bufferDiskResult: "10、20、30" }, /固定数大于零就不能换出/],
+    "mvcc-versions": ["mvccTrace", [[0, 0], [1, 20], [0, 1], [1, 30], [2, 0], [2, 1], [4, 0], [3, 0], [4, 0], [3, 1]], { mvccHistoricalReads: "2", mvccReclaimed: "2", mvccRetained: "1", mvccLatestValue: "30", mvccPeak: "3" }, { mvccHistoricalReads: "2", mvccReclaimed: "1", mvccRetained: "2", mvccLatestValue: "30" }, /最新版本始终保留/],
+    "imputation-leakage": ["imputationValidRows", [[2, 0, 4], [0, 1, 4]], { imputationTrainMean: "2", imputationMixedMean: "4.6667", imputationTrainMse: "8", imputationMixedMse: "0", imputationChangedPredictions: "1" }, { imputationTrainMean: "2", imputationMixedMean: "2", imputationTrainMse: "16", imputationMixedMse: "16", imputationChangedPredictions: "0" }, /混合组让验证特征参加拟合/],
+    "early-stopping": ["stopPatience", 1, { stopAtEpoch: "3", stopBestEpoch: "1", stopBestMse: "0", stopFullMse: "23.4619", stopBestWeight: "5" }, { stopAtEpoch: "2", stopBestEpoch: "1", stopBestMse: "0", stopFullMse: "23.4619" }, /连续无改善达到耐心值就停/],
+    "difference-array": ["differenceUpdates", [[0, 2, 2], [1, 4, -1], [2, 5, 3]],
+      { differenceDirectWrites: "11", differenceBoundaryWrites: "6", differenceRestoreReads: "5", differenceFinalSum: "31", differenceOutput: "3、3、7、8、10" },
+      { differenceDirectWrites: "8", differenceBoundaryWrites: "6", differenceFinalSum: "25", differenceOutput: "3、3、5、6、8" }, /重叠段的贡献会相加/],
+    "zero-one-knapsack": ["sackCapacity", 5,
+      { sackCorrect: "4", sackForward: "6", sackExcess: "2", sackVisited: "5" }, { sackCorrect: "7", sackForward: "7", sackExcess: "0" }, /正序可能读本轮的新值/],
+    "sliding-maximum": ["slidingWidth", 5,
+      { slidingResults: "3、3、5、5、6、7", slidingScans: "18", slidingTailChecks: "9" }, { slidingResults: "5、5、6、7", slidingScans: "20" }, /队首就是当前最大值/],
+    "rolling-hash": ["rollingModulus", 97,
+      { rollingCandidates: "4", rollingCollisions: "2", rollingMatches: "0、2", rollingChecks: "6" },
+      { rollingCandidates: "2", rollingCollisions: "0", rollingMatches: "0、2", rollingChecks: "4" }, /哈希相等才逐字核对/],
+    "lock-ordering": ["lockReverseSecond", 0,
+      { lockOriginalDone: "0", lockOrderedDone: "2", lockOriginalCycle: "有" }, { lockOriginalDone: "2", lockOrderedDone: "2", lockOriginalCycle: "无" }, /互相持有对方的锁会卡住/],
+    "file-offset": ["offsetReadOps", [[0, 1], [1, 2], [0, 1]],
+      { offsetSharedBytes: "4", offsetIndependentBytes: "5", offsetSharedEmpty: "1", offsetSharedFinal: "4" },
+      { offsetSharedBytes: "4", offsetIndependentBytes: "4", offsetSharedEmpty: "0" }, /重新打开各有偏移/],
+    "cache-write-policy": ["writePolicyFlush", 0,
+      { writePolicyThroughCount: "4", writePolicyBackCount: "2", writePolicyFinalDirty: "0", writePolicyVisibleDiff: "0" },
+      { writePolicyBackCount: "1", writePolicyFinalDirty: "1", writePolicyVisibleDiff: "1" }, /换出脏行时先更新下层/],
+    "condition-recheck": ["conditionProduced", 4,
+      { conditionIfInvalid: "2", conditionWhileWait: "2", conditionSuccessful: "1", conditionBeforeWake: "1" },
+      { conditionIfInvalid: "0", conditionWhileWait: "0", conditionSuccessful: "3" }, /拿锁前资源可能已变化/],
+    "tcp-handshake": ["handshakeDrop", 0,
+      { handshakeTransmissions: "5", handshakeRetries: "2", handshakeFinalAck: "901", handshakeClientNext: "101", handshakeBothEstablished: "是" },
+      { handshakeTransmissions: "3", handshakeRetries: "0", handshakeFinalAck: "901" }, /纯 ACK 不占额外序号/],
+    "tcp-sack": ["sackArrivals", [[100, 20], [120, 20], [140, 20], [160, 20]],
+      { tcpSackFinalAck: "180", tcpSackStalls: "2", tcpSackMaxBlocks: "1", tcpSackRemaining: "0" },
+      { tcpSackFinalAck: "180", tcpSackStalls: "0", tcpSackMaxBlocks: "0" }, /相邻块或重叠块会合并/],
+    "hop-limit": ["hopNextRouters", [1, 2, 3],
+      { hopOutcome: "跳数用尽", hopForwards: "4", hopRemaining: "0", hopRevisits: "2" },
+      { hopOutcome: "送达", hopForwards: "3", hopRemaining: "2", hopRevisits: "0" }, /环路会反复消耗限制/],
+    "dns-referral": ["referralQueries", [[1, 1], [3, 2], [2, 1], [4, 1]],
+      { referralColdLookups: "12", referralCachedLookups: "7", referralTldAsks: "2", referralFound: "3" },
+      { referralColdLookups: "12", referralCachedLookups: "9", referralTldAsks: "4", referralFound: "2" }, /根和顶级域给下一站/],
+    "mutable-default": ["defaultExplicitCalls", [2],
+      { defaultSharedCalls: "3", defaultSharedFinal: "1、2、3", defaultDifferentCalls: "2" },
+      { defaultSharedCalls: "2", defaultSharedFinal: "1、3", defaultDifferentCalls: "1" }, /函数定义时创建默认列表/],
+    "exception-guarantee": ["guaranteeFailAt", 0,
+      { guaranteePartialFields: "1", guaranteePublishedFields: "0", guaranteeOriginalResult: "8、20、30", guaranteeStagedResult: "10、20、30" },
+      { guaranteePartialFields: "3", guaranteePublishedFields: "3", guaranteeStagedResult: "8、22、9" }, /准备成功才发布/],
+    "copy-move": ["moveBufferValues", [4],
+      { moveCopiedCells: "3", moveTransferredCells: "3", moveCopySource: "4、8、15", moveSourceOwns: "否" },
+      { moveCopiedCells: "1", moveTransferredCells: "1", moveCopySource: "4", moveReceiver: "7" }, /实际转移来自移动构造/],
+    "c-string-terminator": ["cStringCapacity", 5,
+      { cStringSafeLength: "3", cStringLostBytes: "1", cStringRawContainsNull: "否" },
+      { cStringSafeLength: "4", cStringLostBytes: "0", cStringRawContainsNull: "否" }, /内容和结尾都占容量/],
+    "outer-join-filter": ["outerJoinStatus", 0,
+      { outerJoinOnRows: "3", outerJoinWhereRows: "1", outerJoinLostKeys: "2" },
+      { outerJoinOnRows: "3", outerJoinWhereRows: "2", outerJoinLostKeys: "1" }, /补出的 NULL 比较结果是未知/],
+    "lsm-compaction": ["compactIncludeBase", 1,
+      { compactSafeVisible: "3", compactUnsafeVisible: "4", compactResurrected: "1", compactTombstones: "1" },
+      { compactSafeVisible: "3", compactUnsafeVisible: "3", compactResurrected: "0", compactTombstones: "0" }, /墓碑挡住更旧的值/],
+    "consistent-ring": ["ringAddedSlot", 80,
+      { ringModuloMoved: "6", ringConsistentMoved: "2", ringMovedToAdded: "2" },
+      { ringModuloMoved: "6", ringConsistentMoved: "1", ringMovedToAdded: "1" }, /加节点只截走相邻区段/],
+    "covering-index": ["coveringVisiblePages", [0, 1, 2],
+      { coveringMatches: "3", coveringPlainFetches: "3", coveringIndexFetches: "1", coveringValues: "50、70、80" },
+      { coveringMatches: "3", coveringIndexFetches: "0", coveringSavedFetches: "3", coveringValues: "50、70、80" }, /页全可见时可跳过堆/],
+    "stable-softmax": ["softmaxCommonShift", 0,
+      { softmaxNaiveStatus: "求和溢出", softmaxStableTop: "3", softmaxStablePeak: "0.6652", softmaxStableDrift: "0" },
+      { softmaxNaiveStatus: "可归一化", softmaxStablePeak: "0.6652", softmaxStableDrift: "0" }, /最大指数为一/],
+    "causal-mask": ["attentionVisible", 3,
+      { attentionUnmaskedOutput: "77.0835", attentionMaskedOutput: "7.3106", attentionFutureWeight: "0.8438" },
+      { attentionMaskedOutput: "77.0835", attentionFutureWeight: "0", attentionVisibleCount: "3" }, /只在可见位置归一化/],
+    "dropout-mode": ["dropoutRatePct", 0,
+      { dropoutMaskedCount: "12", dropoutTrainMeanSum: "18.6667", dropoutInferSum: "20" },
+      { dropoutMaskedCount: "0", dropoutTrainMeanSum: "20", dropoutMeanDelta: "0" }, /保留值除以保留概率/],
+    "ranking-metrics": ["rankingCutoff", 2,
+      { rankingRecallA: "66.7%", rankingRecallB: "66.7%", rankingNdcgA: "0.9468", rankingNdcgB: "0.6299" },
+      { rankingRecallA: "66.7%", rankingRecallB: "33.3%", rankingNdcgA: "1" }, /靠后位置增益会折损/],
   };
   assert.deepEqual(curriculumLabs.map(({ id }) => id), Object.keys(cases));
   const counts = {};
@@ -260,9 +407,30 @@ test("all 48 curriculum labs run and retest from their learning-path entries", a
         assert.deepEqual(compared.changes.map(({ metrics }) => metrics.find(({ key }) => key === "ridgeHoldoutMse").deltas), [["+1"], ["+15"]]);
         assert.match(compared.conclusion, /共对照 3 轮/);
       }
+      if (lab.id === "wal-checkpoint") {
+        const third = await run({ ...preset, walCheckpointCount: 4 }, second);
+        const compared = experimentRunComparison(await getComparableExperimentRuns(third), lab.id, lab.version);
+        assert.deepEqual(compared.rounds.map(({ metrics }) => metrics.walScannedTail), ["2", "1", "0"]);
+        assert.deepEqual(compared.rounds.map(({ metrics }) => metrics.walRecoveredPages), Array(3).fill("12、20、30"));
+        assert.deepEqual(compared.changes.map(({ metrics }) => metrics.find(({ key }) => key === "walScannedTail").deltas), [["−1"], ["−1"]]);
+      }
+      if (lab.id === "early-stopping") {
+        const third = await run({ ...preset, stopPatience: 6 }, second);
+        const compared = experimentRunComparison(await getComparableExperimentRuns(third), lab.id, lab.version);
+        assert.deepEqual(compared.rounds.map(({ metrics }) => metrics.stopAtEpoch), ["3", "2", "6"]);
+        assert.deepEqual(compared.rounds.map(({ metrics }) => metrics.stopBestMse), ["0", "0", "0"]);
+        assert.deepEqual(compared.changes.map(({ metrics }) => metrics.find(({ key }) => key === "stopAtEpoch").deltas), [["−1"], ["+4"]]);
+      }
+      if (lab.id === "tcp-handshake") {
+        const third = await run({ ...preset, handshakeDrop: 1 }, second);
+        const compared = experimentRunComparison(await getComparableExperimentRuns(third), lab.id, lab.version);
+        assert.deepEqual(compared.rounds.map(({ metrics }) => metrics.handshakeTransmissions), ["5", "3", "4"]);
+        assert.deepEqual(compared.rounds.map(({ metrics }) => metrics.handshakeFinalAck), ["901", "901", "901"]);
+        assert.deepEqual(compared.changes.map(({ metrics }) => metrics.find(({ key }) => key === "handshakeTransmissions").deltas), [["−2"], ["+1"]]);
+      }
     });
   }
-  assert.deepEqual(Object.values(counts), [8, 8, 8, 8, 8, 8]);
+  assert.deepEqual(Object.values(counts), [16, 16, 16, 16, 16, 16]);
 });
 
 test("knowledge, network recommendations, unsupported requests and clarification do not create plans", async (t) => {

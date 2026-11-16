@@ -1,5 +1,408 @@
 import { defineCurriculumLab, gapText, sequenceText } from "./curriculumLab";
 
+export const differenceArrayLab = defineCurriculumLab({
+  id: "difference-array", domain: "algorithms", title: "差分数组与区间更新",
+  description: "对照逐项改值和只改区间端点。",
+  comparison: "逐项修改 / 差分更新",
+  topics: ["difference-array-range-update"],
+  input: {
+    differenceBase: { kind: "list", min: -99, max: 99, minItems: 1, maxItems: 24, label: "初始数组", hint: "1–24 项，从 0 编号。" },
+    differenceUpdates: { kind: "rows", columns: [[0, 23], [1, 24], [-99, 99]], minItems: 1, maxItems: 16, label: "区间更新",
+      hint: "每行填左端、右端、增量。包含左端，排除右端。" },
+  },
+  defaults: { goalLabel: "验证多次重叠区间更新的结果", differenceBase: [1, 2, 3, 4, 5],
+    differenceUpdates: [[0, 5, 2], [1, 4, -1], [2, 5, 3]] },
+  check: ({ differenceBase, differenceUpdates }) => differenceUpdates.every(([left, right]) => left < right && right <= differenceBase.length),
+  columns: ["阶段", "下标或范围", "逐项法", "差分法", "本步新增写入"],
+  metricLabels: { differenceDirectWrites: "逐项更新写入", differenceBoundaryWrites: "端点更新写入",
+    differenceRestoreReads: "还原时读取", differenceFinalSum: "还原数组总和", differenceOutput: "还原结果" },
+  focusMetric: "differenceDirectWrites", alternateTrial: "把首段右端从 5 改为 2。",
+  run({ differenceBase, differenceUpdates }) {
+    const direct = [...differenceBase];
+    const diff = [...differenceBase.map((value, index) => value - (differenceBase[index - 1] ?? 0)), 0];
+    let writes = 0;
+    const changes = differenceUpdates.map(([left, right, delta]) => {
+      for (let index = left; index < right; index++) direct[index] += delta;
+      writes += right - left;
+      diff[left] += delta;
+      diff[right] -= delta;
+      return ["更新", `[${left}, ${right})`, sequenceText(direct), `${left}: +(${delta}) · ${right}: −(${delta})`, `${right - left} / 2`] as const;
+    });
+    let prefix = 0;
+    const restored = diff.slice(0, direct.length).map((delta) => prefix += delta);
+    const steps = [...changes, ...restored.map((value, index) => ["还原", index, direct[index], value, "—"] as const)];
+    const boundary = changes.length * 2;
+    const sum = restored.reduce((total, value) => total + value, 0);
+    return { steps, metrics: { differenceDirectWrites: writes, differenceBoundaryWrites: boundary, differenceRestoreReads: restored.length,
+      differenceFinalSum: sum, differenceOutput: sequenceText(restored) }, report: {
+      conclusion: `逐项写 ${writes} 次。差分更新写 ${boundary} 次。结果逐项一致。`,
+      detail: `初始有 ${direct.length} 项。共更新 ${changes.length} 段。还原读取 ${restored.length} 次。最终数组为 ${sequenceText(restored)}。数组总和为 ${sum}。`,
+      explanation: "左端加增量。右端作反向抵消。重叠段的贡献会相加。对差分前缀求和可还原。端点次数不含建表和还原。",
+      suggestion: "只缩短一段范围。检查逐项次数怎么变。再试范围碰到数组尾。",
+    } };
+  },
+});
+
+export const zeroOneKnapsackLab = defineCurriculumLab({
+  id: "zero-one-knapsack", domain: "algorithms", title: "零一背包与倒序更新",
+  description: "对照容量正序和倒序。找出重复取用。",
+  comparison: "倒序更新 / 正序更新反例",
+  topics: ["knapsack-rolling-order"],
+  input: {
+    sackCapacity: { kind: "integer", min: 1, max: 24, label: "背包容量", hint: "1–24 单位，每件物品只能取一次。" },
+    sackItems: { kind: "rows", columns: [[1, 24], [0, 99]], minItems: 1, maxItems: 12, label: "物品重量与价值", hint: "每行一件，先填重，再填价值。" },
+  },
+  defaults: { goalLabel: "观察正序读取本轮状态造成的重复取用", sackCapacity: 4, sackItems: [[2, 3], [3, 4]] },
+  columns: ["物品", "更新方向", "容量", "旧价值", "候选价值", "新价值"],
+  metricLabels: { sackCorrect: "倒序最优价值", sackForward: "正序得到的价值", sackExcess: "正序多出的价值", sackVisited: "每组更新格数" },
+  focusMetric: "sackExcess", alternateTrial: "只把背包容量改成 5。",
+  run({ sackCapacity, sackItems }) {
+    const steps: [number, string, number, number, number | string, number][] = [];
+    const simulate = (descending: boolean) => {
+      const state = Array<number>(sackCapacity + 1).fill(0);
+      let visits = 0;
+      for (const [index, [weight, value]] of sackItems.entries()) {
+        if (weight > sackCapacity) steps.push([index + 1, descending ? "倒序" : "正序", sackCapacity, state[sackCapacity], "过重", state[sackCapacity]]);
+        for (let layer = 0; layer <= sackCapacity - weight; layer++) {
+          const room = descending ? sackCapacity - layer : weight + layer;
+          const old = state[room];
+          const candidate = state[room - weight] + value;
+          state[room] = Math.max(old, candidate);
+          visits++;
+          steps.push([index + 1, descending ? "倒序" : "正序", room, old, candidate, state[room]]);
+        }
+      }
+      return { value: state[sackCapacity], visits };
+    };
+    const correct = simulate(true);
+    const forward = simulate(false);
+    return { steps, metrics: { sackCorrect: correct.value, sackForward: forward.value, sackExcess: forward.value - correct.value,
+      sackVisited: correct.visits }, report: {
+      conclusion: `倒序最优价值 ${correct.value}。正序得到 ${forward.value}。`,
+      detail: `容量为 ${sackCapacity}。物品有 ${sackItems.length} 件。两组各更新 ${correct.visits} 格。正序多出 ${forward.value - correct.value}。回放列出采用的候选值。`,
+      explanation: "每格比较取与不取。倒序先处理更大容量。来源仍是上一轮的值。正序可能读本轮的新值。这样会重复取同一件。打平也不能验证正序正确。",
+      suggestion: "先只增大容量。再用一件轻物做反例。查正序从哪一格取值。",
+    } };
+  },
+});
+
+export const slidingMaximumLab = defineCurriculumLab({
+  id: "sliding-maximum", domain: "algorithms", title: "单调队列与滑窗最大值",
+  description: "同一串数。对照扫窗口和维护队列。",
+  comparison: "逐窗扫描 / 单调队列",
+  topics: ["deque-sliding-window-maximum"],
+  input: {
+    slidingNumbers: { kind: "list", min: -99, max: 99, minItems: 1, maxItems: 28, label: "数值序列", hint: "填 1–28 个数，从 0 编号。" },
+    slidingWidth: { kind: "integer", min: 1, max: 28, label: "窗口长度", hint: "不能超过数值个数。" },
+  },
+  defaults: { goalLabel: "验证队首结果与逐窗扫描一致", slidingNumbers: [1, 3, -1, -3, 5, 3, 6, 7], slidingWidth: 3 },
+  check: ({ slidingNumbers, slidingWidth }) => slidingWidth <= slidingNumbers.length,
+  columns: ["下标", "移出的队首", "淘汰的队尾", "当前队列下标", "扫描 / 队列最大值"],
+  metricLabels: { slidingResults: "各窗最大值", slidingScans: "扫描值读取次数", slidingTailChecks: "队尾值比较数",
+    slidingWindowCount: "完整窗口数", slidingLast: "末窗最大值" },
+  focusMetric: "slidingScans", alternateTrial: "只把窗口长度改成 5。",
+  run({ slidingNumbers, slidingWidth }) {
+    const queue: number[] = [];
+    const answers: number[] = [];
+    let checks = 0;
+    const steps = slidingNumbers.map((value, index) => {
+      const left = index - slidingWidth + 1;
+      const expired = queue.length && queue[0] < left ? queue.shift()! : "—";
+      const removed: number[] = [];
+      while (queue.length) {
+        checks++;
+        if (slidingNumbers[queue.at(-1)!] > value) break;
+        removed.push(queue.pop()!);
+      }
+      queue.push(index);
+      const maximum = left >= 0 ? slidingNumbers[queue[0]] : null;
+      if (maximum !== null) answers.push(maximum);
+      return [index, expired, sequenceText(removed), sequenceText(queue),
+        maximum === null ? "未成窗" : `${Math.max(...slidingNumbers.slice(left, index + 1))} / ${maximum}`] as const;
+    });
+    return { steps, metrics: { slidingResults: sequenceText(answers), slidingScans: answers.length * slidingWidth,
+      slidingTailChecks: checks, slidingWindowCount: answers.length, slidingLast: answers.at(-1)! }, report: {
+      conclusion: `两种方法给出 ${answers.length} 个相同最大值。`,
+      detail: `窗宽 ${slidingWidth}。扫描共读 ${answers.length * slidingWidth} 个值。队尾比较 ${checks} 次。末窗最大值 ${answers.at(-1)}。回放分开记录读取和比较。`,
+      explanation: "过期下标从队首移除。队尾小于等于新值就退队。新值会留在窗里更久。队列从大到小。队首就是当前最大值。",
+      suggestion: "固定数据，只改窗宽。核对扫描读数。再试连续相等的数。",
+    } };
+  },
+});
+
+export const rollingHashLab = defineCurriculumLab({
+  id: "rolling-hash", domain: "algorithms", title: "滚动哈希与字符复核",
+  description: "用前缀哈希找候选。逐字符确认。",
+  topics: ["rolling-hash-verification", "substring-hash-prefix-difference"],
+  input: {
+    rollingText: { kind: "text", maxLength: 36, label: "搜索文本", hint: "1–36 个英数字符。" },
+    rollingPattern: { kind: "text", maxLength: 12, label: "查找模式", hint: "1–12 个英数字符，区分大小写。" },
+    rollingModulus: { kind: "integer", min: 2, max: 997, label: "哈希取模值", hint: "2–997。基数固定为 31。" },
+  },
+  defaults: { goalLabel: "把哈希命中与真实匹配分开计数", rollingText: "ABABBAAC", rollingPattern: "AB", rollingModulus: 5 },
+  check: ({ rollingText, rollingPattern }) => /^[A-Za-z0-9]+$/.test(rollingText) && /^[A-Za-z0-9]+$/.test(rollingPattern),
+  columns: ["起点", "窗口内容", "窗口哈希", "模式哈希", "复核结果"],
+  metricLabels: { rollingWindows: "扫描窗口数", rollingCandidates: "哈希候选", rollingCollisions: "复核排除的候选",
+    rollingMatches: "真实匹配位置", rollingChecks: "复核字符比较数" },
+  focusMetric: "rollingCollisions", alternateTrial: "只把哈希取模值改成 97。",
+  run({ rollingText, rollingPattern, rollingModulus }) {
+    const extend = (hash: number, char: string) => (hash * 31 + char.charCodeAt(0)) % rollingModulus;
+    const patternHash = Array.from(rollingPattern).reduce(extend, 0);
+    const width = rollingPattern.length;
+    const power = Array.from(rollingPattern).reduce((value) => (value * 31) % rollingModulus, 1);
+    const prefix = [0];
+    for (const char of rollingText) prefix.push(extend(prefix.at(-1)!, char));
+    const matches: number[] = [];
+    let candidates = 0;
+    let checks = 0;
+    const windows = Math.max(0, rollingText.length - width + 1);
+    const steps = Array.from({ length: windows }, (_, left) => {
+      const hash = ((prefix[left + width] - prefix[left] * power) % rollingModulus + rollingModulus) % rollingModulus;
+      let result = "哈希不同";
+      if (hash === patternHash) {
+        candidates++;
+        let equal = true;
+        for (let index = 0; index < width; index++) {
+          checks++;
+          if (rollingText[left + index] === rollingPattern[index]) continue;
+          equal = false;
+          break;
+        }
+        if (equal) matches.push(left);
+        result = equal ? "确认匹配" : "碰撞 · 内容不同";
+      }
+      return [left, rollingText.slice(left, left + width), hash, patternHash, result] as const;
+    });
+    const collisions = candidates - matches.length;
+    return { steps: steps.length ? steps : [["—", "无完整窗口", "—", patternHash, "模式长于文本"]],
+      metrics: { rollingWindows: windows, rollingCandidates: candidates, rollingCollisions: collisions,
+        rollingMatches: sequenceText(matches), rollingChecks: checks }, report: {
+      conclusion: `哈希筛出 ${candidates} 项。复核排除 ${collisions} 项。确认 ${matches.length} 项。`,
+      detail: `模式长 ${width}。共扫描 ${windows} 个窗口。复核比较 ${checks} 个字符。真实起点为 ${sequenceText(matches)}。起点从 0 编号。`,
+      explanation: "按基数递推前缀哈希。先把左前缀乘上对应幂。再从右前缀扣除。哈希相等才逐字核对。取模可能把不同内容压成同值。",
+      suggestion: "只改取模值。比较哈希候选和真实位置。再试模式长于文本。",
+    } };
+  },
+});
+
+export const intervalSchedulingLab = defineCurriculumLab({
+  id: "interval-scheduling", domain: "algorithms", title: "区间调度的贪心选择",
+  description: "同一批预约。对照两种选法。",
+  comparison: "先开始 / 先结束",
+  topics: ["interval-scheduling-greedy"],
+  input: {
+    intervalJobs: { kind: "rows", columns: [[0, 48], [1, 49]], minItems: 1, maxItems: 20, label: "开始与结束",
+      hint: "每行填开始和结束拍。结束必须晚于开始。" },
+  },
+  defaults: { goalLabel: "比较两种排序能接下多少预约", intervalJobs: [[0, 8], [1, 3], [3, 5], [5, 7], [7, 9]] },
+  check: ({ intervalJobs }) => intervalJobs.every(([start, end]) => start < end),
+  columns: ["选法", "预约号", "时间段", "当前已排到", "决定"],
+  metricLabels: { intervalsStartCount: "先开始接下的预约", intervalsEndCount: "先结束接下的预约",
+    intervalsStartChoices: "先开始的选择", intervalsEndChoices: "先结束的选择", intervalsExtra: "先结束多接的预约" },
+  focusMetric: "intervalsExtra", alternateTrial: "把首个预约的结束拍改为 1。",
+  run({ intervalJobs }) {
+    const jobs = intervalJobs.map(([start, end], index) => ({ start, end, id: index + 1 }));
+    const select = (key: "start" | "end", method: string) => {
+      const sorted = [...jobs].sort((a, b) => a[key] - b[key] || a.id - b.id);
+      const choices: number[] = [];
+      let until = 0;
+      const steps = sorted.map(({ start, end, id }) => {
+        const previous = until;
+        const fits = start >= previous;
+        if (fits) {
+          until = end;
+          choices.push(id);
+        }
+        return [method, id, `[${start}, ${end})`, previous, fits ? `接下，排到 ${until}` : "重叠，跳过"] as const;
+      });
+      return { choices, steps };
+    };
+    const start = select("start", "先开始");
+    const end = select("end", "先结束");
+    const extra = end.choices.length - start.choices.length;
+    return { steps: [...start.steps, ...end.steps], metrics: { intervalsStartCount: start.choices.length,
+      intervalsEndCount: end.choices.length, intervalsStartChoices: sequenceText(start.choices),
+      intervalsEndChoices: sequenceText(end.choices), intervalsExtra: extra }, report: {
+      conclusion: `先开始接 ${start.choices.length} 个。先结束接 ${end.choices.length} 个。`,
+      detail: `共有 ${jobs.length} 个预约。先开始选 ${sequenceText(start.choices)}。先结束选 ${sequenceText(end.choices)}。先结束多接 ${extra} 个。回放按各自排序查看。`,
+      explanation: "只有一个资源可用。结束拍可接下个预约。先结束能留出更多后续时间。每个预约都只计一次。相同时按输入顺序决定。",
+      suggestion: "只缩短首个长预约。比较可接数量。再试两项同一拍结束。",
+    } };
+  },
+});
+
+export const bloomMembershipLab = defineCurriculumLab({
+  id: "bloom-membership", domain: "algorithms", title: "布隆过滤器与误判",
+  description: "逐位检查。再与真实集合核对。",
+  comparison: "布隆判断 / 真实集合",
+  topics: ["bloom-filter-membership"],
+  input: {
+    bloomBitCount: { kind: "integer", min: 2, max: 64, label: "位数组长度", hint: "2–64 位，从 0 编号。" },
+    bloomProbes: { kind: "integer", min: 1, max: 5, label: "每个键的探测数", hint: "1–5 次。不同探测可能触及同一位。" },
+    bloomInsertKeys: { kind: "list", min: 0, max: 99, minItems: 0, maxItems: 24, label: "加入的键", hint: "0–24 个数字键，允许重复。" },
+    bloomQueryKeys: { kind: "list", min: 0, max: 99, minItems: 1, maxItems: 24, label: "查询的键", hint: "1–24 个数字键，按查询次数计。" },
+  },
+  defaults: { goalLabel: "找到碰巧命中所有位的缺失键", bloomBitCount: 8, bloomProbes: 2,
+    bloomInsertKeys: [1, 3, 5], bloomQueryKeys: [1, 2, 3, 4, 5, 7, 9, 11] },
+  columns: ["操作", "键", "访问位", "过滤器状态", "真实结果"],
+  metricLabels: { bloomBitsSet: "已置一位数", bloomMaybe: "可能存在次数", bloomFalsePositives: "误报次数",
+    bloomAbsent: "真实缺失查询", bloomFalseNegatives: "漏报次数" },
+  focusMetric: "bloomFalsePositives", alternateTrial: "只把位数组长度改为 17。",
+  run({ bloomBitCount, bloomProbes, bloomInsertKeys, bloomQueryKeys }) {
+    const bits = Array<boolean>(bloomBitCount).fill(false);
+    const exact = new Set<number>();
+    const positions = (key: number) => Array.from({ length: bloomProbes }, (_, probe) =>
+      (key * 7 + 3 + probe * (key * 11 + 5)) % bloomBitCount);
+    const inserts = bloomInsertKeys.map((key) => {
+      const indexes = positions(key);
+      indexes.forEach((index) => { bits[index] = true; });
+      exact.add(key);
+      return ["加入", key, sequenceText(indexes), `置一后共 ${bits.filter(Boolean).length} 位`, "已登记"] as const;
+    });
+    let maybe = 0;
+    let falsePositives = 0;
+    let falseNegatives = 0;
+    let absent = 0;
+    const queries = bloomQueryKeys.map((key) => {
+      const indexes = positions(key);
+      const hit = indexes.every((index) => bits[index]);
+      const exists = exact.has(key);
+      maybe += Number(hit);
+      absent += Number(!exists);
+      falsePositives += Number(hit && !exists);
+      falseNegatives += Number(!hit && exists);
+      return ["查询", key, sequenceText(indexes), hit ? "全一 · 可能存在" : "含零 · 确定缺失", exists ? "存在" : hit ? "缺失 · 误报" : "缺失"] as const;
+    });
+    const filled = bits.filter(Boolean).length;
+    return { steps: [...inserts, ...queries], metrics: { bloomBitsSet: filled, bloomMaybe: maybe, bloomFalsePositives: falsePositives,
+      bloomAbsent: absent, bloomFalseNegatives: falseNegatives }, report: {
+      conclusion: `本轮误报 ${falsePositives} 次。漏报 ${falseNegatives} 次。`,
+      detail: `加入 ${exact.size} 个不同键。每键探测 ${bloomProbes} 次。${bloomBitCount} 位中置一 ${filled} 位。真实缺失有 ${absent} 次。回放标出碰巧全一的键。`,
+      explanation: "加入时只把对应位置置一。查到零就能排除。别的键可能共用同一位。全一时还需核对集合。模型用固定取模哈希。",
+      suggestion: "固定键，只增大位数组。再单独改探测次数。对比误报和置一数。",
+    } };
+  },
+});
+
+export const fenwickPrefixLab = defineCurriculumLab({
+  id: "fenwick-prefix", domain: "algorithms", title: "树状数组与前缀和",
+  description: "交替改值、查和。比较两种读法。",
+  comparison: "逐项求和 / 树状数组",
+  topics: ["fenwick-lowbit-prefix"],
+  input: {
+    fenwickNumbers: { kind: "list", min: -99, max: 99, minItems: 1, maxItems: 32, label: "初始数组", hint: "1–32 个整数，从 1 编号。" },
+    fenwickOps: { kind: "rows", columns: [[0, 1], [1, 32], [-99, 99]], minItems: 1, maxItems: 20, label: "更新和查询",
+      hint: "0, 下标, 增量；1, 前缀长度, 0。至少查一次。" },
+  },
+  defaults: { goalLabel: "核对修改之后的前缀和", fenwickNumbers: [2, 1, 3, 2, 5, 1, 4, 2],
+    fenwickOps: [[1, 8, 0], [0, 3, 4], [1, 6, 0], [1, 8, 0]] },
+  check: ({ fenwickNumbers, fenwickOps }) => fenwickOps.some(([action]) => action === 1) &&
+    fenwickOps.every(([action, index, delta]) => index <= fenwickNumbers.length && (action === 0 || delta === 0)),
+  columns: ["操作", "数组读写位置", "树状数组位置", "数组结果", "树状数组结果"],
+  metricLabels: { fenwickLastSum: "末次前缀和", fenwickScanReads: "逐项查询读数", fenwickTreeReads: "树状查询读数",
+    fenwickTreeWrites: "树状更新写数", fenwickQueryCount: "查询次数" },
+  focusMetric: "fenwickLastSum", alternateTrial: "把第 3 项的增量改为 -2。",
+  run({ fenwickNumbers, fenwickOps }) {
+    const values = [0, ...fenwickNumbers];
+    const tree = values.map(() => 0);
+    const lowbit = (index: number) => index & -index;
+    const add = (index: number, delta: number) => {
+      const path: number[] = [];
+      for (let node = index; node < tree.length; node += lowbit(node)) {
+        tree[node] += delta;
+        path.push(node);
+      }
+      return path;
+    };
+    fenwickNumbers.forEach((value, index) => add(index + 1, value));
+    let scanReads = 0;
+    let treeReads = 0;
+    let writes = 0;
+    const sums: number[] = [];
+    const steps = fenwickOps.map(([action, index, delta]) => {
+      if (action === 0) {
+        values[index] += delta;
+        const updated = add(index, delta);
+        writes += updated.length;
+        return [`更新 ${delta >= 0 ? "+" : ""}${delta}`, index, sequenceText(updated), `新值 ${values[index]}`, "更新完成"] as const;
+      }
+      let prefix = 0;
+      let treeSum = 0;
+      const readPath: number[] = [];
+      for (let item = 1; item <= index; item++) prefix += values[item];
+      for (let node = index; node > 0; node -= lowbit(node)) {
+        treeSum += tree[node];
+        readPath.push(node);
+      }
+      scanReads += index;
+      treeReads += readPath.length;
+      sums.push(treeSum);
+      return ["查询", `1–${index}`, sequenceText(readPath), prefix, treeSum] as const;
+    });
+    const last = sums.at(-1)!;
+    return { steps, metrics: { fenwickLastSum: last, fenwickScanReads: scanReads, fenwickTreeReads: treeReads,
+      fenwickTreeWrites: writes, fenwickQueryCount: sums.length }, report: {
+      conclusion: `末次前缀和是 ${last}。树状数组少读 ${scanReads - treeReads} 次。`,
+      detail: `共处理 ${steps.length} 个操作。查询有 ${sums.length} 次。逐项读取 ${scanReads} 次。树状节点读取 ${treeReads} 次。更新写入 ${writes} 个节点。计数从建表后开始。`,
+      explanation: "下标从 1 开始。节点管一段连续区间。最低位决定区间长度。查询向左跳，拼出前缀。更新向上跳，维护所含区间。",
+      suggestion: "只改一个增量。核对两列前缀和。再改查询长度，比较读取路径。",
+    } };
+  },
+});
+
+export const longestSubsequenceLab = defineCurriculumLab({
+  id: "longest-subsequence", domain: "algorithms", title: "最长公共子序列",
+  description: "逐格填表。沿回溯找出一组答案。",
+  topics: ["lcs-prefix-transition"],
+  input: {
+    subsequenceLeft: { kind: "text", maxLength: 12, label: "左序列", hint: "1–12 个英文字母或数字，区分大小写。" },
+    subsequenceRight: { kind: "text", maxLength: 12, label: "右序列", hint: "同左序列。匹配字符可以间隔。" },
+  },
+  defaults: { goalLabel: "比较前缀并回溯最长公共子序列", subsequenceLeft: "ABCBDAB", subsequenceRight: "BDCABA" },
+  check: ({ subsequenceLeft, subsequenceRight }) => /^[A-Za-z0-9]+$/.test(subsequenceLeft) && /^[A-Za-z0-9]+$/.test(subsequenceRight),
+  columns: ["阶段", "左前缀长度", "右前缀长度", "动作", "当前长度或已取字符"],
+  metricLabels: { subsequenceLength: "最长子序列长度", subsequenceExample: "回溯得到的序列", subsequenceCells: "计算格数",
+    subsequenceMatchCells: "末字符相等格数", subsequenceBackSteps: "回溯步数" },
+  focusMetric: "subsequenceLength", alternateTrial: "把右序列改为 XYZ。",
+  run({ subsequenceLeft, subsequenceRight }) {
+    const leftSize = subsequenceLeft.length;
+    const rightSize = subsequenceRight.length;
+    const table = Array.from({ length: leftSize + 1 }, () => Array<number>(rightSize + 1).fill(0));
+    const steps: [string, number, number, string, number | string][] = [];
+    let matches = 0;
+    for (let row = 1; row <= leftSize; row++) {
+      for (let column = 1; column <= rightSize; column++) {
+        const equal = subsequenceLeft[row - 1] === subsequenceRight[column - 1];
+        matches += Number(equal);
+        table[row][column] = equal ? table[row - 1][column - 1] + 1 : Math.max(table[row - 1][column], table[row][column - 1]);
+        steps.push(["填表", row, column, equal ? "左上角加 1" : "取上方和左方较大值", table[row][column]]);
+      }
+    }
+    const reversed: string[] = [];
+    let backSteps = 0;
+    for (let row = leftSize, column = rightSize; row > 0 && column > 0;) {
+      const char = subsequenceLeft[row - 1];
+      const equal = char === subsequenceRight[column - 1];
+      const up = table[row - 1][column] >= table[row][column - 1];
+      if (equal) reversed.push(char);
+      steps.push(["回溯", row, column, equal ? `取 ${char}，向左上走` : up ? "向上走" : "向左走",
+        [...reversed].reverse().join("") || "空"]);
+      backSteps++;
+      if (equal || up) row--;
+      if (equal || !up) column--;
+    }
+    const answer = reversed.reverse().join("");
+    const length = table[leftSize][rightSize];
+    return { steps, metrics: { subsequenceLength: length, subsequenceExample: answer || "空", subsequenceCells: leftSize * rightSize,
+      subsequenceMatchCells: matches, subsequenceBackSteps: backSteps }, report: {
+      conclusion: length ? `最长长度是 ${length}。一组答案是 ${answer}。` : "两边没有公共字符。最长长度是 0。",
+      detail: `左边长 ${leftSize}。右边长 ${rightSize}。算了 ${leftSize * rightSize} 格。末字符相等有 ${matches} 格。回溯走了 ${backSteps} 步。回放能核对每次取字符。`,
+      explanation: "一格对应两个前缀。空前缀对应零。末字符相同就接在左上结果后。否则取上、左的较大值。回溯遇平局先向上。答案可以跳过字符。",
+      suggestion: "只换右序列。先试完全不相同。再试重复字符，检查回溯路径。",
+    } };
+  },
+});
+
 export const monotonicStackLab = defineCurriculumLab({
   id: "monotonic-stack", domain: "algorithms", title: "单调栈找下一个更大值",
   description: "同一组数。对照逐项扫描和单调栈。",

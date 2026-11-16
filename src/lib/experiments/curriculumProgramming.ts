@@ -1,5 +1,376 @@
 import { defineCurriculumLab, sequenceText } from "./curriculumLab";
 
+export const mutableDefaultLab = defineCurriculumLab({
+  id: "mutable-default", domain: "programming", title: "Python 可变默认参数",
+  description: "连续调用函数。对照共享列表和新列表。",
+  comparison: "列表作默认值 / 调用时创建列表",
+  topics: ["python-mutable-default-argument"],
+  input: {
+    defaultCallValues: { kind: "list", min: -99, max: 99, minItems: 1, maxItems: 12, label: "每次追加的值", hint: "每个数对应一次函数调用。" },
+    defaultExplicitCalls: { kind: "list", min: 1, max: 12, minItems: 0, maxItems: 12, label: "显式传列表的调用",
+      hint: "填调用编号，从 1 起。这些调用各传一个新空列表。" },
+  },
+  defaults: { goalLabel: "找出省略参数的调用何时共享状态", defaultCallValues: [1, 2, 3], defaultExplicitCalls: [] },
+  check: ({ defaultCallValues, defaultExplicitCalls }) => defaultExplicitCalls.every((id) => id <= defaultCallValues.length),
+  columns: ["调用", "是否显式传列表", "追加值", "共享默认值结果", "每次创建结果"],
+  metricLabels: { defaultSharedCalls: "使用共享默认值次数", defaultSharedFinal: "共享列表最终内容",
+    defaultDifferentCalls: "返回内容不同次数", defaultSharedLength: "共享列表最终长度" },
+  focusMetric: "defaultSharedLength", alternateTrial: "让第 2 次调用显式传空列表。",
+  run({ defaultCallValues, defaultExplicitCalls }) {
+    const explicit = new Set(defaultExplicitCalls);
+    const shared: number[] = [];
+    let sharedCalls = 0;
+    let different = 0;
+    const steps = defaultCallValues.map((value, index) => {
+      const supplied = explicit.has(index + 1);
+      const alias = supplied ? [] : shared;
+      const fresh: number[] = [];
+      alias.push(value);
+      fresh.push(value);
+      sharedCalls += Number(!supplied);
+      different += Number(alias.length !== fresh.length);
+      return [index + 1, supplied ? "是" : "否", value, sequenceText(alias), sequenceText(fresh)] as const;
+    });
+    return { steps, metrics: { defaultSharedCalls: sharedCalls, defaultSharedFinal: sequenceText(shared), defaultDifferentCalls: different,
+      defaultSharedLength: shared.length }, report: {
+      conclusion: `共享默认列表留下 ${shared.length} 项。两种做法有 ${different} 次返回不同。`,
+      detail: `共调用 ${steps.length} 次。省略列表 ${sharedCalls} 次。显式传入 ${steps.length - sharedCalls} 次。共享列表结果为 ${sequenceText(shared)}。回放保存每次调用当时的结果。`,
+      explanation: "函数定义时创建默认列表。省略参数时重复使用它。显式传入绕过默认值。另一写法用空标记作默认。需要列表时再创建。",
+      suggestion: "改一轮为显式传入。看共享列表少了谁。再重复输入同一个数。",
+    } };
+  },
+});
+
+export const exceptionGuaranteeLab = defineCurriculumLab({
+  id: "exception-guarantee", domain: "programming", title: "强异常保证与暂存提交",
+  description: "中途故意失败。核对对象是否改了一半。",
+  comparison: "逐项原地修改 / 暂存后一次提交",
+  topics: ["cpp-strong-exception-guarantee"],
+  input: {
+    guaranteeBase: { kind: "list", min: -99, max: 99, minItems: 1, maxItems: 10, label: "原对象内容", hint: "1–10 个值，从 0 编号。" },
+    guaranteeEdits: { kind: "rows", columns: [[0, 9], [-99, 99]], minItems: 1, maxItems: 12, label: "修改下标与新值", hint: "每行一次写入，可重复改同一位置。" },
+    guaranteeFailAt: { kind: "integer", min: 0, max: 12, label: "失败操作编号", hint: "从 1 起，失败在写入之前。0 表示不失败。" },
+  },
+  defaults: { goalLabel: "验证暂存组的失败不改变可见对象", guaranteeBase: [10, 20, 30], guaranteeEdits: [[0, 8], [1, 22], [2, 9]], guaranteeFailAt: 2 },
+  check: ({ guaranteeBase, guaranteeEdits, guaranteeFailAt }) => guaranteeFailAt <= guaranteeEdits.length &&
+    guaranteeEdits.every(([index]) => index < guaranteeBase.length),
+  columns: ["事件", "原地组可见数据", "暂存组可见数据", "暂存内容"],
+  metricLabels: { guaranteePartialFields: "原地组改变位置数", guaranteePublishedFields: "暂存组改变位置数",
+    guaranteeOriginalResult: "原地最终状态", guaranteeStagedResult: "暂存组最终状态", guaranteeApplied: "失败前实际写入次数" },
+  focusMetric: "guaranteePublishedFields", alternateTrial: "把失败操作编号改为 0。",
+  run({ guaranteeBase, guaranteeEdits, guaranteeFailAt }) {
+    const direct = [...guaranteeBase];
+    const staged = [...guaranteeBase];
+    let published = guaranteeBase;
+    let applied = 0;
+    const steps: [string, string, string, string][] = [];
+    for (const [index, [cell, value]] of guaranteeEdits.entries()) {
+      if (index + 1 === guaranteeFailAt) {
+        steps.push([`第 ${index + 1} 项失败`, sequenceText(direct), sequenceText(published), "丢弃暂存"]);
+        break;
+      }
+      direct[cell] = value;
+      staged[cell] = value;
+      applied++;
+      steps.push([`写入位置 ${cell}`, sequenceText(direct), sequenceText(published), sequenceText(staged)]);
+    }
+    if (!guaranteeFailAt) {
+      published = staged;
+      steps.push(["一次提交", sequenceText(direct), sequenceText(published), "提交完成"]);
+    }
+    const changes = (values: number[]) => values.filter((value, index) => value !== guaranteeBase[index]).length;
+    return { steps, metrics: { guaranteePartialFields: changes(direct), guaranteePublishedFields: changes(published),
+      guaranteeOriginalResult: sequenceText(direct), guaranteeStagedResult: sequenceText(published), guaranteeApplied: applied }, report: {
+      conclusion: `原地组改动 ${changes(direct)} 处。暂存组改动 ${changes(published)} 处。`,
+      detail: `计划改 ${guaranteeEdits.length} 次。实际先写 ${applied} 次。失败操作号为 ${guaranteeFailAt}。原地最终值为 ${sequenceText(direct)}。暂存组为 ${sequenceText(published)}。`,
+      explanation: "原地写入马上可见。中途失败会留下已写的值。暂存组先改副本。准备成功才发布。模型的最后提交不会失败。",
+      suggestion: "只关闭失败点。对照最后值。再让第一步失败，核对两组。",
+    } };
+  },
+});
+
+export const copyMoveLab = defineCurriculumLab({
+  id: "copy-move", domain: "programming", title: "C++ 复制与移动所有权",
+  description: "比较自定义缓冲对象的两种交接。",
+  comparison: "复制独立缓冲 / 移动接管缓冲",
+  topics: ["cpp-copy-move"],
+  input: {
+    moveBufferValues: { kind: "list", min: -99, max: 99, minItems: 1, maxItems: 12, label: "源缓冲数据", hint: "1–12 个整数。" },
+    moveDestinationValue: { kind: "integer", min: -99, max: 99, label: "接收方写入首值", hint: "交接后写入首位，核对原对象。" },
+  },
+  defaults: { goalLabel: "核对复制元素数和交接后的缓冲归属", moveBufferValues: [4, 8, 15], moveDestinationValue: 7 },
+  columns: ["动作", "复制源 / 接收方", "移动源 / 接收方", "复制组数据", "移动组数据"],
+  metricLabels: { moveCopiedCells: "复制的元素数", moveTransferredCells: "移动接管的元素数", moveCopySource: "复制组源对象末值",
+    moveSourceOwns: "移动后源是否仍持有缓冲", moveReceiver: "接收方末值" },
+  focusMetric: "moveCopiedCells", alternateTrial: "把源缓冲改为只含 4。",
+  run({ moveBufferValues, moveDestinationValue }) {
+    const copySource = { id: 1, cells: [...moveBufferValues] };
+    const copyTarget = { id: 2, cells: [...copySource.cells] };
+    const moveSource = { buffer: { id: 1, cells: [...moveBufferValues] } as { id: number; cells: number[] } | null };
+    const moveTarget = moveSource.buffer!;
+    moveSource.buffer = null;
+    const steps: [string, string, string, string, string][] = [["交接", `${copySource.id} / ${copyTarget.id}`, `空 / ${moveTarget.id}`,
+      sequenceText(copyTarget.cells), sequenceText(moveTarget.cells)]];
+    copyTarget.cells[0] = moveDestinationValue;
+    moveTarget.cells[0] = moveDestinationValue;
+    steps.push(["改接收方首位", `${copySource.id} / ${copyTarget.id}`, `空 / ${moveTarget.id}`,
+      sequenceText(copyTarget.cells), sequenceText(moveTarget.cells)]);
+    steps.push(["核对源对象", `源值 ${sequenceText(copySource.cells)}`, "移后为空", sequenceText(copyTarget.cells), sequenceText(moveTarget.cells)]);
+    return { steps,
+      metrics: { moveCopiedCells: copyTarget.cells.length, moveTransferredCells: moveTarget.cells.length,
+        moveCopySource: sequenceText(copySource.cells), moveSourceOwns: moveSource.buffer ? "是" : "否", moveReceiver: sequenceText(moveTarget.cells) }, report: {
+      conclusion: `复制组复制 ${copyTarget.cells.length} 项。移动组直接接管原缓冲。`,
+      detail: `源缓冲有 ${moveBufferValues.length} 项。接收方把首值改为 ${moveDestinationValue}。复制组源值为 ${sequenceText(copySource.cells)}。移动组源已空。回放用编号追踪缓冲。`,
+      explanation: "复制构造新缓冲。移动让接收方拥有原缓冲。移后为空是这个类的约定。std::move 只改变值类别。实际转移来自移动构造。",
+      suggestion: "先缩短缓冲。核对复制计数。再只改接收方新值，核对复制源。",
+    } };
+  },
+});
+
+export const cStringLab = defineCurriculumLab({
+  id: "c-string-terminator", domain: "programming", title: "C 字符串与结束字节",
+  description: "拷贝同一串字节。检查容量和结尾。",
+  comparison: "预留空字符 / 只复制内容",
+  topics: ["c-string-terminator"],
+  input: {
+    cStringSource: { kind: "list", min: 1, max: 255, minItems: 1, maxItems: 20, label: "源字节（不含结尾）", hint: "每项 1–255。结尾由写入方式决定。" },
+    cStringCapacity: { kind: "integer", min: 1, max: 24, label: "目标容量", hint: "1–24 字节。未覆盖的格子初值为 88。" },
+  },
+  defaults: { goalLabel: "验证内容长度之外还需一格放结尾", cStringSource: [65, 66, 67, 68], cStringCapacity: 4 },
+  columns: ["下标", "预留组字节", "仅复制字节", "预留组读取", "仅复制组读取"],
+  metricLabels: { cStringSafeLength: "预留组读出长度", cStringLostBytes: "预留组截断字节", cStringRawContainsNull: "仅复制组找到结尾",
+    cStringRequired: "完整保存所需容量" },
+  focusMetric: "cStringLostBytes", alternateTrial: "只把目标容量改为 5。",
+  run({ cStringSource, cStringCapacity }) {
+    const safe = Array<number>(cStringCapacity).fill(88);
+    const raw = [...safe];
+    const used = cStringSource.slice(0, cStringCapacity - 1);
+    used.forEach((value, index) => { safe[index] = value; });
+    safe[used.length] = 0;
+    cStringSource.slice(0, cStringCapacity).forEach((value, index) => { raw[index] = value; });
+    const stop = raw.indexOf(0);
+    const steps = safe.map((value, index) => [index, value, raw[index], value === 0 ? "遇到结尾" : index < used.length ? "取字节" : "已停止",
+      raw[index] === 0 ? "遇到结尾" : index + 1 === raw.length && stop < 0 ? "缓冲区内无结尾" : "未结束"] as const);
+    const lost = cStringSource.length - used.length;
+    return { steps, metrics: { cStringSafeLength: used.length, cStringLostBytes: lost,
+      cStringRawContainsNull: stop >= 0 ? "是" : "否", cStringRequired: cStringSource.length + 1 }, report: {
+      conclusion: `预留组读出 ${used.length} 字节。仅复制组未补写结束字节。`,
+      detail: `源内容长 ${cStringSource.length}。容量为 ${cStringCapacity}。预留组截断 ${lost} 字节。完整存放需 ${cStringSource.length + 1} 格。回放标出结束位置。`,
+      explanation: "C 字符串遇零结束。内容和结尾都占容量。仅填内容可能找不到零。本实验只检查已分配空间。模拟缓冲区初值非零。",
+      suggestion: "先增加一个字节的容量。检查能否存全。再试容量只有 1。",
+    } };
+  },
+});
+
+export const generatorExhaustionLab = defineCurriculumLab({
+  id: "generator-exhaustion", domain: "programming", title: "生成器与迭代耗尽",
+  description: "分几次取值。回放生成器的位置。",
+  comparison: "复用生成器 / 每次新建",
+  topics: ["python-iterator-exhaustion", "python-generator"],
+  input: {
+    generatorValues: { kind: "list", min: -99, max: 99, minItems: 1, maxItems: 12, label: "依次产出的值", hint: "1–12 个整数，按输入顺序产出。" },
+    generatorTakeCounts: { kind: "list", min: 1, max: 12, minItems: 1, maxItems: 12, label: "每批要取的个数",
+      hint: "最多 12 批。每批要取 1–12 个，遇耗尽即停。" },
+  },
+  defaults: { goalLabel: "比较复用与每次新建的取值结果", generatorValues: [2, 4, 6, 8], generatorTakeCounts: [3, 3, 2] },
+  columns: ["批次", "请求个数", "复用取到", "每次新建取到", "复用剩余", "触发耗尽"],
+  metricLabels: { generatorReusedProduced: "复用累计产出", generatorFreshProduced: "新建累计产出", generatorReusedStops: "复用触发耗尽的批数",
+    generatorFreshStops: "新建触发耗尽的批数", generatorReusedLast: "复用末批产出" },
+  focusMetric: "generatorReusedStops", alternateTrial: "把每批取值数改成 1、1、1。",
+  run({ generatorValues, generatorTakeCounts }) {
+    function* newIterator() {
+      yield* generatorValues;
+    }
+    const read = (iterator: ReturnType<typeof newIterator>, count: number) => {
+      const taken: number[] = [];
+      while (taken.length < count) {
+        const next = iterator.next();
+        if (next.done) return { taken, stopped: true };
+        taken.push(next.value);
+      }
+      return { taken, stopped: false };
+    };
+    const reused = newIterator();
+    let reusedProduced = 0;
+    let freshProduced = 0;
+    let reusedStops = 0;
+    let freshStops = 0;
+    let last = "";
+    const steps = generatorTakeCounts.map((count, index) => {
+      const current = read(reused, count);
+      const fresh = read(newIterator(), count);
+      reusedProduced += current.taken.length;
+      freshProduced += fresh.taken.length;
+      reusedStops += Number(current.stopped);
+      freshStops += Number(fresh.stopped);
+      last = sequenceText(current.taken);
+      return [index + 1, count, last, sequenceText(fresh.taken), generatorValues.length - reusedProduced,
+        `复用 ${current.stopped ? "是" : "否"} / 新建 ${fresh.stopped ? "是" : "否"}`] as const;
+    });
+    return { steps, metrics: { generatorReusedProduced: reusedProduced, generatorFreshProduced: freshProduced,
+      generatorReusedStops: reusedStops, generatorFreshStops: freshStops, generatorReusedLast: last }, report: {
+      conclusion: `复用取到 ${reusedProduced} 项。每次新建取到 ${freshProduced} 项。`,
+      detail: `原序列有 ${generatorValues.length} 项。分 ${steps.length} 批取值。复用遇耗尽 ${reusedStops} 批。新建遇耗尽 ${freshStops} 批。复用末批取到 ${last}。`,
+      explanation: "生成器每取一次就前进一步。复用会接着原位置读。新建会从头读。取完后再请求才遇耗尽。模型用生成器模拟 next。",
+      suggestion: "只减小每批请求数。比较两个输出序列。再试正好取完后多取一次。",
+    } };
+  },
+});
+
+export const mutableHashKeyLab = defineCurriculumLab({
+  id: "mutable-hash-key", domain: "programming", title: "Java 哈希键修改与查找",
+  description: "改掉参与哈希的编号。再查登记项。",
+  comparison: "登记后直接改键 / 改键前先移除",
+  topics: ["java-equals-hashcode"],
+  input: {
+    hashKeyBefore: { kind: "integer", min: 0, max: 99, label: "登记时的编号", hint: "编号同时参与哈希和相等判断。" },
+    hashKeyAfter: { kind: "integer", min: 0, max: 99, label: "修改后的编号", hint: "可填相同或不同的编号。" },
+    hashKeyBuckets: { kind: "integer", min: 2, max: 16, label: "模拟桶数", hint: "2–16 个桶。使用编号取余。" },
+  },
+  defaults: { goalLabel: "验证桶相同也不能修复已改的键", hashKeyBefore: 3, hashKeyAfter: 11, hashKeyBuckets: 8 },
+  columns: ["步骤", "查询键", "直接改键", "移除后改键", "备注"],
+  metricLabels: { hashKeyUnsafeFound: "直接改键后能否查到", hashKeySafeFound: "重登记后能否查到", hashKeySameBucket: "修改前后是否同桶",
+    hashKeyOriginalBucket: "原桶号", hashKeyUpdatedBucket: "新桶号" },
+  focusMetric: "hashKeyUnsafeFound", alternateTrial: "只把修改后的编号改回 3。",
+  run({ hashKeyBefore, hashKeyAfter, hashKeyBuckets }) {
+    const unsafeKey = { id: hashKeyBefore };
+    const safeKey = { id: hashKeyBefore };
+    const unsafeEntry = { key: unsafeKey, hash: unsafeKey.id };
+    let safeEntry: typeof unsafeEntry | null = { key: safeKey, hash: safeKey.id };
+    const bucket = (hash: number) => hash % hashKeyBuckets;
+    const lookup = (entry: typeof unsafeEntry | null, id: number) => {
+      if (!entry || bucket(entry.hash) !== bucket(id)) return "查不到 · 桶内无记录";
+      if (entry.hash !== id) return "查不到 · 哈希不同";
+      return entry.key.id === id ? "查到" : "查不到 · 键不相等";
+    };
+    const steps: [string, string | number, string, string, string][] = [
+      ["登记后读取", hashKeyBefore, lookup(unsafeEntry, hashKeyBefore), lookup(safeEntry, hashKeyBefore), `两边都在桶 ${bucket(hashKeyBefore)}`],
+    ];
+    const removed = lookup(safeEntry, hashKeyBefore) === "查到";
+    if (removed) safeEntry = null;
+    steps.push(["修改前", hashKeyBefore, "保留旧记录", removed ? "按旧键移除" : "移除失败", lookup(safeEntry, hashKeyBefore)]);
+    unsafeKey.id = hashKeyAfter;
+    safeKey.id = hashKeyAfter;
+    safeEntry = { key: safeKey, hash: safeKey.id };
+    steps.push(["修改并登记", hashKeyAfter, `对象编号改为 ${unsafeKey.id}`, `新哈希为 ${safeEntry.hash}`, "左侧记录仍存旧哈希"]);
+    steps.push(["查原编号", hashKeyBefore, lookup(unsafeEntry, hashKeyBefore), lookup(safeEntry, hashKeyBefore), "忽略其他键"]);
+    const unsafe = lookup(unsafeEntry, hashKeyAfter);
+    const safe = lookup(safeEntry, hashKeyAfter);
+    steps.push(["查新编号", hashKeyAfter, unsafe, safe, "先看桶和哈希，再看相等"]);
+    const oldBucket = bucket(hashKeyBefore);
+    const newBucket = bucket(hashKeyAfter);
+    const same = oldBucket === newBucket;
+    return { steps, metrics: { hashKeyUnsafeFound: unsafe === "查到" ? "是" : "否",
+      hashKeySafeFound: safe === "查到" ? "是" : "否", hashKeySameBucket: same ? "是" : "否",
+      hashKeyOriginalBucket: oldBucket, hashKeyUpdatedBucket: newBucket }, report: {
+      conclusion: `直接改键后${unsafe === "查到" ? "能查到" : "查不到"}。重登记后能查到。`,
+      detail: `原编号为 ${hashKeyBefore}。新编号为 ${hashKeyAfter}。新旧桶号是 ${newBucket} 和 ${oldBucket}。${same ? "两次定位落在同一桶。" : "两次定位落在不同桶。"}回放可查两次键查找。`,
+      explanation: "记录保存登记时的哈希。改对象不会重挂记录。同桶还要核对哈希和键。改前移除可用旧哈希。模型以编号作为哈希值。",
+      suggestion: "只改新编号。分别试同桶和不同桶。再试保持编号不变。",
+    } };
+  },
+});
+
+export const microtaskQueueLab = defineCurriculumLab({
+  id: "microtask-queue", domain: "programming", title: "微任务与计时器顺序",
+  description: "逐步排队。看计时器前面有谁。",
+  topics: ["js-microtasks"],
+  input: {
+    eventInitialMicros: { kind: "integer", min: 0, max: 8, label: "独立微任务数", hint: "脚本先排入 0–8 个。" },
+    eventNestedDepth: { kind: "integer", min: 0, max: 8, label: "微任务链长度", hint: "0–8 层，每层只排下一层。" },
+    eventTimerCount: { kind: "integer", min: 1, max: 6, label: "就绪计时器数", hint: "1–6 个，到期后按登记顺序执行。" },
+    eventTimerMicro: { kind: "integer", min: 0, max: 1, label: "计时器追加微任务", hint: "0 不追加。1 每个追加一个。" },
+  },
+  defaults: { goalLabel: "测试微任务何时清空及计时器何时启动", eventInitialMicros: 2, eventNestedDepth: 3, eventTimerCount: 2, eventTimerMicro: 1 },
+  columns: ["步", "执行者", "动作", "待执行微任务", "剩余计时器"],
+  metricLabels: { eventFirstTimerStep: "首个计时器执行步", eventBeforeFirstTimer: "首个计时器前的微任务数",
+    eventMicroCount: "执行微任务总数", eventTimerRan: "执行计时器总数" },
+  focusMetric: "eventFirstTimerStep", alternateTrial: "微任务链改为 0。其他参数不动。",
+  run({ eventInitialMicros, eventNestedDepth, eventTimerCount, eventTimerMicro }) {
+    const queue = Array.from({ length: eventInitialMicros }, (_, i) => ({ title: `微任务 ${i + 1}`, depth: 0 }));
+    if (eventNestedDepth) queue.push({ title: "链第 1 层", depth: 1 });
+    const steps: [number, string, string, string, number][] = [];
+    let timer = 0;
+    const record = (title: string, action: string) =>
+      steps.push([steps.length + 1, title, action, queue.map((job) => job.title).join("、") || "空", eventTimerCount - timer]);
+    record("同步脚本", "登记计时器和初始微任务");
+    let microCount = 0;
+    let beforeFirstTimer = 0;
+    let firstTimerStep = 0;
+    while (queue.length || timer < eventTimerCount) {
+      if (queue.length) {
+        const { title, depth } = queue.shift()!;
+        const chained = depth > 0 && depth < eventNestedDepth;
+        if (chained) queue.push({ title: `链第 ${depth + 1} 层`, depth: depth + 1 });
+        microCount++;
+        record(title, chained ? "下一层排到微任务队尾" : "执行完毕");
+      } else {
+        timer++;
+        if (timer === 1) {
+          beforeFirstTimer = microCount;
+          firstTimerStep = steps.length + 1;
+        }
+        if (eventTimerMicro) queue.push({ title: `计时器 ${timer} 的微任务`, depth: 0 });
+        record(`计时器 ${timer}`, eventTimerMicro ? "追加一个微任务" : "执行完毕");
+      }
+    }
+    return { steps, metrics: { eventFirstTimerStep: firstTimerStep, eventBeforeFirstTimer: beforeFirstTimer,
+      eventMicroCount: microCount, eventTimerRan: timer }, report: {
+      conclusion: `首个计时器在第 ${firstTimerStep} 步。此前完成 ${beforeFirstTimer} 个微任务。`,
+      detail: `本轮跑了 ${microCount} 个微任务。计时器共执行 ${timer} 个。首步是同步脚本。步数只代表执行顺序。回放可查每一步的队列。`,
+      explanation: "同步脚本先跑完。然后清空微任务队列。新微任务进队尾。队列清空才开下个任务。计时器也能追加微任务。模型把计时器视为已就绪。",
+      suggestion: "只缩短微任务链。看首个计时器提前几步。再关闭计时器的追加动作。",
+    } };
+  },
+});
+
+export const vectorIteratorLab = defineCurriculumLab({
+  id: "vector-iterator", domain: "programming", title: "vector 扩容与迭代器失效",
+  description: "先保存迭代器，再追加元素。",
+  comparison: "按当前容量追加 / 先 reserve",
+  topics: ["cpp-iterator-invalidation", "cpp-vector-reserve-resize"],
+  input: {
+    vectorInitialSize: { kind: "integer", min: 1, max: 12, label: "初始元素数", hint: "1–12 个，保证能保存首元素迭代器。" },
+    vectorInitialCapacity: { kind: "integer", min: 1, max: 32, label: "起始容量", hint: "至少能装下现有元素。" },
+    vectorReserveCapacity: { kind: "integer", min: 0, max: 32, label: "预留容量", hint: "先 reserve，再保存迭代器。" },
+    vectorAppendCount: { kind: "integer", min: 1, max: 12, label: "追加个数", hint: "1–12 次 push_back。" },
+  },
+  defaults: { goalLabel: "核对追加时哪些旧迭代器还能用", vectorInitialSize: 3,
+    vectorInitialCapacity: 3, vectorReserveCapacity: 6, vectorAppendCount: 3 },
+  check: ({ vectorInitialSize, vectorInitialCapacity }) => vectorInitialSize <= vectorInitialCapacity,
+  columns: ["步骤", "元素数", "当前容量组", "预留容量组", "两组旧 end()"],
+  metricLabels: { vectorBaselineReallocations: "当前容量组追加扩容", vectorReservedReallocations: "预留组追加扩容",
+    vectorBaselineFirstLoss: "当前组首元素失效步", vectorReservedFirstLoss: "预留组首元素失效步", vectorEndLoss: "两组旧 end() 失效步" },
+  focusMetric: "vectorReservedReallocations", alternateTrial: "把预留容量从 6 改为 3。",
+  run({ vectorInitialSize, vectorInitialCapacity, vectorReserveCapacity, vectorAppendCount }) {
+    const lanes = [vectorInitialCapacity, Math.max(vectorInitialCapacity, vectorReserveCapacity)]
+      .map((capacity) => ({ capacity, reallocations: 0, firstLoss: 0 }));
+    const steps: [string, number, string, string, string][] = [["保存迭代器", vectorInitialSize,
+      `容量 ${lanes[0].capacity} · 首元素有效`, `容量 ${lanes[1].capacity} · 首元素有效`, "有效"]];
+    for (let index = 1; index <= vectorAppendCount; index++) {
+      const size = vectorInitialSize + index;
+      const snapshot = lanes.map((lane) => {
+        const prior = lane.capacity;
+        if (size > prior) {
+          lane.capacity *= 2;
+          lane.reallocations++;
+          lane.firstLoss ||= index;
+        }
+        return `容量 ${lane.capacity} · ${prior === lane.capacity ? "原地追加" : "发生扩容"} · 旧首元素${lane.firstLoss ? "失效" : "有效"}`;
+      });
+      steps.push([`追加 ${index}`, size, snapshot[0], snapshot[1], "失效"]);
+    }
+    const label = (loss: number) => loss || "仍有效";
+    return { steps, metrics: { vectorBaselineReallocations: lanes[0].reallocations, vectorReservedReallocations: lanes[1].reallocations,
+      vectorBaselineFirstLoss: label(lanes[0].firstLoss), vectorReservedFirstLoss: label(lanes[1].firstLoss), vectorEndLoss: 1 }, report: {
+      conclusion: `当前组追加扩容 ${lanes[0].reallocations} 次。预留组扩容 ${lanes[1].reallocations} 次。`,
+      detail: `初始有 ${vectorInitialSize} 个元素。两组各追加 ${vectorAppendCount} 次。最终容量为 ${lanes[0].capacity} 和 ${lanes[1].capacity}。两组旧 end() 均在首步追加后失效。`,
+      explanation: "先预留，再保存旧迭代器。容量不够就重分配。旧首元素迭代器随之失效。原地追加只让旧尾失效。模型用倍增示例。扩容计数从追加开始。",
+      suggestion: "只降低预留容量。查首元素何时失效。再对照旧 end() 的失效步。",
+    } };
+  },
+});
+
 export const loopClosureLab = defineCurriculumLab({
   id: "loop-closure", domain: "programming", title: "循环闭包与逐轮绑定",
   description: "先建回调，再调用。对照 var 和 let。",

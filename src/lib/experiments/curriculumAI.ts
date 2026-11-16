@@ -3,6 +3,415 @@ import { defineCurriculumLab } from "./curriculumLab";
 const percent = (numerator: number, denominator: number) => denominator === 0 ? "无定义" : `${(100 * numerator / denominator).toFixed(1)}%`;
 const decimal = (value: number) => Number(value.toFixed(4));
 
+function normalizedExp(values: number[]) {
+  const max = Math.max(...values);
+  const exp = values.map((value) => Math.exp(value - max));
+  const sum = exp.reduce((total, value) => total + value, 0);
+  return exp.map((value) => value / sum);
+}
+
+export const stableSoftmaxLab = defineCurriculumLab({
+  id: "stable-softmax", domain: "ai", title: "Softmax 平移与数值稳定",
+  description: "整体加常数。核对直接指数和稳定算法。",
+  comparison: "直接求指数 / 先减最大值",
+  topics: ["multiclass-softmax-shift"],
+  input: {
+    softmaxLogits: { kind: "list", min: -60, max: 60, minItems: 2, maxItems: 12, label: "各类别分数", hint: "填 2–12 个整数。" },
+    softmaxCommonShift: { kind: "integer", min: -1000, max: 1000, label: "统一平移量", hint: "给每类分数都加同一个值。" },
+  },
+  defaults: { goalLabel: "检查大幅平移下的概率是否仍相同", softmaxLogits: [1, 2, 3], softmaxCommonShift: 800 },
+  columns: ["类别", "平移后分数", "直接指数", "直接概率", "稳定概率", "未平移概率"],
+  metricLabels: { softmaxNaiveStatus: "直接算法状态", softmaxStableTop: "稳定算法最高类别",
+    softmaxStablePeak: "该类稳定概率", softmaxStableDrift: "平移前后最大概率差" },
+  focusMetric: "softmaxNaiveStatus", alternateTrial: "把平移量改成 0。",
+  run({ softmaxLogits, softmaxCommonShift }) {
+    const shifted = softmaxLogits.map((value) => value + softmaxCommonShift);
+    const raw = shifted.map((value) => Math.exp(value));
+    const sum = raw.reduce((total, value) => total + value, 0);
+    const valid = Number.isFinite(sum) && sum > 0;
+    const stable = normalizedExp(shifted);
+    const original = normalizedExp(softmaxLogits);
+    const max = Math.max(...stable);
+    const top = stable.indexOf(max) + 1;
+    const drift = Math.max(...stable.map((value, index) => Math.abs(value - original[index])));
+    const status = valid ? "可归一化" : sum === 0 ? "全部下溢" : "求和溢出";
+    const steps = shifted.map((value, index) => [index + 1, value, Number.isFinite(raw[index]) ? raw[index].toExponential(2) : "溢出",
+      valid ? decimal(raw[index] / sum) : "不可用", decimal(stable[index]), decimal(original[index])] as const);
+    return { steps, metrics: { softmaxNaiveStatus: status, softmaxStableTop: top, softmaxStablePeak: decimal(max),
+      softmaxStableDrift: decimal(drift) }, report: {
+      conclusion: `直接算法${status}。稳定算法最高为第 ${top} 类。`,
+      detail: `共 ${steps.length} 类。统一平移 ${softmaxCommonShift}。最高概率 ${decimal(max)}。平移前后最大概率差为 ${decimal(drift)}。回放列出各类的概率。`,
+      explanation: "直接指数可能过大或过小。减最大值后，最大指数为一。分子和分母等比变化。概率应保持一致。显示值保留四位小数。",
+      suggestion: "把平移量改为 0。再试负的大平移。比较直接算法和稳定概率。",
+    } };
+  },
+});
+
+export const causalMaskLab = defineCurriculumLab({
+  id: "causal-mask", domain: "ai", title: "注意力与因果掩码",
+  description: "同一查询。有掩码时只看可见位置。",
+  comparison: "全序列注意力 / 只看当前与过去",
+  topics: ["causal-attention-mask", "scaled-dot-product-attention"],
+  input: {
+    attentionQueryScalar: { kind: "integer", min: -6, max: 6, label: "一维查询值", hint: "用查询乘键得到一维点积。" },
+    attentionKeyValues: { kind: "rows", columns: [[-6, 6], [-99, 99]], minItems: 2, maxItems: 12, label: "各位置的键和值",
+      hint: "按位置顺序填键、值。从 1 编号。" },
+    attentionVisible: { kind: "integer", min: 1, max: 12, label: "当前位置", hint: "只能看当前和之前。不能超过行数。" },
+  },
+  defaults: { goalLabel: "验证对未来位置的权重是否归零", attentionQueryScalar: 1,
+    attentionKeyValues: [[1, 10], [0, 0], [3, 90]], attentionVisible: 2 },
+  check: ({ attentionKeyValues, attentionVisible }) => attentionVisible <= attentionKeyValues.length,
+  columns: ["位置", "点积", "值", "全序列权重", "掩码后权重", "掩码后贡献"],
+  metricLabels: { attentionUnmaskedOutput: "全序列加权输出", attentionMaskedOutput: "掩码后加权输出",
+    attentionFutureWeight: "无掩码时未来总权重", attentionVisibleCount: "可见位置数" },
+  focusMetric: "attentionFutureWeight", alternateTrial: "把当前位置改为 3。",
+  run({ attentionQueryScalar, attentionKeyValues, attentionVisible }) {
+    const logits = attentionKeyValues.map(([key]) => key * attentionQueryScalar);
+    const full = normalizedExp(logits);
+    const prefix = normalizedExp(logits.slice(0, attentionVisible));
+    const weighted = (weights: number[]) => attentionKeyValues.reduce((sum, [, value], index) => sum + (weights[index] ?? 0) * value, 0);
+    const future = full.slice(attentionVisible).reduce((sum, value) => sum + value, 0);
+    const output = weighted(prefix);
+    const plain = weighted(full);
+    const steps = attentionKeyValues.map(([, value], index) => {
+      const weight = prefix[index] ?? 0;
+      return [index + 1, logits[index], value, decimal(full[index]), decimal(weight), decimal(value * weight)] as const;
+    });
+    return { steps, metrics: { attentionUnmaskedOutput: decimal(plain), attentionMaskedOutput: decimal(output),
+      attentionFutureWeight: decimal(future), attentionVisibleCount: attentionVisible }, report: {
+      conclusion: `掩码后输出 ${decimal(output)}。未来位置权重为 0。`,
+      detail: `共 ${steps.length} 个位置。可见 ${attentionVisible} 个。全序列输出 ${decimal(plain)}。无掩码未来权重合计 ${decimal(future)}。回放列出逐位置贡献。`,
+      explanation: "一维键的尺度因子为一。先求查询与键的点积。只在可见位置归一化。未来位置没有权重。加权输出用每个位置的值。",
+      suggestion: "把当前位置移到最后。核对两种输出。再改一个未来位置的值试试。",
+    } };
+  },
+});
+
+export const dropoutModeLab = defineCurriculumLab({
+  id: "dropout-mode", domain: "ai", title: "Dropout 的训练与推理",
+  description: "用可复现的掩码。比较两态输出。",
+  comparison: "训练态随机丢弃与缩放 / 推理态原值",
+  topics: ["dropout-train-inference"],
+  input: {
+    dropoutActivations: { kind: "list", min: -20, max: 20, minItems: 1, maxItems: 12, label: "输入激活值", hint: "填 1–12 个整数。" },
+    dropoutRatePct: { kind: "integer", min: 0, max: 90, label: "丢弃概率百分数", hint: "0–90。保留值按保留概率倒数缩放。" },
+    dropoutTrials: { kind: "integer", min: 1, max: 20, label: "重复前向次数", hint: "1–20。每次采样新掩码。" },
+    dropoutRandomSeed: { kind: "integer", min: 0, max: 65535, label: "随机种子", hint: "固定种子可重现掩码。" },
+  },
+  defaults: { goalLabel: "对照随机训练输出和固定推理输出", dropoutActivations: [2, 4, 6, 8],
+    dropoutRatePct: 50, dropoutTrials: 6, dropoutRandomSeed: 42 },
+  columns: ["前向次数", "保留掩码", "训练态输出", "训练态总和", "推理态总和"],
+  metricLabels: { dropoutMaskedCount: "丢弃位置总数", dropoutTrainMeanSum: "训练态总和的样本均值",
+    dropoutInferSum: "推理态总和", dropoutMeanDelta: "训练样本均值与推理差" },
+  focusMetric: "dropoutMaskedCount", alternateTrial: "只把丢弃概率改成 0。",
+  run({ dropoutActivations, dropoutRatePct, dropoutTrials, dropoutRandomSeed }) {
+    const random = randomSource(dropoutRandomSeed);
+    const rate = dropoutRatePct / 100;
+    const inference = dropoutActivations.reduce((sum, value) => sum + value, 0);
+    let masked = 0;
+    let total = 0;
+    const steps = Array.from({ length: dropoutTrials }, (_, index) => {
+      const mask = dropoutActivations.map(() => Number(random() >= rate));
+      masked += mask.filter((value) => !value).length;
+      const output = dropoutActivations.map((value, i) => value * mask[i] / (1 - rate));
+      const sum = output.reduce((value, item) => value + item, 0);
+      total += sum;
+      return [index + 1, mask.join(""), output.map(decimal).join("、"), decimal(sum), inference] as const;
+    });
+    const mean = total / dropoutTrials;
+    return { steps, metrics: { dropoutMaskedCount: masked, dropoutTrainMeanSum: decimal(mean), dropoutInferSum: inference,
+      dropoutMeanDelta: decimal(mean - inference) }, report: {
+      conclusion: `训练态共有 ${masked} 处丢弃。推理态总和固定为 ${inference}。`,
+      detail: `重复 ${dropoutTrials} 次。每次 ${dropoutActivations.length} 个位置。丢弃率为 ${dropoutRatePct}%。训练总和均值 ${decimal(mean)}。种子为 ${dropoutRandomSeed}。`,
+      explanation: "训练时随机将位置置零。保留值除以保留概率。推理态用原激活值。有限样本均值会波动。掩码的 1 表示保留。",
+      suggestion: "只把丢弃率设为零。核对两态输出。再增加次数，观察均值。",
+    } };
+  },
+});
+
+export const rankingMetricsLab = defineCurriculumLab({
+  id: "ranking-metrics", domain: "ai", title: "排序召回率与 NDCG",
+  description: "同一批判断。比较命中数和排名位置。",
+  comparison: "排序 A / 排序 B",
+  topics: ["recall-at-k", "ndcg-discounted-position"],
+  input: {
+    rankingGrades: { kind: "rows", columns: [[1, 30], [0, 3]], minItems: 2, maxItems: 14, label: "编号与相关度",
+      hint: "每行唯一编号和 0–3 分。大于 0 视为相关。" },
+    rankingOrderA: { kind: "list", min: 1, max: 30, minItems: 2, maxItems: 14, label: "A 的排序", hint: "把所有已评分编号各排一次。" },
+    rankingOrderB: { kind: "list", min: 1, max: 30, minItems: 2, maxItems: 14, label: "B 的排序", hint: "用同一批编号各排一次。" },
+    rankingCutoff: { kind: "integer", min: 1, max: 14, label: "取前几项", hint: "不能超过候选数。" },
+  },
+  defaults: { goalLabel: "检查命中数相同但排序质量不同的情况", rankingGrades: [[1, 3], [2, 2], [3, 0], [4, 1], [5, 0]],
+    rankingOrderA: [1, 2, 3, 4, 5], rankingOrderB: [3, 1, 2, 5, 4], rankingCutoff: 3 },
+  check: ({ rankingGrades, rankingOrderA, rankingOrderB, rankingCutoff }) => {
+    const ids = new Set(rankingGrades.map(([id]) => id));
+    return ids.size === rankingGrades.length && rankingCutoff <= ids.size && [rankingOrderA, rankingOrderB]
+      .every((order) => order.length === ids.size && new Set(order).size === ids.size && order.every((id) => ids.has(id)));
+  },
+  columns: ["名次", "A 编号 / 相关分", "A 累计增益", "B 编号 / 相关分", "B 累计增益", "理想累计增益"],
+  metricLabels: { rankingRecallA: "A 召回率", rankingRecallB: "B 召回率", rankingNdcgA: "A NDCG",
+    rankingNdcgB: "B NDCG", rankingRelevant: "全部相关项数" },
+  focusMetric: "rankingRecallB", alternateTrial: "只把截断位置改到前 2 项。",
+  run({ rankingGrades, rankingOrderA, rankingOrderB, rankingCutoff }) {
+    const relevance = new Map(rankingGrades.map(([id, grade]) => [id, grade]));
+    const ideal = [...relevance.values()].sort((a, b) => b - a);
+    const positives = ideal.filter((grade) => grade > 0).length;
+    const gain = (grade: number, rank: number) => (2 ** grade - 1) / Math.log2(rank + 1);
+    let aGain = 0;
+    let bGain = 0;
+    let idealGain = 0;
+    let aHits = 0;
+    let bHits = 0;
+    const steps = Array.from({ length: rankingCutoff }, (_, i) => {
+      const aId = rankingOrderA[i];
+      const bId = rankingOrderB[i];
+      const a = relevance.get(aId)!;
+      const b = relevance.get(bId)!;
+      aHits += Number(a > 0);
+      bHits += Number(b > 0);
+      aGain += gain(a, i + 1);
+      bGain += gain(b, i + 1);
+      idealGain += gain(ideal[i], i + 1);
+      return [i + 1, `${aId} / ${a}`, decimal(aGain), `${bId} / ${b}`, decimal(bGain), decimal(idealGain)] as const;
+    });
+    const aScore = idealGain ? decimal(aGain / idealGain) : "无定义";
+    const bScore = idealGain ? decimal(bGain / idealGain) : "无定义";
+    return { steps, metrics: { rankingRecallA: percent(aHits, positives), rankingRecallB: percent(bHits, positives),
+      rankingNdcgA: aScore, rankingNdcgB: bScore, rankingRelevant: positives }, report: {
+      conclusion: `A 命中 ${aHits} 项。B 命中 ${bHits} 项。NDCG 为 ${aScore} 与 ${bScore}。`,
+      detail: `共有 ${ideal.length} 项。相关的有 ${positives} 项。只比较前 ${rankingCutoff} 位。召回率为 ${percent(aHits, positives)} 和 ${percent(bHits, positives)}。回放逐名次累计增益。`,
+      explanation: "召回看找回了多少相关项。NDCG 也看相关程度。靠后位置增益会折损。结果除以理想顺序的增益。没有相关项时两指标无定义。",
+      suggestion: "只缩小截断位置。看召回怎么变。再把最高分项向后挪。",
+    } };
+  },
+});
+
+export const imputationLeakageLab = defineCurriculumLab({
+  id: "imputation-leakage", domain: "ai", title: "均值填补与数据泄漏",
+  description: "改拟合范围。对照验证分数。",
+  comparison: "仅训练集拟合 / 混入验证特征",
+  topics: ["pipeline-imputation-leakage"],
+  input: {
+    imputationTrainRows: { kind: "rows", columns: [[-30, 30], [0, 1], [-30, 30]], minItems: 2, maxItems: 14, label: "训练样本",
+      hint: "每行填特征、缺失标记、目标值。缺失标记 1 时忽略特征列。" },
+    imputationValidRows: { kind: "rows", columns: [[-30, 30], [0, 1], [-30, 30]], minItems: 1, maxItems: 14, label: "验证样本",
+      hint: "列顺序同训练集。至少对应 1 个目标值。" },
+  },
+  defaults: { goalLabel: "检查混入验证特征会不会改动评分", imputationTrainRows: [[0, 0, 0], [4, 0, 4]],
+    imputationValidRows: [[10, 0, 4], [0, 1, 4]] },
+  check: ({ imputationTrainRows }) => imputationTrainRows.some(([, missing]) => missing === 0),
+  columns: ["验证行", "是否缺失", "目标值", "仅训练填补后的特征与预测", "混合填补后的特征与预测"],
+  metricLabels: { imputationTrainMean: "仅训练集填补均值", imputationMixedMean: "混合填补均值", imputationTrainMse: "仅训练拟合的验证误差",
+    imputationMixedMse: "混合拟合的验证误差", imputationChangedPredictions: "预测不同的验证行数" },
+  focusMetric: "imputationMixedMse", alternateTrial: "把验证首行的特征 10 改成 2。",
+  run({ imputationTrainRows, imputationValidRows }) {
+    const evaluate = (fitRows: number[][]) => {
+      const observed = fitRows.filter(([, missing]) => !missing);
+      const mean = observed.reduce((sum, [feature]) => sum + feature, 0) / observed.length;
+      const fill = ([feature, missing]: number[]) => missing ? mean : feature;
+      const train = imputationTrainRows.map((row) => ({ x: fill(row), y: row[2] }));
+      const predictions = imputationValidRows.map((row) => {
+        const x = fill(row);
+        const closest = train.reduce((best, candidate) => Math.abs(candidate.x - x) < Math.abs(best.x - x) ? candidate : best);
+        return { x, score: closest.y, error: (closest.y - row[2]) ** 2 };
+      });
+      return { mean: decimal(mean), predictions, mse: decimal(predictions.reduce((sum, row) => sum + row.error, 0) / predictions.length) };
+    };
+    const trainOnly = evaluate(imputationTrainRows);
+    const mixed = evaluate([...imputationTrainRows, ...imputationValidRows]);
+    const display = ({ x, score, error }: typeof trainOnly.predictions[number]) => `X=${decimal(x)} · 预测 ${score} · 平方误差 ${error}`;
+    const steps = imputationValidRows.map(([, missing, y], index) => [index + 1, missing ? "是" : "否", y,
+      display(trainOnly.predictions[index]), display(mixed.predictions[index])] as const);
+    const changed = trainOnly.predictions.filter(({ score }, index) => score !== mixed.predictions[index].score).length;
+    return { steps, metrics: { imputationTrainMean: trainOnly.mean, imputationMixedMean: mixed.mean, imputationTrainMse: trainOnly.mse,
+      imputationMixedMse: mixed.mse, imputationChangedPredictions: changed }, report: {
+      conclusion: `仅训练组验证误差 ${trainOnly.mse}。混合组误差 ${mixed.mse}。`,
+      detail: `训练 ${imputationTrainRows.length} 行。验证 ${imputationValidRows.length} 行。两组均值为 ${trainOnly.mean} 和 ${mixed.mean}。有 ${changed} 行预测不同。误差用平均平方值。`,
+      explanation: "先用可见特征拟合均值。再用均值填缺失。预测只找最近的训练行。距离相同选较早的行。混合组让验证特征参加拟合。分数因此可能变化。",
+      suggestion: "只改验证中一个已知特征。观察两组均值。再比较缺失行的预测。",
+    } };
+  },
+});
+
+export const earlyStoppingLab = defineCurriculumLab({
+  id: "early-stopping", domain: "ai", title: "早停与最佳验证检查点",
+  description: "边训练边评分。对照早停与跑满。",
+  comparison: "验证早停并恢复最佳 / 跑满保留末轮",
+  topics: ["early-stopping-best-checkpoint"],
+  input: {
+    stopTrainTargets: { kind: "list", min: -20, max: 20, minItems: 1, maxItems: 16, label: "训练目标值",
+      hint: "1–16 个整数。模型用同一个权重预测全部目标。" },
+    stopValidTargets: { kind: "list", min: -20, max: 20, minItems: 1, maxItems: 16, label: "验证目标值",
+      hint: "1–16 个整数。只用于验证评分。" },
+    stopRatePercent: { kind: "integer", min: 1, max: 50, label: "学习率百分数", hint: "填 1–50，表示 0.01–0.50。" },
+    stopMaxEpochs: { kind: "integer", min: 1, max: 24, label: "最多训练轮数", hint: "1–24 轮。" },
+    stopPatience: { kind: "integer", min: 1, max: 10, label: "耐心轮数", hint: "连续几轮无改善，就停止更新。" },
+  },
+  defaults: { goalLabel: "比较恢复最佳验证轮和保留末轮的误差", stopTrainTargets: [8, 12], stopValidTargets: [5, 5],
+    stopRatePercent: 25, stopMaxEpochs: 6, stopPatience: 2 },
+  columns: ["轮次", "权重", "训练误差", "验证误差", "早停组事件"],
+  metricLabels: { stopAtEpoch: "早停组结束轮", stopBestEpoch: "早停组最佳轮", stopBestMse: "恢复最佳后的验证误差",
+    stopFullMse: "跑满末轮验证误差", stopBestWeight: "恢复的权重", stopFullWeight: "跑满末轮权重" },
+  focusMetric: "stopAtEpoch", alternateTrial: "只把耐心轮数从 2 改为 1。",
+  run({ stopTrainTargets, stopValidTargets, stopRatePercent, stopMaxEpochs, stopPatience }) {
+    const mean = stopTrainTargets.reduce((sum, y) => sum + y, 0) / stopTrainTargets.length;
+    const loss = (ys: number[], weight: number) => ys.reduce((sum, y) => sum + (weight - y) ** 2, 0) / ys.length;
+    let weight = 0;
+    let best = { epoch: 0, weight, mse: loss(stopValidTargets, weight) };
+    let stale = 0;
+    let stoppedAt = 0;
+    let lastMse = best.mse;
+    const steps: [number, number, number, number, string][] = [[0, weight, decimal(loss(stopTrainTargets, weight)), decimal(best.mse), "保存初始权重"]];
+    for (let epoch = 1; epoch <= stopMaxEpochs; epoch++) {
+      weight -= 2 * (weight - mean) * stopRatePercent / 100;
+      lastMse = loss(stopValidTargets, weight);
+      let event = "早停组已结束";
+      if (!stoppedAt) {
+        if (lastMse < best.mse - 1e-12) {
+          best = { epoch, weight, mse: lastMse };
+          stale = 0;
+          event = "更新最佳检查点";
+        } else {
+          stale++;
+          event = `连续 ${stale} 轮未改善`;
+          if (stale >= stopPatience) {
+            stoppedAt = epoch;
+            event = `停止 · 恢复第 ${best.epoch} 轮`;
+          }
+        }
+        if (!stoppedAt && epoch === stopMaxEpochs) event += ` · 上限后恢复第 ${best.epoch} 轮`;
+      }
+      steps.push([epoch, decimal(weight), decimal(loss(stopTrainTargets, weight)), decimal(lastMse), event]);
+    }
+    const end = stoppedAt || stopMaxEpochs;
+    return { steps, metrics: { stopAtEpoch: end, stopBestEpoch: best.epoch, stopBestMse: decimal(best.mse),
+      stopFullMse: decimal(lastMse), stopBestWeight: decimal(best.weight), stopFullWeight: decimal(weight) }, report: {
+      conclusion: `早停组第 ${end} 轮结束。恢复第 ${best.epoch} 轮。验证误差 ${decimal(best.mse)}。`,
+      detail: `跑满组实际更新 ${stopMaxEpochs} 轮。它的末轮验证误差 ${decimal(lastMse)}。恢复组权重 ${decimal(best.weight)}。跑满组权重 ${decimal(weight)}。回放可查每轮两种误差。`,
+      explanation: "训练集决定梯度。验证集只给每轮打分。最好的一轮会保存。连续无改善达到耐心值就停。实验还继续跑完对照组。第 0 轮是初始权重。",
+      suggestion: "只改耐心轮数。比较何时停止、恢复哪轮。再让训练和验证目标接近。",
+    } };
+  },
+});
+
+export const silhouetteScoreLab = defineCurriculumLab({
+  id: "silhouette-score", domain: "ai", title: "聚类轮廓系数",
+  description: "逐点比较离本组和邻组的距离。",
+  topics: ["silhouette-cluster-score"],
+  input: {
+    silhouettePoints: { kind: "rows", columns: [[-40, 40], [-40, 40]], minItems: 3, maxItems: 18, label: "各点坐标",
+      hint: "每行填写 X、Y，范围 -40–40。" },
+    silhouetteLabels: { kind: "list", min: 0, max: 5, minItems: 3, maxItems: 18, label: "各点组号",
+      hint: "每点一个组号。至少两组，至少一组有两点。" },
+  },
+  defaults: { goalLabel: "找出改错分组后最不贴合的点", silhouettePoints: [[0, 0], [1, 0], [2, 0], [9, 0], [10, 0], [11, 0]],
+    silhouetteLabels: [0, 0, 0, 1, 1, 1] },
+  check: ({ silhouettePoints, silhouetteLabels }) => {
+    const groupCount = new Set(silhouetteLabels).size;
+    return silhouettePoints.length === silhouetteLabels.length && groupCount >= 2 && groupCount < silhouettePoints.length;
+  },
+  columns: ["点号", "组号", "组内平均距离", "最近的其他组", "邻组平均距离", "轮廓系数"],
+  metricLabels: { silhouetteMean: "平均轮廓系数", silhouetteNegative: "负分点数", silhouetteWorstPoint: "最低分点号",
+    silhouetteWorstScore: "最低轮廓系数", silhouetteSingletons: "单点组数量" },
+  focusMetric: "silhouetteNegative", alternateTrial: "只把第 3 个点移到 1 组。",
+  run({ silhouettePoints, silhouetteLabels }) {
+    const groups = new Map<number, number[]>();
+    silhouetteLabels.forEach((label, index) => {
+      const members = groups.get(label) ?? [];
+      members.push(index);
+      groups.set(label, members);
+    });
+    const scores: number[] = [];
+    let worst = 0;
+    let negative = 0;
+    const steps = silhouettePoints.map(([x, y], index) => {
+      const label = silhouetteLabels[index];
+      const distances = silhouettePoints.map(([otherX, otherY]) => Math.hypot(x - otherX, y - otherY));
+      const own = groups.get(label)!;
+      const a = own.length > 1 ? own.reduce((sum, id) => sum + distances[id], 0) / (own.length - 1) : 0;
+      let b = Infinity;
+      let neighbor = -1;
+      for (const [candidate, members] of groups) {
+        if (candidate === label) continue;
+        const mean = members.reduce((sum, id) => sum + distances[id], 0) / members.length;
+        if (mean < b || (mean === b && candidate < neighbor)) {
+          b = mean;
+          neighbor = candidate;
+        }
+      }
+      const score = own.length === 1 || Math.max(a, b) === 0 ? 0 : (b - a) / Math.max(a, b);
+      scores.push(score);
+      if (score < scores[worst]) worst = index;
+      if (score < 0) negative++;
+      return [index + 1, label, own.length > 1 ? decimal(a) : "单点组", neighbor, decimal(b), decimal(score)] as const;
+    });
+    const mean = decimal(scores.reduce((sum, score) => sum + score, 0) / scores.length);
+    const singletons = [...groups.values()].filter((members) => members.length === 1).length;
+    return { steps, metrics: { silhouetteMean: mean, silhouetteNegative: negative, silhouetteWorstPoint: worst + 1,
+      silhouetteWorstScore: decimal(scores[worst]), silhouetteSingletons: singletons }, report: {
+      conclusion: `平均轮廓系数 ${mean}。有 ${negative} 个点得负分。`,
+      detail: `本轮有 ${scores.length} 个点，分成 ${groups.size} 组。最低分是第 ${worst + 1} 点。它得 ${decimal(scores[worst])} 分。单点组有 ${singletons} 个。回放可查最近的其他组。`,
+      explanation: "本轮用直线距离。组内均距排除自己。组外取最近组的均距。组外均距减去组内均距。再除以两者较大值。单点组或两均距都为零时记 0。",
+      suggestion: "保持坐标，只改一个组号。找出变成负分的点。再试两组出现重合点。",
+    } };
+  },
+});
+
+export const probabilityCalibrationLab = defineCurriculumLab({
+  id: "probability-calibration", domain: "ai", title: "概率校准与 Brier 分数",
+  description: "同一真实标签。对照两组预测概率。",
+  comparison: "两组概率的准确率、分箱和 Brier",
+  topics: ["probability-calibration-bins", "brier-binary-probability-error"],
+  input: {
+    calibrationRows: { kind: "rows", columns: [[0, 100], [0, 100], [0, 1]], minItems: 1, maxItems: 24, label: "A 概率、B 概率、标签",
+      hint: "概率填 0–100 的整数。标签填 0 或 1。" },
+    calibrationBins: { kind: "integer", min: 2, max: 10, label: "等宽箱数", hint: "将 0–100% 等宽分成 2–10 组。" },
+  },
+  defaults: { goalLabel: "比较相同准确率下的概率误差", calibrationRows: [[90, 60, 1], [90, 60, 0], [10, 40, 1], [10, 40, 0]], calibrationBins: 2 },
+  columns: ["模型", "概率区间", "样本数", "平均预测", "正例比例", "绝对差（百分点）"],
+  metricLabels: { calibrationAccuracyA: "A 分类准确率", calibrationAccuracyB: "B 分类准确率", calibrationBrierA: "A Brier 分数",
+    calibrationBrierB: "B Brier 分数", calibrationGapA: "A 分箱误差（百分点）", calibrationGapB: "B 分箱误差（百分点）" },
+  focusMetric: "calibrationGapB", alternateTrial: "只把箱数从 2 改为 3。",
+  run({ calibrationRows, calibrationBins }) {
+    const count = calibrationRows.length;
+    const evaluate = (model: "A" | "B", column: number) => {
+      const bins = Array.from({ length: calibrationBins }, () => ({ count: 0, total: 0, positives: 0 }));
+      let squared = 0;
+      let correct = 0;
+      for (const row of calibrationRows) {
+        const forecast = row[column];
+        const actual = row[2];
+        const bin = bins[Math.min(calibrationBins - 1, Math.floor(forecast * calibrationBins / 100))];
+        bin.count++;
+        bin.total += forecast;
+        bin.positives += actual;
+        squared += (forecast - 100 * actual) ** 2;
+        correct += Number(Number(forecast >= 50) === actual);
+      }
+      let weightedGap = 0;
+      const steps = bins.map(({ count: binSize, total, positives }, index) => {
+        const bucket = `[${decimal(100 * index / calibrationBins)}, ${decimal(100 * (index + 1) / calibrationBins)}${index === calibrationBins - 1 ? "]" : ")"}%`;
+        const gap = Math.abs(total - positives * 100);
+        weightedGap += gap;
+        return [model, bucket, binSize, binSize ? `${decimal(total / binSize)}%` : "—", binSize ? percent(positives, binSize) : "—",
+          binSize ? decimal(gap / binSize) : "—"] as const;
+      });
+      return { steps, accuracy: percent(correct, count), brier: decimal(squared / (count * 10_000)), gap: decimal(weightedGap / count) };
+    };
+    const a = evaluate("A", 0);
+    const b = evaluate("B", 1);
+    return { steps: [...a.steps, ...b.steps],
+      metrics: { calibrationAccuracyA: a.accuracy, calibrationAccuracyB: b.accuracy, calibrationBrierA: a.brier, calibrationBrierB: b.brier,
+        calibrationGapA: a.gap, calibrationGapB: b.gap }, report: {
+      conclusion: `A 的 Brier 为 ${a.brier}。B 为 ${b.brier}。${a.brier === b.brier ? "两组分数显示值相同。" :
+        `${a.brier < b.brier ? "A" : "B"} 的概率平方误差更低。`}`,
+      detail: `用了 ${count} 个相同标签。分类准确率各为 ${a.accuracy} 和 ${b.accuracy}。划分 ${calibrationBins} 个等宽箱。分箱误差各为 ${a.gap} 和 ${b.gap} 个百分点。空箱显示横杠。`,
+      explanation: "概率达 50% 就判正。Brier 逐样本算平方误差。分箱对比均值和正例率。各箱差值按样本数加权。空箱不计。只改分箱不改 Brier。",
+      suggestion: "先只改箱数。核对 Brier 是否相同。再改变概率，比较准确率和概率误差。",
+    } };
+  },
+});
+
 export const ridgeRegressionLab = defineCurriculumLab({
   id: "ridge-regression", domain: "ai", title: "岭回归与惩罚强度",
   description: "固定训练和留出点。观察惩罚的代价。",

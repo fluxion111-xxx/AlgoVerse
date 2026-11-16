@@ -1,4 +1,449 @@
-import { defineCurriculumLab } from "./curriculumLab";
+import { defineCurriculumLab, sequenceText } from "./curriculumLab";
+
+export const tcpHandshakeLab = defineCurriculumLab({
+  id: "tcp-handshake", domain: "networks", title: "TCP 握手与初始序号",
+  description: "跟踪 SYN、确认号和丢包重试。",
+  topics: ["tcp-three-way-sequence"],
+  input: {
+    handshakeClientIsn: { kind: "integer", min: 0, max: 4294967295, label: "客户端初始序号", hint: "填 32 位无符号序号。" },
+    handshakeServerIsn: { kind: "integer", min: 0, max: 4294967295, label: "服务端初始序号", hint: "填 32 位无符号序号。" },
+    handshakeDrop: { kind: "integer", min: 0, max: 3, label: "丢弃哪步首发", hint: "0 不丢；1 SYN；2 SYN-ACK；3 最后 ACK。重试可达。" },
+  },
+  defaults: { goalLabel: "核对第三次确认丢失时两端状态", handshakeClientIsn: 100, handshakeServerIsn: 900, handshakeDrop: 3 },
+  columns: ["报文", "序号", "确认号", "传输", "客户端状态", "服务端状态"],
+  metricLabels: { handshakeTransmissions: "握手发送报文数", handshakeRetries: "重发报文数", handshakeFinalAck: "最终发往服务端的确认号",
+    handshakeClientNext: "客户端下一序号", handshakeBothEstablished: "两端均已建立" },
+  focusMetric: "handshakeTransmissions", alternateTrial: "把丢弃步骤改为 0。",
+  run({ handshakeClientIsn, handshakeServerIsn, handshakeDrop }) {
+    const clientNext = (handshakeClientIsn + 1) % 2 ** 32;
+    const serverNext = (handshakeServerIsn + 1) % 2 ** 32;
+    let client = "SYN-SENT";
+    let server = "LISTEN";
+    let retries = 0;
+    const steps: [string, number, number | string, string, string, string][] = [];
+    const send = (stage: number, retry = false) => {
+      const lost = !retry && stage === handshakeDrop;
+      if (retry) retries++;
+      if (!lost) {
+        if (stage === 1) server = "SYN-RECEIVED";
+        if (stage === 2) client = "ESTABLISHED";
+        if (stage === 3) server = "ESTABLISHED";
+      }
+      const messages = ["SYN →", "← SYN-ACK", "ACK →"];
+      const seq = [handshakeClientIsn, handshakeServerIsn, clientNext];
+      const ack = ["—", clientNext, serverNext];
+      steps.push([messages[stage - 1], seq[stage - 1], ack[stage - 1], lost ? "丢失" : retry ? "重发并送达" : "送达", client, server]);
+    };
+    for (const stage of [1, 2, 3]) {
+      send(stage);
+      if (handshakeDrop !== stage) continue;
+      if (stage === 3) send(2, true);
+      send(stage, true);
+    }
+    return { steps, metrics: { handshakeTransmissions: steps.length, handshakeRetries: retries, handshakeFinalAck: serverNext,
+      handshakeClientNext: clientNext, handshakeBothEstablished: client === server && server === "ESTABLISHED" ? "是" : "否" }, report: {
+      conclusion: `两端完成握手。共发送 ${steps.length} 个报文。`,
+      detail: `客户端初始序号 ${handshakeClientIsn}。服务端初始序号 ${handshakeServerIsn}。共重发 ${retries} 次。最后确认号为 ${serverNext}。回放可核对各端何时就绪。`,
+      explanation: "SYN 占一个序号。纯 ACK 不占额外序号。最后 ACK 丢失时一端还在等。模型让服务端再送 SYN-ACK。客户端再确认，双方才就绪。",
+      suggestion: "关闭丢包，对比报文数。再把一个初始序号改为 32 位最大值。",
+    } };
+  },
+});
+
+export const tcpSackLab = defineCurriculumLab({
+  id: "tcp-sack", domain: "networks", title: "TCP 累计确认与 SACK",
+  description: "尝试乱序到达。查看确认号和缺口。",
+  topics: ["tcp-sack-out-of-order-blocks", "tcp-trace-gap-dupacks-sack"],
+  input: {
+    sackInitialAck: { kind: "integer", min: 0, max: 999, label: "起始确认号", hint: "第一个期待的字节序号。" },
+    sackArrivals: { kind: "rows", columns: [[0, 999], [1, 120]], minItems: 1, maxItems: 18, label: "到达段起点与长度",
+      hint: "按到达顺序填写。允许重叠或重复。" },
+  },
+  defaults: { goalLabel: "观察缺口补齐前的累计确认和乱序块", sackInitialAck: 100, sackArrivals: [[100, 20], [140, 20], [160, 20], [120, 20]] },
+  columns: ["到达段", "旧 ACK", "新 ACK", "SACK 区间", "判定"],
+  metricLabels: { tcpSackFinalAck: "最终累计确认号", tcpSackStalls: "确认号未推进次数", tcpSackMaxBlocks: "SACK 区间峰值",
+    tcpSackRemaining: "最终仍缓存区间数" },
+  focusMetric: "tcpSackStalls", alternateTrial: "按序到达，120 段放到第二步。",
+  run({ sackInitialAck, sackArrivals }) {
+    let ack = sackInitialAck;
+    let blocks: number[][] = [];
+    let stalled = 0;
+    let peak = 0;
+    const steps = sackArrivals.map(([start, length]) => {
+      const old = ack;
+      const end = start + length;
+      if (end > ack) blocks.push([Math.max(start, ack), end]);
+      blocks.sort((a, b) => a[0] - b[0]);
+      const merged: number[][] = [];
+      for (const block of blocks) {
+        const last = merged.at(-1);
+        if (last && block[0] <= last[1]) last[1] = Math.max(last[1], block[1]);
+        else merged.push(block);
+      }
+      if (merged[0]?.[0] === ack) ack = merged.shift()![1];
+      blocks = merged;
+      peak = Math.max(peak, blocks.length);
+      stalled += Number(ack === old);
+      return [`[${start}, ${end})`, old, ack, blocks.map(([from, to]) => `[${from}, ${to})`).join(" ") || "空",
+        ack === old ? "ACK 停留" : `推进 ${ack - old} 字节`] as const;
+    });
+    return { steps, metrics: { tcpSackFinalAck: ack, tcpSackStalls: stalled, tcpSackMaxBlocks: peak, tcpSackRemaining: blocks.length }, report: {
+      conclusion: `最终 ACK 为 ${ack}。有 ${stalled} 次到达未推进 ACK。`,
+      detail: `起始 ACK 为 ${sackInitialAck}。收到 ${steps.length} 个段。连续推进 ${ack - sackInitialAck} 字节。乱序区间最多 ${peak} 个。结束仍缓存 ${blocks.length} 个。`,
+      explanation: "ACK 指向下个期待字节。缺口后的段可先缓存。相邻块或重叠块会合并。缺口补齐才推进 ACK。表中按序号展示所有缓存块。",
+      suggestion: "保持各段不变。只改到达次序。再追加一次重复到达。",
+    } };
+  },
+});
+
+export const hopLimitLab = defineCurriculumLab({
+  id: "hop-limit", domain: "networks", title: "IPv6 跳数限制与路由环",
+  description: "沿路由逐跳前进。查看递减和丢包。",
+  topics: ["ipv6-hop-limit"],
+  input: {
+    hopNextRouters: { kind: "list", min: -1, max: 8, minItems: 1, maxItems: 8, label: "每台路由器的下一跳",
+      hint: "从 0 编号。长度 N 代表目的端编号。-1 代表无路由。" },
+    hopStartLimit: { kind: "integer", min: 1, max: 32, label: "起始 Hop Limit", hint: "从路由器 0 进入，起始 1–32。" },
+  },
+  defaults: { goalLabel: "对照环路停下和正常到达的路径", hopNextRouters: [1, 2, 1], hopStartLimit: 5 },
+  check: ({ hopNextRouters }) => hopNextRouters.every((next) => next <= hopNextRouters.length),
+  columns: ["路由器", "入站限制", "下一跳", "剩余限制", "动作"],
+  metricLabels: { hopOutcome: "转发结果", hopForwards: "成功转发次数", hopRemaining: "结束剩余限制",
+    hopRevisits: "重复经过路由器次数" },
+  focusMetric: "hopOutcome", alternateTrial: "把路由器 2 的下一跳改成 3。",
+  run({ hopNextRouters, hopStartLimit }) {
+    const seen = new Set<number>();
+    const steps: [number, number, number | string, number, string][] = [];
+    let router = 0;
+    let limit = hopStartLimit;
+    let visits = 0;
+    let forwards = 0;
+    let outcome = "送达";
+    while (router < hopNextRouters.length) {
+      visits += Number(seen.has(router));
+      seen.add(router);
+      const next = hopNextRouters[router];
+      const inbound = limit;
+      if (next === -1) {
+        outcome = "无路由";
+        steps.push([router, inbound, "—", limit, outcome]);
+        break;
+      }
+      limit--;
+      if (!limit) {
+        outcome = "跳数用尽";
+        steps.push([router, inbound, next, limit, outcome]);
+        break;
+      }
+      forwards++;
+      steps.push([router, inbound, next, limit, next === hopNextRouters.length ? "转发并送达" : "转发"]);
+      router = next;
+    }
+    return { steps, metrics: { hopOutcome: outcome, hopForwards: forwards, hopRemaining: limit, hopRevisits: visits }, report: {
+      conclusion: `本轮结果是${outcome}。成功转发 ${forwards} 次。`,
+      detail: `起始限制为 ${hopStartLimit}。最后剩 ${limit}。重复经过路由器 ${visits} 次。目的端编号是 ${hopNextRouters.length}。回放列出整个转发序列。`,
+      explanation: "模型每次转发前减一。减到零就在该路由器丢弃。进入目的端无需再转发。环路会反复消耗限制。无路由会直接停止。",
+      suggestion: "只改环中一处下一跳。核对是否到达。再缩短正常路径的限制。",
+    } };
+  },
+});
+
+export const dnsReferralLab = defineCurriculumLab({
+  id: "dns-referral", domain: "networks", title: "DNS 递归解析与转介",
+  description: "查根、顶级域和权威服务器。",
+  comparison: "每次冷查 / 复用转介缓存",
+  topics: ["dns-recursive-iterative"],
+  input: {
+    referralQueries: { kind: "rows", columns: [[1, 9], [1, 9]], minItems: 1, maxItems: 16, label: "区号与主机号", hint: "每行一次。区号和主机号各为 1–9。" },
+    referralRecords: { kind: "rows", columns: [[1, 9], [1, 9]], minItems: 0, maxItems: 20, label: "已登记的主机", hint: "同查询格式。不在表中时返回不存在。" },
+  },
+  defaults: { goalLabel: "复用父区转介后核对查询量", referralQueries: [[1, 1], [1, 2], [2, 1], [1, 1]], referralRecords: [[1, 1], [2, 1]] },
+  columns: ["请求", "冷查路径", "复用路径", "复用少查次数", "权威结果"],
+  metricLabels: { referralColdLookups: "冷查总上游请求", referralCachedLookups: "复用总上游请求",
+    referralTldAsks: "复用组顶级域请求", referralFound: "查询成功次数" },
+  focusMetric: "referralCachedLookups", alternateTrial: "让四个请求都查询不同的区。",
+  run({ referralQueries, referralRecords }) {
+    const stored = new Set(referralRecords.map(([zone, name]) => `${name}.${zone}`));
+    const zones = new Set<number>();
+    let root = false;
+    let cachedLookups = 0;
+    let found = 0;
+    const steps = referralQueries.map(([zone, name]) => {
+      const route = [...(root ? [] : ["根"]), ...(zones.has(zone) ? [] : ["顶级域"]), `区 ${zone} 权威`];
+      root = true;
+      zones.add(zone);
+      cachedLookups += route.length;
+      const exists = stored.has(`${name}.${zone}`);
+      found += Number(exists);
+      return [`${name}.${zone}.test`, `根 → 顶级域 → 区 ${zone} 权威`, route.join(" → "), 3 - route.length, exists ? "有记录" : "NXDOMAIN"] as const;
+    });
+    return { steps, metrics: { referralColdLookups: steps.length * 3, referralCachedLookups: cachedLookups,
+      referralTldAsks: zones.size, referralFound: found }, report: {
+      conclusion: `冷查请求 ${steps.length * 3} 次。复用转介请求 ${cachedLookups} 次。`,
+      detail: `共解析 ${steps.length} 次。有记录 ${found} 次。经过 ${zones.size} 个权威区。复用组根只问一次。顶级域按新区域发问。`,
+      explanation: "客户端把递归请求交给解析器。解析器沿转介逐级询问。根和顶级域给下一站。权威才给最后答案。模型只缓存转介，且本轮不过期。",
+      suggestion: "只把请求换成不同区域。核对有多少顶级域查询。再让域名重复出现。",
+    } };
+  },
+});
+
+function bridgeNeighbors(count: number, links: number[][]) {
+  const neighbors = Array.from({ length: count }, () => [] as number[]);
+  for (const [left, right] of links) {
+    neighbors[left].push(right);
+    neighbors[right].push(left);
+  }
+  return neighbors;
+}
+
+function bridgeDepths(neighbors: number[][], root: number) {
+  const depths = neighbors.map(() => -1);
+  depths[root] = 0;
+  const queue = [root];
+  for (let index = 0; index < queue.length; index++) {
+    const current = queue[index];
+    for (const other of neighbors[current]) {
+      if (depths[other] >= 0) continue;
+      depths[other] = depths[current] + 1;
+      queue.push(other);
+    }
+  }
+  return depths;
+}
+
+export const spanningBridgeLab = defineCurriculumLab({
+  id: "spanning-bridge", domain: "networks", title: "二层环路与生成树",
+  description: "同一张拓扑。对照有无环路的广播。",
+  comparison: "全链路转发 / 生成树转发",
+  topics: ["stp-block-redundant-path"],
+  input: {
+    bridgeCount: { kind: "integer", min: 2, max: 8, label: "交换机数量", hint: "2–8 台，从 0 编号。" },
+    bridgeRoot: { kind: "integer", min: 0, max: 7, label: "指定根桥", hint: "填写实际存在的交换机。" },
+    bridgeSource: { kind: "integer", min: 0, max: 7, label: "广播起点", hint: "填写实际存在的交换机。" },
+    bridgeLinks: { kind: "rows", columns: [[0, 7], [0, 7]], minItems: 1, maxItems: 16, label: "双向连线",
+      hint: "每行填两个端点。不重复、不自连，整网连通。" },
+    bridgeHopBudget: { kind: "integer", min: 2, max: 10, label: "观察跳数", hint: "2–10 跳。只限制实验长度。" },
+  },
+  defaults: { goalLabel: "比较组环和阻断多余链路后的广播数", bridgeCount: 3, bridgeRoot: 0, bridgeSource: 0,
+    bridgeLinks: [[0, 1], [1, 2], [0, 2]], bridgeHopBudget: 5 },
+  check: ({ bridgeCount, bridgeRoot, bridgeSource, bridgeLinks }) =>
+    bridgeRoot < bridgeCount && bridgeSource < bridgeCount &&
+    bridgeLinks.every(([a, b]) => a < bridgeCount && b < bridgeCount && a !== b) &&
+    new Set(bridgeLinks.map(([a, b]) => `${Math.min(a, b)}-${Math.max(a, b)}`)).size === bridgeLinks.length &&
+    bridgeDepths(bridgeNeighbors(bridgeCount, bridgeLinks), bridgeRoot).every((depth) => depth >= 0),
+  columns: ["阶段", "全链路帧数", "全链路到达交换机", "生成树帧数", "生成树到达交换机"],
+  metricLabels: { bridgeBlocked: "阻断链路数", bridgePlainFrames: "全链路累计帧数", bridgeTreeFrames: "生成树累计帧数",
+    bridgePlainExtra: "全链路重复或返源帧数", bridgeTreeReached: "生成树覆盖的其他交换机" },
+  focusMetric: "bridgePlainExtra", alternateTrial: "删掉 0 与 2 的直连。保留其余连线。",
+  run({ bridgeCount, bridgeRoot, bridgeSource, bridgeLinks, bridgeHopBudget }) {
+    const all = bridgeNeighbors(bridgeCount, bridgeLinks);
+    const depths = bridgeDepths(all, bridgeRoot);
+    const parents = depths.map((depth, node) => depth === 0 ? -1 : Math.min(...all[node].filter((other) => depths[other] === depth - 1)));
+    const selected = bridgeLinks.filter(([a, b]) => parents[a] === b || parents[b] === a);
+    const blocked = bridgeLinks.filter(([a, b]) => parents[a] !== b && parents[b] !== a);
+    const simulate = (neighbors: number[][]) => {
+      let frontier = new Map(neighbors[bridgeSource].map((to) => [bridgeSource * bridgeCount + to, 1]));
+      let total = 0;
+      const reached = new Set<number>();
+      const frames = Array.from({ length: bridgeHopBudget }, () => {
+        const next = new Map<number, number>();
+        const arrivals = new Set<number>();
+        let count = 0;
+        for (const [edge, copies] of frontier) {
+          const from = Math.floor(edge / bridgeCount);
+          const to = edge % bridgeCount;
+          count += copies;
+          arrivals.add(to);
+          if (to !== bridgeSource) reached.add(to);
+          for (const destination of neighbors[to]) {
+            if (destination === from) continue;
+            const out = to * bridgeCount + destination;
+            next.set(out, (next.get(out) ?? 0) + copies);
+          }
+        }
+        frontier = next;
+        total += count;
+        return [count, sequenceText([...arrivals].sort((a, b) => a - b))] as const;
+      });
+      return { total, reached, frames };
+    };
+    const plain = simulate(all);
+    const tree = simulate(bridgeNeighbors(bridgeCount, selected));
+    return { steps: plain.frames.map((row, index) => [`第 ${index + 1} 跳`, ...row, ...tree.frames[index]] as const),
+      metrics: { bridgeBlocked: blocked.length, bridgePlainFrames: plain.total, bridgeTreeFrames: tree.total,
+        bridgePlainExtra: plain.total - plain.reached.size, bridgeTreeReached: tree.reached.size }, report: {
+      conclusion: `全链路传 ${plain.total} 帧。生成树传 ${tree.total} 帧。已阻断 ${blocked.length} 条链路。`,
+      detail: `根桥为 ${bridgeRoot}。广播从 ${bridgeSource} 发起。观察到第 ${bridgeHopBudget} 跳。阻断连线为 ${blocked.map(([a, b]) => `${a}–${b}`).join("、") || "无"}。生成树覆盖 ${tree.reached.size} 台其他交换机。`,
+      explanation: "模型使用等成本链路。每台桥选更近根的一条边。平局选较小编号。广播会避开来口。环路仍可把帧送回。观察跳数只限制回放。",
+      suggestion: "只去掉一条环上的边。比较重复帧。再改根桥，观察保留的连线。",
+    } };
+  },
+});
+
+export const ipv6PmtuLab = defineCurriculumLab({
+  id: "ipv6-path-mtu", domain: "networks", title: "IPv6 路径 MTU 与大包卡住",
+  description: "追踪超长包。对照收到和收不到反馈。",
+  comparison: "收到 Packet Too Big / 反馈被过滤",
+  topics: ["ipv6-packet-too-big", "pmtu-size-dependent-stall"],
+  input: {
+    pmtuLinkSizes: { kind: "list", min: 1280, max: 3600, minItems: 1, maxItems: 8, label: "各链路 MTU",
+      hint: "按经过顺序填 1280–3600 字节。" },
+    pmtuStartingSize: { kind: "integer", min: 1280, max: 3600, label: "发送端初始上限", hint: "1280–3600 字节，含头部。" },
+    pmtuPayloadBytes: { kind: "integer", min: 1, max: 6000, label: "待送应用数据", hint: "1–6000 字节，不含头部。" },
+  },
+  defaults: { goalLabel: "查反馈丢失如何让流量卡在超长包", pmtuLinkSizes: [1500, 1280, 1600],
+    pmtuStartingSize: 1500, pmtuPayloadBytes: 3000 },
+  columns: ["尝试号", "收到反馈时", "累计送达字节", "反馈过滤时", "累计送达字节"],
+  metricLabels: { pmtuActualLimit: "路径最小 MTU", pmtuFeedbackBytes: "收到反馈送达字节", pmtuFilteredBytes: "反馈过滤送达字节",
+    pmtuFeedbackDrops: "收到反馈组超长次数", pmtuFilteredDrops: "过滤组超长次数", pmtuLearnedLimit: "收到反馈组最终上限" },
+  focusMetric: "pmtuFilteredBytes", alternateTrial: "只把发送端初始上限改为 1280。",
+  run({ pmtuLinkSizes, pmtuStartingSize, pmtuPayloadBytes }) {
+    const header = 60;
+    const simulate = (deliverFeedback: boolean) => {
+      let sent = 0;
+      let drops = 0;
+      let limit = pmtuStartingSize;
+      const frames: [string, number][] = [];
+      while (sent < pmtuPayloadBytes) {
+        const bytes = Math.min(limit - header, pmtuPayloadBytes - sent);
+        const size = bytes + header;
+        const failedAt = pmtuLinkSizes.findIndex((mtu) => size > mtu);
+        if (failedAt < 0) {
+          sent += bytes;
+          frames.push([`${size} 字节 · 送达`, sent]);
+          continue;
+        }
+        drops++;
+        if (deliverFeedback) {
+          limit = pmtuLinkSizes[failedAt];
+          frames.push([`${size} 字节 · 链路 ${failedAt + 1} 丢弃 · 上限改为 ${limit}`, sent]);
+        } else {
+          frames.push([`${size} 字节 · 链路 ${failedAt + 1} 丢弃 · ${drops === 3 ? "停止尝试" : "未收到反馈"}`, sent]);
+          if (drops === 3) break;
+        }
+      }
+      return { sent, drops, limit, frames };
+    };
+    const received = simulate(true);
+    const filtered = simulate(false);
+    const min = Math.min(...pmtuLinkSizes);
+    const steps = Array.from({ length: Math.max(received.frames.length, filtered.frames.length) }, (_, index) =>
+      [index + 1, ...(received.frames[index] ?? ["结束", received.sent]), ...(filtered.frames[index] ?? ["结束", filtered.sent])] as const);
+    return { steps, metrics: { pmtuActualLimit: min, pmtuFeedbackBytes: received.sent, pmtuFilteredBytes: filtered.sent,
+      pmtuFeedbackDrops: received.drops, pmtuFilteredDrops: filtered.drops, pmtuLearnedLimit: received.limit }, report: {
+      conclusion: `收到反馈送达 ${received.sent} 字节。过滤反馈送达 ${filtered.sent} 字节。`,
+      detail: `待送 ${pmtuPayloadBytes} 字节。路径最小 MTU 是 ${min}。两组超长 ${received.drops} 和 ${filtered.drops} 次。收到反馈组最终上限为 ${received.limit}。回放给出首条拦截链路。`,
+      explanation: "模型给每包加 60 字节头。IPv6 路由器丢弃超长包。反馈报告该链路 MTU。源端改小后重试。过滤组用原大小，最多失败三次。",
+      suggestion: "只降低起始包上限。看过滤组能否送达。再加一条更窄链路。",
+    } };
+  },
+});
+
+export const ethernetLearningLab = defineCurriculumLab({
+  id: "ethernet-learning", domain: "networks", title: "交换机学习与 VLAN 转发",
+  description: "逐帧更新地址表。看帧发往哪些口。",
+  topics: ["ethernet-source-learning", "vlan-trunk-tag"],
+  input: {
+    switchVlans: { kind: "list", min: 1, max: 99, minItems: 2, maxItems: 8, label: "各接入口的 VLAN", hint: "2–8 个 VLAN 编号，从端口 0 起填。" },
+    switchFrames: { kind: "rows", columns: [[0, 7], [1, 99], [0, 99]], minItems: 1, maxItems: 20, label: "入站帧",
+      hint: "每行填入端口、源主机编号、目的主机编号。目的 0 表示广播。" },
+  },
+  defaults: { goalLabel: "验证未知目的泛洪和学习后的单播", switchVlans: [10, 10, 10, 20],
+    switchFrames: [[0, 1, 2], [1, 2, 1], [0, 1, 2], [2, 2, 1], [0, 1, 2], [3, 1, 2]] },
+  check: ({ switchVlans, switchFrames }) => switchFrames.every(([port]) => port < switchVlans.length),
+  columns: ["帧", "入端口与 VLAN", "学习结果", "转发判断", "出端口"],
+  metricLabels: { switchFloods: "泛洪决策数", switchUnicasts: "定向转发数", switchFiltered: "同口过滤数", switchCopies: "出端口帧数",
+    switchMoves: "地址迁移次数", switchEntries: "最终地址表项" },
+  focusMetric: "switchFloods", alternateTrial: "只把端口 1 的 VLAN 改为 20。",
+  run({ switchVlans, switchFrames }) {
+    const learned = new Map<string, number>();
+    let floods = 0;
+    let unicasts = 0;
+    let filtered = 0;
+    let copies = 0;
+    let moved = 0;
+    const steps = switchFrames.map(([port, source, dest], index) => {
+      const vlan = switchVlans[port];
+      const key = `${vlan}/${source}`;
+      const previous = learned.get(key);
+      if (previous !== undefined && previous !== port) moved++;
+      learned.set(key, port);
+      const target = dest ? learned.get(`${vlan}/${dest}`) : undefined;
+      let outputs: number[];
+      let action: string;
+      if (target === undefined) {
+        floods++;
+        outputs = switchVlans.flatMap((group, id) => id !== port && group === vlan ? [id] : []);
+        action = dest ? "未知目的泛洪" : "广播泛洪";
+      } else if (target === port) {
+        filtered++;
+        outputs = [];
+        action = "同口过滤";
+      } else {
+        unicasts++;
+        outputs = [target];
+        action = "定向转发";
+      }
+      copies += outputs.length;
+      return [`#${index + 1} ${source}→${dest || "广播"}`, `${port} / ${vlan}`,
+        previous === undefined ? `新增 ${key}→${port}` : previous === port ? `保留 ${key}→${port}` : `端口 ${previous}→${port}`,
+        action, sequenceText(outputs)] as const;
+    });
+    return { steps, metrics: { switchFloods: floods, switchUnicasts: unicasts, switchFiltered: filtered, switchCopies: copies,
+      switchMoves: moved, switchEntries: learned.size }, report: {
+      conclusion: `定向转发 ${unicasts} 帧。泛洪决策 ${floods} 次。发出 ${copies} 份帧。`,
+      detail: `输入 ${steps.length} 帧。交换机有 ${switchVlans.length} 个接入口。同口过滤 ${filtered} 帧。学习表剩 ${learned.size} 项。地址迁移 ${moved} 次。泛洪时可能没有出端口。`,
+      explanation: "入站帧先登记源地址。VLAN 和地址组成表键。已知目的按表选出端口。泛洪只发给同组其他口。模型只含接入口。地址表在本轮内保留。",
+      suggestion: "只改一个端口的 VLAN。对比泛洪口。再让同一源换到同组其他口。",
+    } };
+  },
+});
+
+export const linkAggregationLab = defineCurriculumLab({
+  id: "link-aggregation", domain: "networks", title: "链路聚合与流哈希",
+  description: "同一批流，比较两种分链路方式。",
+  comparison: "逐帧轮询 / 按流取模",
+  topics: ["link-aggregation-flow-hash"],
+  input: {
+    aggregationMembers: { kind: "integer", min: 1, max: 8, label: "成员链路数", hint: "1–8 条，从 0 编号。" },
+    aggregationFlows: { kind: "rows", columns: [[0, 99], [1, 24]], minItems: 1, maxItems: 12, label: "流编号、帧数",
+      hint: "每行填不重复的流编号和帧数。各流按行顺序发完。" },
+  },
+  defaults: { goalLabel: "测同一流是否被拆到多条链路", aggregationMembers: 3, aggregationFlows: [[0, 6], [3, 4], [1, 2]] },
+  check: ({ aggregationFlows }) => new Set(aggregationFlows.map(([flow]) => flow)).size === aggregationFlows.length,
+  columns: ["流", "帧数", "轮询各成员帧数", "流哈希成员", "该成员累计帧数"],
+  metricLabels: { aggregationFrames: "总帧数", aggregationRoundRobinSplit: "轮询拆分流数", aggregationRoundRobinLoads: "轮询成员帧数",
+    aggregationHashLoads: "哈希成员帧数", aggregationHashGap: "哈希最大负载差", aggregationHashCollisions: "碰到已有流成员的流数" },
+  focusMetric: "aggregationHashGap", alternateTrial: "只把成员链路数改为 4。",
+  run({ aggregationMembers, aggregationFlows }) {
+    const hashLoad = Array<number>(aggregationMembers).fill(0);
+    const roundLoad = [...hashLoad];
+    let frames = 0;
+    let split = 0;
+    let collisions = 0;
+    const steps = aggregationFlows.map(([flow, count]) => {
+      const link = flow % aggregationMembers;
+      if (hashLoad[link]) collisions++;
+      hashLoad[link] += count;
+      const flowLoads = Array<number>(aggregationMembers).fill(0);
+      for (let i = 0; i < count; i++) {
+        const member = frames++ % aggregationMembers;
+        roundLoad[member]++;
+        flowLoads[member]++;
+      }
+      if (flowLoads.filter(Boolean).length > 1) split++;
+      return [flow, count, sequenceText(flowLoads), link, hashLoad[link]] as const;
+    });
+    const gap = Math.max(...hashLoad) - Math.min(...hashLoad);
+    return { steps, metrics: { aggregationFrames: frames, aggregationRoundRobinSplit: split, aggregationRoundRobinLoads: sequenceText(roundLoad),
+      aggregationHashLoads: sequenceText(hashLoad), aggregationHashGap: gap, aggregationHashCollisions: collisions }, report: {
+      conclusion: `轮询拆开 ${split} 条流。按流分配的负载差是 ${gap} 帧。`,
+      detail: `共 ${aggregationFlows.length} 条流，${frames} 帧。轮询各链路帧数为 ${sequenceText(roundLoad)}。按流为 ${sequenceText(hashLoad)}。有 ${collisions} 条流落到已有流的口。`,
+      explanation: "同一流固定在同一成员。模型用流号取余选口。几条大流可能分到一起。逐帧轮询较均匀。跨链路时到达顺序可能变化。本轮只统计分配。",
+      suggestion: "只增加一条成员链路。观察各成员帧数。再只改大流编号，检查碰撞。",
+    } };
+  },
+});
 
 export const tcpTimeoutLab = defineCurriculumLab({
   id: "tcp-timeout", domain: "networks", title: "TCP 超时与重传退避",

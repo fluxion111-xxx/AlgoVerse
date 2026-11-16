@@ -1,5 +1,424 @@
 import { defineCurriculumLab, sequenceText } from "./curriculumLab";
 
+export const outerJoinFilterLab = defineCurriculumLab({
+  id: "outer-join-filter", domain: "databases", title: "左连接中的 ON 与 WHERE",
+  description: "只挪过滤条件。检查哪些左表行消失。",
+  comparison: "右表条件放 ON / 放 WHERE",
+  topics: ["outer-join-on-where-predicate", "sql-inner-left-join"],
+  input: {
+    outerJoinKeys: { kind: "list", min: 1, max: 30, minItems: 1, maxItems: 12, label: "左表主键", hint: "填不重复的整数。" },
+    outerJoinRight: { kind: "rows", columns: [[1, 30], [0, 1]], minItems: 0, maxItems: 20, label: "右表键与状态", hint: "每行填关联键和状态 0/1。允许一键多行。" },
+    outerJoinStatus: { kind: "integer", min: 0, max: 1, label: "要筛出的状态", hint: "比较右侧状态等于 0 或 1。" },
+  },
+  defaults: { goalLabel: "找出条件移到 WHERE 后失去的左表键", outerJoinKeys: [1, 2, 3], outerJoinRight: [[1, 0], [1, 1], [2, 0]], outerJoinStatus: 1 },
+  check: ({ outerJoinKeys }) => new Set(outerJoinKeys).size === outerJoinKeys.length,
+  columns: ["左表键", "等键的右状态", "ON 结果", "WHERE 结果", "去留原因"],
+  metricLabels: { outerJoinOnRows: "条件放 ON 的行数", outerJoinWhereRows: "条件放 WHERE 的行数",
+    outerJoinPadded: "ON 补 NULL 的行数", outerJoinLostKeys: "WHERE 消失的左键数" },
+  focusMetric: "outerJoinLostKeys", alternateTrial: "把要筛的状态从 1 改为 0。",
+  run({ outerJoinKeys, outerJoinRight, outerJoinStatus }) {
+    let onRows = 0;
+    let padded = 0;
+    let whereRows = 0;
+    const steps = outerJoinKeys.map((key) => {
+      const matches = outerJoinRight.filter(([right]) => key === right).map(([, status]) => status);
+      const qualified = matches.filter((status) => status === outerJoinStatus);
+      const on = qualified.length ? qualified : [null];
+      const joined = matches.length ? matches : [null];
+      const where = joined.filter((status) => status === outerJoinStatus);
+      padded += Number(on[0] === null);
+      onRows += on.length;
+      whereRows += where.length;
+      return [key, sequenceText(matches), on.map((value) => value ?? "NULL").join("、"), where.join("、") || "无行",
+        where.length ? "右侧状态符合" : "WHERE 过滤该键"] as const;
+    });
+    return { steps, metrics: { outerJoinOnRows: onRows, outerJoinWhereRows: whereRows, outerJoinPadded: padded, outerJoinLostKeys: padded }, report: {
+      conclusion: `ON 保留 ${onRows} 行。WHERE 保留 ${whereRows} 行，少了 ${padded} 个左键。`,
+      detail: `左表 ${outerJoinKeys.length} 行。右表 ${outerJoinRight.length} 行。筛选状态 ${outerJoinStatus}。ON 为 ${padded} 行补 NULL。回放可核对每个左键。`,
+      explanation: "ON 先决定哪些右行能匹配。没匹配仍保留左行。WHERE 晚于左连接。补出的 NULL 比较结果是未知。只留下为真的行。",
+      suggestion: "只换筛选状态。找出依然消失的键。再清空右表重测。",
+    } };
+  },
+});
+
+export const lsmCompactionLab = defineCurriculumLab({
+  id: "lsm-compaction", domain: "databases", title: "LSM 压实与删除标记",
+  description: "合并版本。查看旧记录会不会复活。",
+  comparison: "保留必要墓碑 / 提前丢弃墓碑",
+  topics: ["lsm-compaction-tombstones"],
+  input: {
+    compactBaseRows: { kind: "rows", columns: [[0, 30], [-99, 99]], minItems: 0, maxItems: 14, label: "下层键值", hint: "每行键和值。键不重复。" },
+    compactOperations: { kind: "rows", columns: [[0, 1], [0, 30], [-99, 99]], minItems: 1, maxItems: 18, label: "上层操作",
+      hint: "每行填类型、键、值。0 写入；1 删除，值填 0。按从旧到新输入。" },
+    compactIncludeBase: { kind: "integer", min: 0, max: 1, label: "是否合并全部下层", hint: "0 下层仍在；1 把下层纳入本次压实。" },
+  },
+  defaults: { goalLabel: "对照仍有旧版本时的删除语义", compactBaseRows: [[1, 10], [2, 20], [3, 30]],
+    compactOperations: [[1, 1, 0], [0, 2, 99], [0, 4, 40]], compactIncludeBase: 0 },
+  check: ({ compactBaseRows, compactOperations }) => new Set(compactBaseRows.map(([key]) => key)).size === compactBaseRows.length &&
+    compactOperations.every(([type, , value]) => type === 0 || value === 0),
+  columns: ["键", "下层", "最新操作", "安全读值", "提前丢标记后读值", "安全压实动作"],
+  metricLabels: { compactSafeVisible: "安全策略可见键数", compactUnsafeVisible: "丢墓碑策略可见键数",
+    compactResurrected: "错误复活键数", compactTombstones: "安全策略保留墓碑数" },
+  focusMetric: "compactResurrected", alternateTrial: "只开启合并全部下层。",
+  run({ compactBaseRows, compactOperations, compactIncludeBase }) {
+    const base = new Map(compactBaseRows.map(([key, value]) => [key, value]));
+    const top = new Map<number, number | null>();
+    for (const [type, key, value] of compactOperations) top.set(key, type ? null : value);
+    const keys = [...new Set([...base.keys(), ...top.keys()])].sort((a, b) => a - b);
+    let resurrected = 0;
+    let safeVisible = 0;
+    let unsafeVisible = 0;
+    let tombstones = 0;
+    const steps = keys.map((key) => {
+      const before = base.get(key);
+      const change = top.get(key);
+      const safe = change === undefined ? before : change ?? undefined;
+      const unsafe = change === null && !compactIncludeBase ? before : safe;
+      const preserve = change === null && !compactIncludeBase && before !== undefined;
+      tombstones += Number(preserve);
+      resurrected += Number(safe === undefined && unsafe !== undefined);
+      safeVisible += Number(safe !== undefined);
+      unsafeVisible += Number(unsafe !== undefined);
+      return [key, before ?? "无", change === null ? "删除" : change ?? "无修改", safe ?? "不存在", unsafe ?? "不存在",
+        change === null ? preserve ? "保留墓碑" : "清理删除标记" : change === undefined ? "保留下层值" : "保留最新值"] as const;
+    });
+    return { steps, metrics: { compactSafeVisible: safeVisible, compactUnsafeVisible: unsafeVisible,
+      compactResurrected: resurrected, compactTombstones: tombstones }, report: {
+      conclusion: `提前丢墓碑让 ${resurrected} 个键复活。安全组留 ${tombstones} 个墓碑。`,
+      detail: `下层有 ${base.size} 个键。上层做了 ${compactOperations.length} 次操作。安全组可见 ${safeVisible} 个键。对照组可见 ${unsafeVisible} 个。回放按键核对旧值。`,
+      explanation: "写入只看同键最新操作。墓碑挡住更旧的值。下层仍有旧值时要保留。全层压实可一起去掉旧值。模型只有两层，无活跃快照。",
+      suggestion: "只开启全层压实。核对复活计数。再追加同键写入，检查谁可见。",
+    } };
+  },
+});
+
+export const consistentRingLab = defineCurriculumLab({
+  id: "consistent-ring", domain: "databases", title: "一致性哈希与迁移",
+  description: "增加一个节点。逐键核对归属。",
+  comparison: "节点数取模 / 顺时针哈希环",
+  topics: ["consistent-hash-ring-remap"],
+  input: {
+    ringNodeSlots: { kind: "list", min: 0, max: 99, minItems: 2, maxItems: 8, label: "现有节点位置", hint: "在 0–99 的环上填不重复位置。取模组用输入顺序。" },
+    ringAddedSlot: { kind: "integer", min: 0, max: 99, label: "新增节点位置", hint: "不可与现有节点重合。" },
+    ringKeySlots: { kind: "list", min: 0, max: 99, minItems: 1, maxItems: 24, label: "各键哈希位置", hint: "每个位置代表一个键。多个键可同位置。" },
+  },
+  defaults: { goalLabel: "比较新增节点后两种分配方式的迁移数", ringNodeSlots: [20, 60, 90], ringAddedSlot: 40, ringKeySlots: [5, 20, 25, 40, 50, 60, 75, 90, 95] },
+  check: ({ ringNodeSlots, ringAddedSlot }) => new Set(ringNodeSlots).size === ringNodeSlots.length && !ringNodeSlots.includes(ringAddedSlot),
+  columns: ["键位置", "取模旧→新", "哈希环旧→新", "取模迁移", "哈希环迁移"],
+  metricLabels: { ringModuloMoved: "取模迁移数", ringConsistentMoved: "哈希环迁移数",
+    ringMovedToAdded: "哈希环迁到新节点数", ringKeyCount: "统计的键数" },
+  focusMetric: "ringConsistentMoved", alternateTrial: "把新增节点位置从 40 改为 80。",
+  run({ ringNodeSlots, ringAddedSlot, ringKeySlots }) {
+    const expanded = [...ringNodeSlots, ringAddedSlot];
+    const before = [...ringNodeSlots].sort((a, b) => a - b);
+    const after = [...expanded].sort((a, b) => a - b);
+    const owner = (nodes: number[], key: number) => nodes.find((node) => node >= key) ?? nodes[0];
+    let modulo = 0;
+    let ring = 0;
+    let adopted = 0;
+    const steps = ringKeySlots.map((key) => {
+      const oldModulo = ringNodeSlots[key % ringNodeSlots.length];
+      const newModulo = expanded[key % expanded.length];
+      const oldOwner = owner(before, key);
+      const newOwner = owner(after, key);
+      modulo += Number(oldModulo !== newModulo);
+      ring += Number(oldOwner !== newOwner);
+      adopted += Number(newOwner === ringAddedSlot);
+      return [key, `${oldModulo}→${newModulo}`, `${oldOwner}→${newOwner}`, oldModulo === newModulo ? "否" : "是",
+        oldOwner === newOwner ? "否" : "是"] as const;
+    });
+    return { steps, metrics: { ringModuloMoved: modulo, ringConsistentMoved: ring, ringMovedToAdded: adopted, ringKeyCount: steps.length }, report: {
+      conclusion: `取模迁移 ${modulo} 个键。哈希环迁移 ${ring} 个键。`,
+      detail: `节点从 ${before.length} 增至 ${after.length}。新增位置为 ${ringAddedSlot}。核对 ${steps.length} 个键。哈希环有 ${adopted} 个键迁往新节点。回放给出具体归属。`,
+      explanation: "环上顺时针找首个节点。超过末尾就回到开头。加节点只截走相邻区段。取模则改变全体的除数。模型每个节点只放一个位置。",
+      suggestion: "只改新节点位置。看迁移落在哪段。再试把新节点放到环的两端。",
+    } };
+  },
+});
+
+export const coveringIndexLab = defineCurriculumLab({
+  id: "covering-index", domain: "databases", title: "覆盖索引与回表读取",
+  description: "查同一范围。测哪些记录仍要回表。",
+  comparison: "普通索引 / 含所需列的覆盖索引",
+  topics: ["postgres-covering-index", "explain-index-only-heap-fetches"],
+  input: {
+    coveringRows: { kind: "rows", columns: [[0, 30], [0, 8], [-99, 99]], minItems: 1, maxItems: 18, label: "键、所在页和结果值", hint: "每行为一条索引记录。键可重复。" },
+    coveringVisiblePages: { kind: "list", min: 0, max: 8, minItems: 0, maxItems: 9, label: "全可见页号", hint: "填已在可见性映射中标记的页。" },
+    coveringMinimum: { kind: "integer", min: 0, max: 30, label: "键的查询下界", hint: "找大于等于此值的键。" },
+  },
+  defaults: { goalLabel: "对照索引含值后仍需访问堆的原因", coveringRows: [[2, 0, 20], [5, 0, 50], [7, 1, 70], [8, 2, 80]],
+    coveringVisiblePages: [0, 2], coveringMinimum: 5 },
+  columns: ["键", "页号", "是否全可见", "普通索引", "覆盖索引", "输出值"],
+  metricLabels: { coveringMatches: "命中的记录", coveringPlainFetches: "普通索引回表条数", coveringIndexFetches: "覆盖索引回表条数",
+    coveringSavedFetches: "少回表的记录数", coveringValues: "输出值序列" },
+  focusMetric: "coveringIndexFetches", alternateTrial: "把页 1 加入全可见页。",
+  run({ coveringRows, coveringVisiblePages, coveringMinimum }) {
+    const visible = new Set(coveringVisiblePages);
+    const matching = coveringRows.filter(([key]) => key >= coveringMinimum).sort((a, b) => a[0] - b[0]);
+    let heap = 0;
+    const steps = matching.map(([key, page, value]) => {
+      const skip = visible.has(page);
+      heap += Number(!skip);
+      return [key, page, skip ? "是" : "否", "回表取值", skip ? "直接从索引取" : "回表查可见", value] as const;
+    });
+    const saved = matching.length - heap;
+    const values = sequenceText(matching.map(([, , value]) => value));
+    return { steps: steps.length ? steps : [["无匹配", "—", "—", "—", "—", "—"]],
+      metrics: { coveringMatches: matching.length, coveringPlainFetches: matching.length, coveringIndexFetches: heap, coveringSavedFetches: saved,
+        coveringValues: values }, report: {
+      conclusion: `命中 ${matching.length} 条记录。覆盖索引仍回表 ${heap} 条。`,
+      detail: `下界为 ${coveringMinimum}。全可见页有 ${visible.size} 个。普通索引回表 ${matching.length} 条。覆盖索引少回表 ${saved} 条。两组输出值为 ${values}。`,
+      explanation: "普通索引不包含结果列。覆盖索引有值可取。页全可见时可跳过堆。否则仍要查版本。本轮按记录计访问，忽略缓存。",
+      suggestion: "只把一个页标成全可见。核对回表数和输出。再提高查询下界。",
+    } };
+  },
+});
+
+export const bufferPoolLab = defineCurriculumLab({
+  id: "buffer-pool", domain: "databases", title: "缓冲池的固定页与脏页",
+  description: "固定、修改、释放。看谁能被换出。",
+  topics: ["buffer-pool-pin-dirty", "buffer-pool-pages"],
+  input: {
+    bufferPageValues: { kind: "list", min: -99, max: 99, minItems: 1, maxItems: 8, label: "磁盘各页初值", hint: "填 1–8 个数。从第 0 页起。" },
+    bufferFrameLimit: { kind: "integer", min: 1, max: 6, label: "缓冲槽数", hint: "1–6 个槽。初始为空。" },
+    bufferPageOps: { kind: "rows", columns: [[0, 2], [0, 7], [-99, 99]], minItems: 1, maxItems: 24, label: "页操作",
+      hint: "每行填操作、页号、值。0 固定并读取、1 解固定、2 修改固定页。非修改的值填 0。" },
+  },
+  defaults: { goalLabel: "验证固定页阻塞和脏页换出前的写盘", bufferPageValues: [10, 20, 30], bufferFrameLimit: 2,
+    bufferPageOps: [[0, 0, 0], [2, 0, 99], [0, 1, 0], [0, 2, 0], [1, 0, 0], [0, 2, 0], [1, 1, 0], [0, 0, 0]] },
+  check: ({ bufferPageValues, bufferPageOps }) => bufferPageOps.every(([op, page, value]) =>
+    page < bufferPageValues.length && (op === 2 || value === 0)),
+  columns: ["动作", "页号", "结果", "缓冲槽状态", "磁盘各页"],
+  metricLabels: { bufferDiskReads: "磁盘读入次数", bufferDirtyWrites: "换出前写盘次数", bufferAllPinned: "全固定导致的失败",
+    bufferEvictions: "换出页数", bufferPendingDirty: "末尾未刷脏页数", bufferDiskResult: "磁盘页值" },
+  focusMetric: "bufferAllPinned", alternateTrial: "只把缓冲槽数改为 3。",
+  run({ bufferPageValues, bufferFrameLimit, bufferPageOps }) {
+    const disk = [...bufferPageValues];
+    const pool = new Map<number, { pins: number; value: number; dirty: boolean; last: number }>();
+    let reads = 0;
+    let writes = 0;
+    let blocked = 0;
+    let evictions = 0;
+    const snapshot = () => [...pool].map(([page, frame]) => `${page}:${frame.value} / 固定 ${frame.pins}${frame.dirty ? " / 脏" : ""}`).join(" · ") || "空";
+    const steps = bufferPageOps.map(([op, page, value], index) => {
+      let frame = pool.get(page);
+      let result: string;
+      if (op === 0) {
+        const hit = frame !== undefined;
+        let eviction = "";
+        if (!frame && pool.size === bufferFrameLimit) {
+          const victim = [...pool].filter(([, entry]) => entry.pins === 0).sort((a, b) => a[1].last - b[1].last)[0];
+          if (!victim) {
+            blocked++;
+            return ["固定并读取", page, "全部固定 · 无法装入", snapshot(), sequenceText(disk)] as const;
+          }
+          const [removedPage, removed] = victim;
+          if (removed.dirty) {
+            disk[removedPage] = removed.value;
+            writes++;
+          }
+          pool.delete(removedPage);
+          evictions++;
+          eviction = `${removed.dirty ? "先写盘再" : ""}换出 ${removedPage} · `;
+        }
+        if (!frame) {
+          frame = { pins: 0, value: disk[page], dirty: false, last: index };
+          pool.set(page, frame);
+          reads++;
+        }
+        frame.pins++;
+        frame.last = index;
+        result = `${eviction}${hit ? "命中" : "读盘"} · 值 ${frame.value}`;
+      } else if (!frame?.pins) {
+        result = "没有固定该页";
+      } else if (op === 1) {
+        frame.pins--;
+        result = `剩余固定 ${frame.pins} 次`;
+      } else {
+        frame.value = value;
+        frame.dirty = true;
+        frame.last = index;
+        result = `更新为 ${value} · 标脏`;
+      }
+      return [["固定并读取", "解固定", "修改"][op], page, result, snapshot(), sequenceText(disk)] as const;
+    });
+    const dirty = [...pool.values()].filter((frame) => frame.dirty).length;
+    return { steps, metrics: { bufferDiskReads: reads, bufferDirtyWrites: writes, bufferAllPinned: blocked,
+      bufferEvictions: evictions, bufferPendingDirty: dirty, bufferDiskResult: sequenceText(disk) }, report: {
+      conclusion: `全固定导致 ${blocked} 次失败。换出前写盘 ${writes} 次。`,
+      detail: `本轮有 ${bufferFrameLimit} 个槽。磁盘读入 ${reads} 次。共换出 ${evictions} 页。结束仍有 ${dirty} 个脏页。磁盘页值为 ${sequenceText(disk)}。`,
+      explanation: "固定数大于零就不能换出。只在可换页中找最久未读写的页。修改先留在缓冲池。换出脏页前须写盘。结束时不额外刷盘。",
+      suggestion: "只加一个缓冲槽。核对失败和写盘数。再把解固定提前，观察可换页。",
+    } };
+  },
+});
+
+export const mvccVersionsLab = defineCurriculumLab({
+  id: "mvcc-versions", domain: "databases", title: "MVCC 快照与版本回收",
+  description: "让两个快照并存。再比较读值和回收。",
+  comparison: "固定快照读取 / 当前已提交值",
+  topics: ["mvcc-row-versions"],
+  input: {
+    mvccSeedValue: { kind: "integer", min: -99, max: 99, label: "行的初始值", hint: "填写 -99–99 的整数，版本从 0 起。" },
+    mvccTrace: { kind: "rows", columns: [[0, 4], [-99, 99]], minItems: 1, maxItems: 24, label: "快照操作",
+      hint: "0 开快照、2 读取、3 关闭，第二列填会话 0–3。1 提交，第二列填新值。4 回收，第二列填 0。" },
+  },
+  defaults: { goalLabel: "查看旧快照如何留下历史行版本", mvccSeedValue: 10,
+    mvccTrace: [[0, 0], [1, 20], [0, 1], [1, 30], [2, 0], [2, 1], [4, 0], [3, 0], [4, 0], [3, 1], [4, 0]] },
+  check: ({ mvccTrace }) => mvccTrace.every(([op, arg]) => op === 1 || (op === 4 ? arg === 0 : arg >= 0 && arg <= 3)),
+  columns: ["动作", "结果", "活跃快照", "保留版本", "当前已提交值"],
+  metricLabels: { mvccHistoricalReads: "读取历史版本次数", mvccReclaimed: "回收版本数", mvccRetained: "结束保留版本数",
+    mvccLatestValue: "当前已提交值", mvccPeak: "版本链峰值长度" },
+  focusMetric: "mvccRetained", alternateTrial: "只删掉最后一个回收操作。",
+  run({ mvccSeedValue, mvccTrace }) {
+    let versions = [{ stamp: 0, value: mvccSeedValue }];
+    const sessions = new Map<number, number>();
+    let historical = 0;
+    let reclaimed = 0;
+    let peak = versions.length;
+    const visible = (stamp: number) => versions.findLast((row) => row.stamp <= stamp)!;
+    const steps = mvccTrace.map(([op, argument]) => {
+      const latest = versions.at(-1)!;
+      let result: string;
+      if (op === 0) {
+        result = "已有活跃快照";
+        if (!sessions.has(argument)) {
+          sessions.set(argument, latest.stamp);
+          result = `会话 ${argument} 固定在 v${latest.stamp}`;
+        }
+      } else if (op === 1) {
+        const stamp = latest.stamp + 1;
+        versions.push({ stamp, value: argument });
+        peak = Math.max(peak, versions.length);
+        result = `提交 v${stamp} · 值 ${argument}`;
+      } else if (op === 2) {
+        const stamp = sessions.get(argument);
+        result = `会话 ${argument} 未打开`;
+        if (stamp !== undefined) {
+          const row = visible(stamp);
+          historical += Number(row !== latest);
+          result = `会话 ${argument} 读 v${row.stamp} · 值 ${row.value}`;
+        }
+      } else if (op === 3) {
+        result = sessions.delete(argument) ? `会话 ${argument} 关闭` : `会话 ${argument} 未打开`;
+      } else {
+        const kept = new Set([latest, ...[...sessions.values()].map(visible)]);
+        const removed = versions.filter((row) => !kept.has(row));
+        versions = versions.filter((row) => kept.has(row));
+        reclaimed += removed.length;
+        result = removed.length ? `移走 ${removed.map(({ stamp }) => `v${stamp}`).join("、")}` : "无可回收版本";
+      }
+      return [["开快照", "提交", "快照读取", "关快照", "回收"][op], result,
+        [...sessions].map(([id, stamp]) => `${id}→v${stamp}`).join("、") || "空",
+        versions.map(({ stamp, value }) => `v${stamp}=${value}`).join("、"), versions.at(-1)!.value] as const;
+    });
+    const latest = versions.at(-1)!.value;
+    return { steps, metrics: { mvccHistoricalReads: historical, mvccReclaimed: reclaimed, mvccRetained: versions.length,
+      mvccLatestValue: latest, mvccPeak: peak }, report: {
+      conclusion: `历史版本被读 ${historical} 次。回收 ${reclaimed} 个版本。`,
+      detail: `版本链最多有 ${peak} 项。结束保留 ${versions.length} 项。仍打开 ${sessions.size} 个快照。最新值是 ${latest}。回放能查每个会话读到的版本。`,
+      explanation: "开快照时记住当前提交号。随后读取固定版本。提交会追加新版本。模型回收无人可见的旧版。最新版本始终保留。",
+      suggestion: "去掉最后一次回收。对照结束版本数。再把旧会话提前关闭。",
+    } };
+  },
+});
+
+export const notInNullLab = defineCurriculumLab({
+  id: "not-in-null", domain: "databases", title: "NOT IN 遇到 NULL",
+  description: "对照两种排除查询。查看哪些行留下。",
+  comparison: "NOT IN / 等值 NOT EXISTS",
+  topics: ["sql-not-in-null", "sql-exists"],
+  input: {
+    exclusionOuter: { kind: "text", maxLength: 240, label: "外表键值", hint: "1–24 个值。用逗号分隔整数或 NULL。" },
+    exclusionInner: { kind: "text", maxLength: 240, label: "内表键值", hint: "同外表。单独填 - 表示空表。" },
+  },
+  defaults: { goalLabel: "用同一批键核对空值对两种查询的影响", exclusionOuter: "1, 2, 3, 4", exclusionInner: "2, NULL" },
+  check: ({ exclusionOuter, exclusionInner }) => readNullableNumbers(exclusionOuter) !== null &&
+    (exclusionInner.trim() === "-" || readNullableNumbers(exclusionInner) !== null),
+  columns: ["外表行", "键", "等值匹配行数", "NOT IN", "NOT EXISTS"],
+  metricLabels: { notInKept: "NOT IN 保留行", notExistsKept: "NOT EXISTS 保留行", notInUnknown: "NOT IN 未知行",
+    exclusionDelta: "两种查询保留差", subqueryNullCount: "内表 NULL 行数" },
+  focusMetric: "notInKept", alternateTrial: "内表只保留 2。去掉 NULL。",
+  run({ exclusionOuter, exclusionInner }) {
+    const outer = readNullableNumbers(exclusionOuter)!;
+    const inner = exclusionInner.trim() === "-" ? [] : readNullableNumbers(exclusionInner)!;
+    const nulls = inner.filter((value) => value === null).length;
+    let inKept = 0;
+    let existsKept = 0;
+    let unknown = 0;
+    const steps = outer.map((value, index) => {
+      const matches = inner.filter((other) => value !== null && other === value).length;
+      const uncertain = !matches && inner.length > 0 && (value === null || nulls > 0);
+      if (uncertain) unknown++;
+      if (!matches && !uncertain) inKept++;
+      if (!matches) existsKept++;
+      return [index + 1, value ?? "NULL", matches, matches ? "假 · 筛掉" : uncertain ? "未知 · 筛掉" : "真 · 保留",
+        matches ? "假 · 筛掉" : "真 · 保留"] as const;
+    });
+    return { steps, metrics: { notInKept: inKept, notExistsKept: existsKept, notInUnknown: unknown,
+      exclusionDelta: existsKept - inKept, subqueryNullCount: nulls }, report: {
+      conclusion: `NOT IN 留 ${inKept} 行。NOT EXISTS 留 ${existsKept} 行。`,
+      detail: `外表有 ${outer.length} 行。内表有 ${inner.length} 行。内表含 ${nulls} 个 NULL。NOT IN 有 ${unknown} 行未知。回放逐行展示真假和去留。`,
+      explanation: "能等值匹配时，两边都筛掉。遇到 NULL，比等号得未知。NOT IN 需确认全都不相等。等值 NOT EXISTS 只找真匹配。WHERE 只留真。内表为空时两边都为真。",
+      suggestion: "先去掉内表的 NULL。再改为空表。外表也可放一个 NULL 复核。",
+    } };
+  },
+});
+
+export const walCheckpointLab = defineCurriculumLab({
+  id: "wal-checkpoint", domain: "databases", title: "预写日志与检查点重做",
+  description: "模拟断电。对照两条恢复路径。",
+  comparison: "从初始页重做 / 从检查点重做",
+  topics: ["write-ahead-logging", "checkpoint-redo-start"],
+  input: {
+    walInitialPages: { kind: "list", min: -99, max: 99, minItems: 1, maxItems: 8, label: "初始磁盘页值", hint: "1–8 个整数，从第 0 页编号。" },
+    walUpdates: { kind: "rows", columns: [[0, 7], [-99, 99]], minItems: 1, maxItems: 20, label: "页号、更新值",
+      hint: "每行是一次独立写入。先从前往后写日志。" },
+    walDurableCount: { kind: "integer", min: 0, max: 20, label: "断电前已持久日志数", hint: "前 N 条日志持久并确认提交，其余尚未落盘。" },
+    walCheckpointCount: { kind: "integer", min: 0, max: 20, label: "检查点覆盖日志数", hint: "前 N 条已刷页。不能超过持久日志数。" },
+  },
+  defaults: { goalLabel: "核对重做范围和最终恢复值", walInitialPages: [0, 0, 0], walUpdates: [[0, 10], [1, 20], [0, 12], [2, 30], [1, 25]],
+    walDurableCount: 4, walCheckpointCount: 2 },
+  check: ({ walInitialPages, walUpdates, walDurableCount, walCheckpointCount }) =>
+    walCheckpointCount <= walDurableCount && walDurableCount <= walUpdates.length && walUpdates.every(([page]) => page < walInitialPages.length),
+  columns: ["阶段", "日志号", "事件", "无检查点页值", "有检查点页值"],
+  metricLabels: { walScannedAll: "无检查点重做条数", walScannedTail: "有检查点重做条数", walLostPending: "丢失的未确认记录",
+    walRecoveredPages: "恢复后的页值", walRedoSaved: "少重做条数" },
+  focusMetric: "walScannedTail", alternateTrial: "把检查点覆盖数从 2 改为 3。",
+  run({ walInitialPages, walUpdates, walDurableCount, walCheckpointCount }) {
+    const plain = [...walInitialPages];
+    const checkpoint = [...walInitialPages];
+    const steps: [string, number | string, string, string, string][] = [];
+    const record = (stage: string, index: number | string, event: string) =>
+      steps.push([stage, index, event, sequenceText(plain), sequenceText(checkpoint)]);
+    record("初始", "—", "两组从相同磁盘页起跑");
+    for (const [index, [page, value]] of walUpdates.entries()) {
+      const number = index + 1;
+      record("写日志", number, `页 ${page}→${value} · ${number <= walDurableCount ? "日志持久，确认提交" : "暂在内存"}`);
+      if (number === walCheckpointCount) {
+        for (const [checkpointPage, savedValue] of walUpdates.slice(0, number)) checkpoint[checkpointPage] = savedValue;
+        record("检查点", number, "持久日志覆盖的页刷盘");
+      }
+    }
+    const lost = walUpdates.length - walDurableCount;
+    record("断电", "—", `丢弃 ${lost} 条未持久日志`);
+    for (let index = 0; index < walDurableCount; index++) {
+      const [page, value] = walUpdates[index];
+      plain[page] = value;
+      if (index >= walCheckpointCount) checkpoint[page] = value;
+      record("恢复", index + 1, `页 ${page}→${value} · ${index < walCheckpointCount ? "检查点组跳过" : "两组重做"}`);
+    }
+    const remaining = walDurableCount - walCheckpointCount;
+    return { steps, metrics: { walScannedAll: walDurableCount, walScannedTail: remaining, walLostPending: lost,
+      walRecoveredPages: sequenceText(checkpoint), walRedoSaved: walCheckpointCount }, report: {
+      conclusion: `检查点让重做少 ${walCheckpointCount} 条。两组恢复页值一致。`,
+      detail: `持久日志有 ${walDurableCount} 条。检查点覆盖 ${walCheckpointCount} 条。从头重做 ${walDurableCount} 条。从检查点后重做 ${remaining} 条。断电丢失 ${lost} 条未确认更新。最终页值为 ${sequenceText(checkpoint)}。`,
+      explanation: "日志先持久才确认提交。检查点刷出已提交页。恢复只读持久日志。重做写入日志里的新值。模型每条各自提交。未提交页不会刷出。",
+      suggestion: "只推进检查点。观察重做量和最终值。再调持久日志数，比较断电损失。",
+    } };
+  },
+});
+
 export const sqlUnionLab = defineCurriculumLab({
   id: "sql-union", domain: "databases", title: "UNION 与重复行",
   description: "合并两张表。逐行查看去重依据。",

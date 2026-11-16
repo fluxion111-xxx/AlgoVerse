@@ -17,6 +17,207 @@ const { getCourse } = await import("../src/lib/courses.ts");
 const { getExperimentTopic, knowledgeTopicRoute } = await import("../src/lib/knowledge.ts");
 const { experimentEvidence, evidenceLabels } = await import("../src/lib/experiments/evidence.ts");
 
+test("zero-one knapsack matches an exhaustive subset search even with an overweight item", () => {
+  const lab = getExperimentEngine("zero-one-knapsack");
+  const items = [[8, 60], [3, 4], [2, 5], [4, 8], [2, 2]];
+  const capacity = 7;
+  let best = 0;
+  for (let mask = 0; mask < 2 ** items.length; mask++) {
+    const included = items.filter((_, index) => mask & (1 << index));
+    const weight = included.reduce((sum, [size]) => sum + size, 0);
+    const value = included.reduce((sum, [, gain]) => sum + gain, 0);
+    if (weight <= capacity) best = Math.max(best, value);
+  }
+  const { metrics, steps } = lab.execute({ ...lab.preset(), sackCapacity: capacity, sackItems: items });
+  assert.equal(Number(metrics.sackCorrect), best);
+  assert.ok(Number(metrics.sackForward) > best);
+  assert.deepEqual(steps[0], [1, "倒序", capacity, 0, "过重", 0]);
+});
+
+test("monotonic deque handles equal maxima expiring and a one-item window", () => {
+  const lab = getExperimentEngine("sliding-maximum");
+  const config = { ...lab.preset(), slidingNumbers: [5, 5, 0, -1, 4] };
+  const wide = lab.execute({ ...config, slidingWidth: 2 });
+  const single = lab.execute({ ...config, slidingWidth: 1 });
+  assert.equal(wide.metrics.slidingResults, "5、5、0、4");
+  assert.equal(single.metrics.slidingResults, "5、5、0、-1、4");
+  assert.ok(wide.steps.at(-1).includes("4 / 4"));
+});
+
+test("an empty notification makes while recheck every waiter without consuming resources", () => {
+  const lab = getExperimentEngine("condition-recheck");
+  const result = lab.execute({ ...lab.preset(), conditionProduced: 0, conditionBargers: 0, conditionWaiters: 2 });
+  assert.deepEqual(result.metrics, { conditionIfInvalid: "2", conditionWhileWait: "2", conditionSuccessful: "0", conditionBeforeWake: "0" });
+  assert.deepEqual(result.steps.at(-1), ["等待者 2", "空取失败", 0, "重查后继续等", 0]);
+});
+
+test("TCP handshake wraps both initial sequence numbers and retries a lost SYN-ACK", () => {
+  const lab = getExperimentEngine("tcp-handshake");
+  const maxSequence = 4294967295;
+  const result = lab.execute({ ...lab.preset(), handshakeClientIsn: maxSequence, handshakeServerIsn: maxSequence, handshakeDrop: 2 });
+  assert.equal(result.metrics.handshakeFinalAck, "0");
+  assert.equal(result.metrics.handshakeClientNext, "0");
+  assert.equal(result.metrics.handshakeTransmissions, "4");
+  assert.deepEqual(result.steps[1].slice(1), [maxSequence, 0, "丢失", "SYN-SENT", "SYN-RECEIVED"]);
+  assert.deepEqual(result.steps.at(-1), ["ACK →", 0, 0, "送达", "ESTABLISHED", "ESTABLISHED"]);
+});
+
+test("TCP merges overlapping and adjacent out-of-order blocks without acknowledging gaps", () => {
+  const lab = getExperimentEngine("tcp-sack");
+  const { steps, metrics } = lab.execute({ ...lab.preset(), sackArrivals: [[130, 20], [140, 20], [150, 20], [90, 40], [90, 15]] });
+  assert.deepEqual(steps.map((step) => step.slice(2, 4)), [[100, "[130, 150)"], [100, "[130, 160)"], [100, "[130, 170)"], [170, "空"], [170, "空"]]);
+  assert.equal(metrics.tcpSackStalls, "4");
+});
+
+test("C string with one allocated byte stores its terminator without writing data", () => {
+  const lab = getExperimentEngine("c-string-terminator");
+  const result = lab.execute({ ...lab.preset(), cStringCapacity: 1 });
+  assert.equal(result.metrics.cStringSafeLength, "0");
+  assert.equal(result.metrics.cStringLostBytes, "4");
+  assert.deepEqual(result.steps, [[0, 0, 65, "遇到结尾", "缓冲区内无结尾"]]);
+});
+
+test("LSM keeps a later zero value and drops a tombstone when no older value can reappear", () => {
+  const lab = getExperimentEngine("lsm-compaction");
+  const result = lab.execute({ ...lab.preset(), compactBaseRows: [[1, 90]], compactOperations: [[1, 1, 0], [0, 1, 0], [1, 2, 0]] });
+  assert.equal(result.metrics.compactTombstones, "0");
+  assert.equal(result.metrics.compactResurrected, "0");
+  assert.deepEqual(result.steps.map((step) => step.slice(2)),
+    [[0, 0, 0, "保留最新值"], ["删除", "不存在", "不存在", "清理删除标记"]]);
+});
+
+test("stable softmax preserves a tied distribution when direct exponentials all underflow", () => {
+  const lab = getExperimentEngine("stable-softmax");
+  const result = lab.execute({ ...lab.preset(), softmaxLogits: [1, 1], softmaxCommonShift: -1000 });
+  assert.equal(result.metrics.softmaxNaiveStatus, "全部下溢");
+  assert.equal(result.metrics.softmaxStablePeak, "0.5");
+  assert.equal(result.metrics.softmaxStableDrift, "0");
+  assert.deepEqual(result.steps.map((step) => step.slice(3)), Array(2).fill(["不可用", 0.5, 0.5]));
+});
+
+test("causal output cannot depend on a future value", () => {
+  const lab = getExperimentEngine("causal-mask");
+  const preset = lab.preset();
+  const ordinary = lab.execute(preset);
+  const altered = lab.execute({ ...preset, attentionKeyValues: [[1, 10], [0, 0], [3, -90]] });
+  assert.equal(altered.metrics.attentionMaskedOutput, ordinary.metrics.attentionMaskedOutput);
+  assert.notEqual(altered.metrics.attentionUnmaskedOutput, ordinary.metrics.attentionUnmaskedOutput);
+  assert.deepEqual(altered.steps.at(-1).slice(-2), [0, 0]);
+});
+
+test("interval scheduling matches exhaustive selection with touching endpoints and ties", () => {
+  const lab = getExperimentEngine("interval-scheduling");
+  const jobs = [[1, 5], [2, 3], [3, 4], [4, 6], [6, 8], [5, 8]];
+  const { metrics } = lab.execute({ ...lab.preset(), intervalJobs: jobs });
+  const candidates = Array.from({ length: 2 ** jobs.length }, (_, mask) =>
+    jobs.filter((_, index) => mask & (1 << index)).sort(([left], [right]) => left - right));
+  const best = Math.max(...candidates.filter((rows) => rows.every(([start], index) => index === 0 || start >= rows[index - 1][1]))
+    .map((rows) => rows.length));
+  assert.equal(Number(metrics.intervalsEndCount), best);
+  assert.equal(metrics.intervalsStartCount, "2");
+  assert.equal(lab.execute({ ...lab.preset(), intervalJobs: [[5, 5]] }), null);
+});
+
+test("spanning-bridge suppresses return traffic from a non-root source", () => {
+  const lab = getExperimentEngine("spanning-bridge");
+  const result = lab.execute({ ...lab.preset(), bridgeCount: 4, bridgeRoot: 2, bridgeSource: 3, bridgeLinks: [[0, 1], [1, 2], [2, 3], [3, 0]] });
+  assert.equal(result.metrics.bridgePlainExtra, "7");
+  assert.equal(result.metrics.bridgeBlocked, "1");
+  assert.equal(result.metrics.bridgeTreeReached, "3");
+  assert.deepEqual(result.steps.slice(0, 3).map((step) => step.slice(-2)), [[1, "2"], [1, "1"], [1, "0"]]);
+  assert.equal(lab.execute({ ...lab.preset(), bridgeCount: 4 }), null);
+});
+
+test("IPv6 probes that fit the narrowest hop succeed without feedback", () => {
+  const lab = getExperimentEngine("ipv6-path-mtu");
+  const { metrics, steps } = lab.execute({ ...lab.preset(), pmtuPayloadBytes: 1220 });
+  assert.equal(metrics.pmtuFilteredBytes, "1220");
+  assert.equal(metrics.pmtuFeedbackDrops, "0");
+  assert.equal(metrics.pmtuLearnedLimit, "1500");
+  assert.deepEqual(steps, [[1, "1280 字节 · 送达", 1220, "1280 字节 · 送达", 1220]]);
+});
+
+test("buffer replacement respects repeated pins and writes back before discarding a dirty page", () => {
+  const lab = getExperimentEngine("buffer-pool");
+  const result = lab.execute({ ...lab.preset(), bufferFrameLimit: 1, bufferPageValues: [1, 2],
+    bufferPageOps: [[0, 0, 0], [0, 0, 0], [2, 0, 9], [1, 0, 0], [0, 1, 0], [1, 0, 0], [0, 1, 0]] });
+  assert.equal(result.metrics.bufferAllPinned, "1");
+  assert.equal(result.metrics.bufferDirtyWrites, "1");
+  assert.equal(result.metrics.bufferDiskReads, "2");
+  assert.deepEqual(result.steps.at(-1).slice(-3), ["先写盘再换出 0 · 读盘 · 值 2", "1:2 / 固定 1", "9、2"]);
+});
+
+test("MVCC collection keeps versions visible to old snapshots and the latest commit", () => {
+  const lab = getExperimentEngine("mvcc-versions");
+  const { steps, metrics } = lab.execute({ ...lab.preset(), mvccTrace: [[0, 0], [1, 20], [1, 30], [4, 0], [2, 0], [3, 0], [4, 0]] });
+  assert.match(steps[3][1], /移走 v1/);
+  assert.match(steps[4][1], /读 v0 · 值 10/);
+  assert.equal(steps[4][4], 30);
+  assert.equal(metrics.mvccReclaimed, "2");
+  assert.equal(metrics.mvccRetained, "1");
+});
+
+test("early stopping can restore the initial checkpoint and still compare a full run", () => {
+  const lab = getExperimentEngine("early-stopping");
+  const { steps, metrics } = lab.execute({ ...lab.preset(), stopValidTargets: [0], stopPatience: 1 });
+  assert.equal(metrics.stopBestEpoch, "0");
+  assert.equal(metrics.stopBestWeight, "0");
+  assert.equal(metrics.stopAtEpoch, "1");
+  assert.equal(metrics.stopBestMse, "0");
+  assert.equal(steps.at(-1)[0], 6);
+  assert.equal(steps.at(-1)[4], "早停组已结束");
+});
+
+test("Fenwick updates preserve every one-based prefix across negative and repeated additions", () => {
+  const lab = getExperimentEngine("fenwick-prefix");
+  const config = { ...lab.preset(), fenwickNumbers: [3, -1, 0, 2, 5],
+    fenwickOps: [[0, 5, -8], [0, 2, 7], [0, 2, -3], [1, 1, 0], [1, 2, 0], [1, 3, 0], [1, 4, 0], [1, 5, 0]] };
+  const { steps } = lab.execute(config);
+  assert.deepEqual(steps.filter(([action]) => action === "查询").map((step) => step.slice(-2)),
+    [[3, 3], [6, 6], [6, 6], [8, 8], [5, 5]]);
+  assert.equal(lab.execute({ ...config, fenwickOps: [[0, 1, 0]] }), null);
+});
+
+test("Ethernet floods within a VLAN and filters a destination learned on the ingress port", () => {
+  const lab = getExperimentEngine("ethernet-learning");
+  const { steps, metrics } = lab.execute({ ...lab.preset(), switchFrames: [[0, 1, 0], [0, 2, 1], [3, 3, 1]] });
+  assert.deepEqual(steps.map((step) => step.slice(-2)), [["广播泛洪", "1、2"], ["同口过滤", "空"], ["未知目的泛洪", "空"]]);
+  assert.equal(metrics.switchCopies, "2");
+});
+
+test("NOT IN implements empty-subquery and null outer-key semantics", () => {
+  const lab = getExperimentEngine("not-in-null");
+  const config = { ...lab.preset(), exclusionOuter: "NULL, 2, 3" };
+  const empty = lab.execute({ ...config, exclusionInner: "-" });
+  assert.deepEqual(empty.steps.map((step) => step.slice(-2)), Array(3).fill(["真 · 保留", "真 · 保留"]));
+  const nonempty = lab.execute({ ...config, exclusionInner: "2, NULL" });
+  assert.deepEqual(nonempty.steps.map((step) => step.slice(-2)),
+    [["未知 · 筛掉", "真 · 保留"], ["假 · 筛掉", "假 · 筛掉"], ["未知 · 筛掉", "真 · 保留"]]);
+});
+
+test("WAL recovery rejects a checkpoint beyond durable log and restores the original pages if no log survived", () => {
+  const lab = getExperimentEngine("wal-checkpoint");
+  const config = { ...lab.preset(), walDurableCount: 0 };
+  assert.equal(lab.execute(config), null);
+  const empty = lab.execute({ ...config, walCheckpointCount: 0 });
+  assert.deepEqual(empty.metrics, { walScannedAll: "0", walScannedTail: "0", walLostPending: "5", walRecoveredPages: "0、0、0", walRedoSaved: "0" });
+  assert.equal(empty.steps.at(-1)[0], "断电");
+});
+
+test("probability bins count both endpoints without changing either Brier score", () => {
+  const lab = getExperimentEngine("probability-calibration");
+  const config = { ...lab.preset(), calibrationRows: [[0, 100, 0], [100, 0, 1], [50, 50, 1]], calibrationBins: 2 };
+  const result = lab.execute(config);
+  const finer = lab.execute({ ...config, calibrationBins: 10 });
+  assert.deepEqual(result.steps.map((step) => step[2]), [1, 2, 1, 2]);
+  assert.equal(finer.steps[0][2], 1);
+  assert.equal(finer.steps[9][2], 1);
+  assert.equal(finer.steps[5][2], 1);
+  for (const key of ["calibrationBrierA", "calibrationBrierB"]) assert.equal(result.metrics[key], finer.metrics[key]);
+  assert.equal(finer.metrics.calibrationBrierA, "0.0833");
+  assert.equal(finer.metrics.calibrationBrierB, "0.75");
+});
+
 test("Bellman–Ford traces a reachable negative self-loop without marking an unrelated target", () => {
   const engine = getExperimentEngine("bellman-ford");
   const config = { ...engine.preset(), bellmanNodes: 6, bellmanTarget: 3,
@@ -244,8 +445,8 @@ test("expanded engines resolve through their catalog, knowledge links and diagno
     "deadlock-avoidance": "banker-safe-sequence", "tcp-congestion": "tcp-cwnd-rwnd",
     "dynamic-routing": "link-state-routing", "memory-allocation": "heap-fit-fragmentation", "transaction-concurrency": "mvcc-row-versions",
   };
-  assert.equal(new Set(registeredEngines.map(({ id }) => id)).size, 66);
-  assert.equal(new Set(registeredEngines.map(({ route }) => route)).size, 66);
+  assert.equal(new Set(registeredEngines.map(({ id }) => id)).size, 114);
+  assert.equal(new Set(registeredEngines.map(({ route }) => route)).size, 114);
   for (const [id, topic] of Object.entries(topics)) {
     const engine = getExperimentEngine(id, 1);
     assert.ok(getCourse(engine.domain).experiments.some(({ href }) => href === engine.route));
