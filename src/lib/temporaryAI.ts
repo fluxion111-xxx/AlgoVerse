@@ -4,6 +4,7 @@ import { useSyncExternalStore } from "react";
 import { aiRequestHeaders, modelSelectionMessage, parseAISelection, type AIProvider, type AISelection, type TokenUsage } from "./aiSettings";
 import type { AgentTask } from "./experimentAgent";
 import type { PlatformModel } from "./platformAI";
+import { AIResponseError, fetchAI, readAIResponse } from "./aiHttp";
 
 export type ConnectionVerification = { model: string; usage: TokenUsage };
 type Connection = { apiKey: string; selection: AISelection; verification?: ConnectionVerification };
@@ -101,7 +102,7 @@ export async function fetchWithTemporaryAI(url: string, connection: ActiveConnec
   const byok = connection && "selection" in connection ? connection : undefined;
   const headers = byok ? aiRequestHeaders(byok.selection, byok.apiKey)
     : connection && "platformModel" in connection ? { "X-AI-Provider": "siliconflow", "X-AI-Platform-Model": connection.platformModel } : undefined;
-  const response = await fetch(url, {
+  const response = await fetchAI(url, {
     method: "POST", cache: "no-store", redirect: "error", signal,
     headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify(body),
@@ -118,9 +119,12 @@ export async function fetchWithTemporaryAI(url: string, connection: ActiveConnec
 
 export async function requestAgentTask(body: object, connection?: ActiveConnection, signal?: AbortSignal): Promise<AgentTask> {
   const response = await fetchWithTemporaryAI("/api/experiments/agent", connection, body, signal);
-  const payload = await response.json();
-  if (!response.ok || !payload.task) throw new Error(payload.message ?? "请求失败。请重试。");
-  return payload.task;
+  const { task } = await readAIResponse<{ task?: AgentTask }>(response);
+  if (!task || typeof task.id !== "string" || !Number.isSafeInteger(task.revision)
+    || !Array.isArray(task.runs) || !Array.isArray(task.pending) || !Array.isArray(task.decisions)) {
+    throw new AIResponseError("未收到会话状态。请重试。", 502);
+  }
+  return task;
 }
 
 if (typeof window !== "undefined") {

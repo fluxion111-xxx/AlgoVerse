@@ -75,7 +75,9 @@ export async function POST(request: Request) {
         if (containsKey(message, authorization) || message.includes(credentials.apiKey)) {
           return aiJson({ message: "请移除问题里的 Key。" }, 400);
         }
-        const selected = body.selectedRunId === undefined ? undefined : task.runs.findIndex(({ id }) => id === body.selectedRunId) + 1;
+        const selected = body.action === "retry-message" && task.dialogue?.pendingRound !== undefined
+          ? task.dialogue.pendingRound ?? undefined
+          : body.selectedRunId === undefined ? undefined : task.runs.findIndex(({ id }) => id === body.selectedRunId) + 1;
         if (selected === 0) return aiJson({ message: "找不到本轮实验。" }, 404);
         return aiJson({ task: await replyToAgentMessage(task, message, credentials, operationId, selected) });
       }

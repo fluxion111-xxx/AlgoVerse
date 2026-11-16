@@ -3,7 +3,7 @@
 import { notFound, redirect } from "next/navigation";
 import { randomBytes, randomUUID } from "node:crypto";
 import { getExperimentEngine, pathfindingEngine, type ExperimentConfig } from "@/lib/experimentEngines";
-import { workflowRoute, withExperimentTask } from "@/lib/navigation";
+import { agentWorkbenchLink, workflowRoute, withExperimentTask } from "@/lib/navigation";
 import { maxQuestionLength } from "@/lib/experimentCreator";
 import { getExperimentTopic } from "@/lib/knowledge";
 import { confirmExperimentSession, createWorkbenchSession, createWorkflowDraft, getExperimentRun, getExperimentWorkflow, getQuickStart, rememberExperimentTask, runExperimentSession, saveWorkflowRevision } from "@/lib/server/experimentRecords";
@@ -43,7 +43,7 @@ export async function openExperimentQuestion(_error: string, form: FormData): Pr
     return "保存失败，请重试。";
   }
   if ("error" in saved) return saved.error;
-  redirect(workflowRoute("question", { sessionId: saved.sessionId }));
+  redirect(agentWorkbenchLink({ focus: "idea", sessionId: saved.sessionId }));
 }
 
 export async function executePreset(form: FormData) {

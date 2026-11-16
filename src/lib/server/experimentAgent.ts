@@ -1,7 +1,7 @@
 import "server-only";
-import { agentDialogueActive, agentDialogueLimits, agentFinished, agentLimits, type AgentCall, type AgentEvidence, type AgentFocus, type AgentTask, type AgentTurn, type AgentTurnAction, type SchedulingEvidence, type TutorContext, type TutorTurnDetails } from "@/lib/experimentAgent";
+import { agentCooldown, agentDialogueActive, agentDialogueLimits, agentFinished, agentLimits, type AgentCall, type AgentDialogue, type AgentEvidence, type AgentFocus, type AgentTask, type AgentTurn, type AgentTurnAction, type SchedulingEvidence, type TutorContext, type TutorTurnDetails } from "@/lib/experimentAgent";
 import { evidenceLabels } from "@/lib/experiments/evidence";
-import { AIRequestError, asObject, requestAIJson, type AICredentials } from "./aiProvider";
+import { AIRequestError, asObject, requestAIJson, sharePersonalOperation, type AICredentials } from "./aiProvider";
 import { agentPlanningTools, agentTools, callAgentTool, prepareToolCall } from "./agentTools";
 import { getDiagnosis, getExperimentRun, saveAgentTask, type ExperimentRun } from "./experimentRecords";
 
@@ -250,23 +250,39 @@ function leaseActive(task: AgentTask) {
   return (task.leaseUntil ?? 0) > Date.now();
 }
 
+function assertModelReady(task: AgentTask, credentials: AICredentials) {
+  const now = Date.now();
+  const cooldown = agentCooldown(task, credentials.selection.provider, now);
+  if (cooldown) throw new AIRequestError(cooldown.message, cooldown.status ?? 429, Math.ceil((cooldown.until - now) / 1000));
+}
+
+function cooldownFrom(error: unknown, credentials: AICredentials) {
+  if (error instanceof AIRequestError && (error.status === 429 || error.status === 503) && error.retryAfter) {
+    return { provider: credentials.selection.provider, until: Date.now() + error.retryAfter * 1000, message: error.message, status: error.status };
+  }
+}
+
 export async function replyToAgentMessage(task: AgentTask, message: string, credentials: AICredentials, operationId?: string, selectedRound?: number, tutor?: TutorDelegate) {
   credentials.signal.throwIfAborted();
   if (agentDialogueActive(task) || task.phase === "running" || (task.phase === "deciding" && leaseActive(task))) {
     throw new AIRequestError("当前请求还在处理。", 409);
   }
+  if (!tutor) assertModelReady(task, credentials);
   const dialogue = task.dialogue ?? { turns: [], requests: 0 };
   if (dialogue.requests >= agentDialogueLimits.requests) throw new AIRequestError("已到本对话上限。", 429);
   const priorScope = task.tutorContext;
   const turns = dialogue.pending && dialogue.pending !== message ? [...dialogue.turns, { message: dialogue.pending,
     ...((priorScope?.includeExperiment || priorScope?.includePractice) && { tutorScope: priorScope }) }] : dialogue.turns;
-  let requested = { turns, focus: dialogue.focus, requests: dialogue.requests + 1, pending: message, activeUntil: Date.now() + leaseMs, operationId };
+  const pendingPlan = !tutor && dialogue.pending === message && dialogue.pendingRound === (selectedRound ?? null) ? dialogue.pendingPlan : undefined;
+  let requested: AgentDialogue = { turns, focus: dialogue.focus, requests: dialogue.requests + 1, pending: message,
+    ...(!tutor && { pendingRound: selectedRound ?? null }), pendingPlan, activeUntil: Date.now() + leaseMs, operationId };
   let claimed = await update(task, { dialogue: requested, ...(tutor && { tutorContext: tutor.access }) });
   const remainingBatch = availableBatch(task, task.steps + 1, task.requests + 1);
   let result: Decision;
   let model: string;
   let details;
   let tutorDetails: TutorTurnDetails | undefined;
+  const deadline = AbortSignal.timeout(leaseMs - 5000);
   try {
     const evidenceOptions = dialogueEvidence(task);
     const reports = await Promise.all(task.runs.map(async ({ id }, index) => {
@@ -277,10 +293,12 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
     }));
     details = tutor ? [] : await schedulingDetails(task);
     const context = decisionContext({ ...task, dialogue: { ...dialogue, turns } });
-    const boundedCredentials = { ...credentials, signal: AbortSignal.any([credentials.signal, AbortSignal.timeout(leaseMs - 5000)]) };
+    const boundedCredentials = sharePersonalOperation({ ...credentials,
+      signal: AbortSignal.any([credentials.signal, deadline]) });
     const accessibleFocus = tutor && (task.runs.length || turns.some(({ tutorScope }) => tutorScope?.includeExperiment || tutorScope?.includePractice))
       ? undefined : context.focus;
-    const response = tutor ? await tutor.resolve(visibleTurns(turns, tutor.access, !!task.runs.length), {
+    const response = pendingPlan ? { action: "plan" as const, focus: pendingPlan, model: undefined }
+      : tutor ? await tutor.resolve(visibleTurns(turns, tutor.access, !!task.runs.length), {
       focus: accessibleFocus, pendingTool: task.pending[0]?.tool,
     }, boundedCredentials) : await requestAIJson<DialogueDecision>(boundedCredentials, {
       operation: "experiment_agent", instructions: dialogueInstructions, maxTokens: agentDialogueLimits.outputTokens,
@@ -296,7 +314,7 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
     if (response.action === "plan") {
       if (response.model !== undefined) {
         if (requested.requests >= agentDialogueLimits.requests) throw new AIRequestError("已到本对话上限。", 429);
-        requested = { ...requested, requests: requested.requests + 1 };
+        requested = { ...requested, requests: requested.requests + 1, ...(!tutor && { pendingPlan: response.focus }) };
         claimed = await update(claimed, { dialogue: requested });
       }
       const { focus: resolvedFocus } = response;
@@ -331,7 +349,9 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
   } catch (error) {
     if (credentials.signal.aborted && operationId) return stopAgentAnalysis(claimed, operationId);
     return update(claimed, { dialogue: { ...requested, activeUntil: undefined,
-      error: error instanceof AIRequestError ? error.message : "回复失败。请重试。" } });
+      cooldown: !tutor ? cooldownFrom(error, credentials) : undefined,
+      error: deadline.aborted && !credentials.signal.aborted ? "本次回复超时。可重试。"
+        : error instanceof AIRequestError ? error.message : "回复失败。请重试。" } });
   }
   if (credentials.signal.aborted && operationId) return stopAgentAnalysis(claimed, operationId);
   if (result.action === "finish") throw new Error("Invalid dialogue action");
@@ -350,7 +370,7 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
   const completed = { turns: [...turns, turn], focus, requests: requested.requests };
   const switchContext = switchTopic ? {
     phase: "draft" as const, experimentGoal: undefined, plan: [], pending: [], referenceConfig: undefined,
-    question: undefined, error: undefined, leaseUntil: undefined, autoContinue: undefined, clarifications: [],
+    question: undefined, error: undefined, cooldown: undefined, leaseUntil: undefined, autoContinue: undefined, clarifications: [],
   } : {};
   if (result.action !== "run") return update(claimed, { ...switchContext, dialogue: completed });
   return update(claimed, {
@@ -359,7 +379,7 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
     plan: result.plan.length ? result.plan : task.plan,
     experimentGoal: result.focus?.goal ?? result.calls[0].config.goalLabel,
     decisions: [...task.decisions, { observation: result.observation, evidence: result.evidence, model, calls: result.calls, plan: result.plan }],
-    question: undefined, leaseUntil: undefined, error: undefined, requests: task.requests + 1, steps: task.steps + 1,
+    question: undefined, leaseUntil: undefined, error: undefined, cooldown: undefined, requests: task.requests + 1, steps: task.steps + 1,
   });
 }
 
@@ -369,10 +389,11 @@ export async function decideAgentTask(task: AgentTask, credentials: AICredential
   if (task.phase !== "draft" && task.phase !== "observe" && task.phase !== "ai-error"
     && !(task.phase === "deciding" && !leaseActive(task))) throw new AIRequestError("当前不能分析。", 409);
   if (task.requests >= agentLimits.decisions || task.steps >= agentLimits.steps) {
-    return update(task, { phase: "limit", error: "已到分析上限。" });
+    return update(task, { phase: "limit", cooldown: undefined, error: "已到分析上限。" });
   }
+  assertModelReady(task, credentials);
   const claimed = await update(task, { phase: "deciding", requests: task.requests + 1, steps: task.steps + 1,
-    leaseUntil: Date.now() + leaseMs, error: undefined, operationId });
+    leaseUntil: Date.now() + leaseMs, error: undefined, cooldown: undefined, operationId });
   const remainingBatch = availableBatch(task, claimed.steps, claimed.requests);
   const stageInstructions = task.runs.length <= (task.dialogue?.focus?.firstRun ?? 0)
     ? '现在制定计划。run 示例结构：{"action":"run","plan":["设置对照","运行基线","看结果再决策"],"observation":"说明如何对照","calls":[{"tool":"引擎 ID","parameters":{}}]}。plan 最多 6 项，按任务改写。未来参数等实测后再选。'
@@ -380,8 +401,9 @@ export async function decideAgentTask(task: AgentTask, credentials: AICredential
       ? '现在依据已有实测决策。run 示例结构：{"action":"run","observation":"根据已有指标说明新参数的目的","evidence":[{"from":1,"to":2,"metric":"指标键"}],"calls":[{"tool":"引擎 ID","parameters":{}}]}。不再输出 plan。'
       : '运行额度已满，只能根据 runs 输出 finish 的证据，或用 clarify 说明还缺什么信息。';
   let response;
+  const deadline = AbortSignal.timeout(leaseMs - 5000);
   try {
-    const signal = AbortSignal.any([credentials.signal, AbortSignal.timeout(leaseMs - 5000)]);
+    const signal = AbortSignal.any([credentials.signal, deadline]);
     response = await requestAIJson<Decision>({ ...credentials, signal }, {
       operation: "experiment_agent", instructions: `${instructions}\n${stageInstructions}`, maxTokens: agentLimits.outputTokens,
       input: {
@@ -392,7 +414,9 @@ export async function decideAgentTask(task: AgentTask, credentials: AICredential
   } catch (error) {
     if (credentials.signal.aborted && operationId) return stopAgentAnalysis(claimed, operationId);
     return update(claimed, { phase: "ai-error", leaseUntil: undefined, operationId: undefined,
-      error: error instanceof AIRequestError ? error.message : "分析失败。请重试。" });
+      cooldown: cooldownFrom(error, credentials),
+      error: deadline.aborted && !credentials.signal.aborted ? "本次分析超时。可重试。"
+        : error instanceof AIRequestError ? error.message : "分析失败。请重试。" });
   }
   if (credentials.signal.aborted && operationId) return stopAgentAnalysis(claimed, operationId);
   const { result, model } = response;

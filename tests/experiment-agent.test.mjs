@@ -21,6 +21,7 @@ registerHooks({
 });
 const { POST } = await import("../src/app/api/experiments/agent/route.ts");
 const { POST: diagnosisPOST } = await import("../src/app/api/experiments/runs/[runId]/diagnosis/route.ts");
+const { GET: replayGET } = await import("../src/app/api/experiments/runs/[runId]/replay/route.ts");
 const { POST: tutorPOST } = await import("../src/app/api/ai/tutor/route.ts");
 const { POST: learningPOST } = await import("../src/app/api/ai/learning/route.ts");
 const { agentTools, prepareToolCall } = await import("../src/lib/server/agentTools.ts");
@@ -93,7 +94,8 @@ async function setup(t, ip, respond) {
     }));
     const payload = await response.json();
     assert.ok(!JSON.stringify(payload).includes(key));
-    return { ...payload, http: response.status };
+    return { ...payload, http: response.status,
+      ...(response.headers.has("Retry-After") && { retryAfter: Number(response.headers.get("Retry-After")) }) };
   }
   async function ask(question, task) {
     const response = await tutorPOST(new Request("https://algoverse.test/api/ai/tutor", {
@@ -288,11 +290,23 @@ test("a typed confirmation runs the saved sorting plan once without calling AI a
   assert.deepEqual(replay.results.quick.sorted, [1, 2, 5, 9]);
   assert.ok(replay.results.bubble.frames.some(({ kind }) => kind === "swap"));
   assert.ok(replay.results.quick.frames.some(({ kind }) => kind === "compare"));
+  const replayUrl = new URL(`https://algoverse.test/api/experiments/runs/${runId}/replay`);
+  const readReplay = () => replayGET(new Request(replayUrl), { params: Promise.resolve({ runId }) });
+  replayUrl.searchParams.set("agentId", done.id);
+  const workbenchReplay = await readReplay();
+  assert.equal(workbenchReplay.status, 200);
+  assert.equal(workbenchReplay.headers.get("cache-control"), "private, no-store");
+  assert.deepEqual((await workbenchReplay.json()).results, replay.results);
+  replayUrl.searchParams.set("agentId", (await post("start", null, { goal: "另一个实验" })).task.id);
+  assert.equal((await readReplay()).status, 404);
+  replayUrl.searchParams.delete("agentId");
+  assert.equal((await readReplay()).status, 200);
   assert.equal((await post("message", proposed, { message: "开始" })).http, 409);
   assert.deepEqual((await post("message", done, { message: "运行" })).task, done);
   assert.equal(upstreamFetch.mock.callCount(), requests);
   values.clear();
   assert.equal((await post("sorting-replay", done, { runId })).http, 404);
+  assert.equal((await readReplay()).status, 404);
 });
 
 test("questions, negations and requests to edit are not consent; the button can still run", async (t) => {
@@ -468,6 +482,8 @@ test("failed calls, clarification, stale approvals and cancellation cannot creat
 });
 
 test("unusable model responses consume the task budget and never fall back to a second model", async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
   let requests = 0;
   const { post } = await setup(t, "192.0.2.12", () => {
     requests++;
@@ -477,10 +493,11 @@ test("unusable model responses consume the task budget and never fall back to a 
   for (let index = 0; index < 6; index++) {
     task = (await post("decide", task)).task;
     assert.equal(task.phase, "ai-error");
+    now += 60_000;
   }
   task = (await post("decide", task)).task;
   assert.equal(task.phase, "limit");
-  assert.equal(requests, 6);
+  assert.equal(requests, 12);
   assert.deepEqual(task.runs, []);
 });
 
@@ -781,6 +798,145 @@ test("failed dialogue requests preserve history and cannot smuggle tool calls th
   assert.equal(task.dialogue.turns.at(-1).message, "换个说法。");
   assert.equal(task.dialogue.turns.length, 2);
   assert.equal(task.dialogue.error, undefined);
+});
+
+test("a free quota pause preserves a pending plan and retries only the planning request", async (t) => {
+  let now = Math.floor(Date.now() / 60_000) * 60_000 + 1_000;
+  t.mock.method(Date, "now", () => now);
+  const experiment = "比较冒泡排序和快速排序。";
+  let classified = 0;
+  let planned = 0;
+  const { post } = await setup(t, "192.0.2.47", (input) => {
+    if (input.stage === "plan") {
+      planned++;
+      assert.equal(input.request, experiment);
+      return sortingPlan;
+    }
+    if (input.message === experiment) {
+      classified++;
+      return { action: "plan", focus: { topic: "冒泡排序和快速排序", goal: "比较操作次数" } };
+    }
+    return { action: "answer", observation: "你好。" };
+  });
+  let task = (await post("start", null, { goal: "你好" })).task;
+  for (let i = 0; i < 5; i++) task = (await post("message", task, { message: "你好" })).task;
+  task = (await post("message", task, { message: experiment })).task;
+  assert.deepEqual([classified, planned], [1, 0]);
+  assert.equal(task.dialogue.pending, experiment);
+  assert.equal(task.dialogue.cooldown.provider, "siliconflow");
+  assert.equal(task.dialogue.cooldown.until, now + 59_000);
+  assert.deepEqual(task.pending, []);
+
+  const restored = (await post("status", task)).task;
+  const early = await post("retry-message", restored);
+  assert.equal(early.http, 429);
+  assert.equal(early.retryAfter, 59);
+  assert.deepEqual((await post("status", task)).task, restored);
+
+  now += 60_000;
+  const resumed = (await post("retry-message", restored)).task;
+  assert.deepEqual([classified, planned], [1, 1]);
+  assert.equal(resumed.dialogue.pending, undefined);
+  assert.equal(resumed.dialogue.pendingPlan, undefined);
+  assert.equal(resumed.dialogue.cooldown, undefined);
+  assert.equal(resumed.phase, "confirm");
+  assert.equal(await getExperimentRun(resumed.pending[0].id), null);
+});
+
+test("the sixth personal-key instruction can both classify and plan", async (t) => {
+  const previous = globalThis.algoVerseAILimits;
+  delete globalThis.algoVerseAILimits;
+  t.after(() => { globalThis.algoVerseAILimits = previous; });
+  const experiment = "比较冒泡排序和快速排序。";
+  const headers = { "X-AI-Provider": "deepseek", "X-AI-Model": "deepseek-flash", Authorization: `Bearer ${key}` };
+  const { post, upstreamFetch } = await setup(t, "192.0.2.49", (input) => {
+    if (input.stage === "plan") return sortingPlan;
+    if (input.message === experiment) return { action: "plan", focus: { topic: "排序", goal: "比较操作次数" } };
+    return { action: "answer", observation: "你好。" };
+  });
+  let task = (await post("start", null, { goal: "你好" }, headers)).task;
+  for (let i = 0; i < 5; i++) task = (await post("message", task, { message: "你好" }, headers)).task;
+  task = (await post("message", task, { message: experiment }, headers)).task;
+  assert.equal(task.phase, "confirm");
+  assert.equal(upstreamFetch.mock.callCount(), 7);
+  assert.equal(task.dialogue.cooldown, undefined);
+  assert.equal(await getExperimentRun(task.pending[0].id), null);
+
+  task = (await post("message", task, { message: "修改方案" }, headers)).task;
+  assert.match(task.dialogue.error, /请求太频繁/);
+  assert.equal(task.dialogue.pending, "修改方案");
+  assert.equal(upstreamFetch.mock.callCount(), 7);
+});
+
+test("an upstream cooldown on analysis leaves saved runs and the pending instruction intact", async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  let attempt = 0;
+  const { post } = await setup(t, "192.0.2.48", (input) => {
+    if (!input.runs.length) return sortingPlan;
+    if (++attempt === 1) return new Response(null, { status: 429, headers: { "Retry-After": "8" } });
+    assert.equal(input.selectedRound, 1);
+    return { action: "explain", observation: "比较次数见实测。", evidence: ["r1-r1-comparisons"] };
+  });
+  let task = (await post("start", null, { goal: "比较排序。" })).task;
+  task = (await post("message", task, { message: "比较排序。" })).task;
+  task = (await post("approve", task)).task;
+  const runId = task.runs[0].id;
+  task = (await post("message", task, { message: "分析刚才结果", selectedRunId: runId })).task;
+  assert.equal(task.dialogue.cooldown.until, now + 8_000);
+  assert.equal(task.dialogue.pending, "分析刚才结果");
+  assert.equal(task.runs[0].id, runId);
+  now += 8_001;
+  task = (await post("retry-message", task)).task;
+  assert.equal(task.dialogue.turns.at(-1).action, "explain");
+  assert.equal(task.runs[0].id, runId);
+});
+
+test("an Agent deadline reports a timeout and retries planning without reclassifying", async (t) => {
+  const timeout = AbortSignal.timeout.bind(AbortSignal);
+  let deadline;
+  t.mock.method(AbortSignal, "timeout", (ms) => {
+    if (ms !== 70_000) return timeout(ms);
+    deadline = new AbortController();
+    return deadline.signal;
+  });
+  let classifications = 0;
+  let proposals = 0;
+  const { post } = await setup(t, "192.0.2.50", ({ stage }) => {
+    if (stage === "plan") {
+      if (++proposals === 1) {
+        deadline.abort(new DOMException("Deadline exceeded", "TimeoutError"));
+        throw deadline.signal.reason;
+      }
+      return sortingPlan;
+    }
+    classifications++;
+    return { action: "plan", focus: { topic: "排序", goal: "比较操作次数" } };
+  });
+  const prompt = "比较冒泡和快排。";
+  let task = (await post("start", null, { goal: prompt })).task;
+  task = (await post("message", task, { message: prompt })).task;
+  assert.equal(task.dialogue.error, "本次回复超时。可重试。");
+  assert.equal(task.dialogue.pending, prompt);
+  assert.equal(task.runs.length, 0);
+  task = (await post("retry-message", task)).task;
+  assert.deepEqual([classifications, proposals], [1, 2]);
+  assert.equal(task.phase, "confirm");
+});
+
+test("a busy free model keeps the provider's retry time on the pending instruction", async (t) => {
+  const { post, upstreamFetch } = await setup(t, "192.0.2.51", () => new Response(null, {
+    status: 503, headers: { "Retry-After": "20" },
+  }));
+  const task = (await post("start", null, { goal: "你好" })).task;
+  const waiting = (await post("message", task, { message: "你好" })).task;
+  assert.equal(waiting.dialogue.cooldown.status, 503);
+  assert.equal(waiting.dialogue.pending, "你好");
+  const count = upstreamFetch.mock.callCount();
+  const early = await post("retry-message", waiting);
+  assert.equal(early.http, 503);
+  assert.ok(early.retryAfter > 0 && early.retryAfter <= 20);
+  assert.equal(upstreamFetch.mock.callCount(), count);
 });
 
 test("workbench rejects invented evidence even after a format retry", async (t) => {

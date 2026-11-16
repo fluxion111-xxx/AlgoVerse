@@ -40,7 +40,7 @@ export function AISettingsForm({ configured }: { configured: boolean }) {
       <section className="ai-settings-console" aria-labelledby="ai-connection-title">
         {mode === "platform" ? <PlatformConnectionForm configured={configured} test={test} form={form} /> : <CustomConnection test={test} form={form} />}
       </section>
-      {test.result && <ConnectionResult result={test.result} dismiss={test.dismiss} retry={() => form.current?.requestSubmit()} />}
+      {test.result && <ConnectionResult result={test.result} dismiss={test.dismiss} cooling={test.cooling} retry={() => form.current?.requestSubmit()} />}
     </div>
   );
 }
@@ -68,7 +68,7 @@ function CustomConnection({ test, form }: FormProps) {
 
 function TestButton({ test, disabled, label }: { test: ConnectionTest; disabled: boolean; label: string }) {
   const testing = test.attempt?.kind === "pending";
-  return <button className="ai-settings-test" type="submit" disabled={disabled || testing}>
+  return <button className="ai-settings-test" type="submit" disabled={disabled || testing || test.cooling}>
     {testing ? <span className="ai-settings-spinner" aria-hidden="true" /> : <CatalogIcon icon="lucide:plug-zap" width={18} />}
     {testing ? "正在验证连接…" : test.attempt?.kind === "error" ? "重新测试" : label}
   </button>;
@@ -79,7 +79,7 @@ function PlatformConnectionForm({ configured, test, form }: FormProps & { config
 
   function testConnection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!configured || !test.canTest || test.isPending()) return;
+    if (!configured || !test.canTest || test.isPending() || test.cooling) return;
     setPlatformAIVerification(platformModel);
     void test.run({
       headers: { "X-AI-Provider": "siliconflow", "X-AI-Platform-Model": platformModel },
@@ -143,7 +143,7 @@ function ProviderConnectionForm({ provider, test, form }: FormProps & { provider
 
   function testConnection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (test.isPending() || !test.canTest) return;
+    if (test.isPending() || !test.canTest || test.cooling) return;
     const apiKey = draft.trim() || retainedKey || "";
     const selection = parseAISelection(provider, modelValue, provider === "qwen" ? region : undefined);
     if (!selection) {

@@ -1,238 +1,251 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useRef, useState, type ComponentProps, type FormEvent } from "react";
-import { agentDialogueActive, isAgentConfirmation, schedulingWaitReport, type AgentCall, type AgentDecision, type AgentRun, type AgentTask, type SchedulingEvidence } from "@/lib/experimentAgent";
-import { creatorObservations } from "@/lib/creatorCapabilities";
+import { useEffect, useRef, useState } from "react";
+import { agentCooldown, agentDialogueActive, isAgentConfirmation, type AgentRun, type AgentTask } from "@/lib/experimentAgent";
+import { AIResponseError, readAIResponse } from "@/lib/aiHttp";
+import { formatAIRetryTime, type AICooldown } from "@/lib/aiRateLimit";
 import { maxQuestionLength } from "@/lib/experimentCreator";
-import { getExperimentEngine, type ExperimentConfig } from "@/lib/experimentEngines";
-import { evidenceLabels } from "@/lib/experiments/evidence";
-import { agentWorkbenchLink, runAnalysisLink, workflowAISettingsRoute, type ExperimentTask, type WorkflowStep } from "@/lib/navigation";
+import { agentWorkbenchLink, workbenchFocus, workflowAISettingsRoute, workflowSteps, type ExperimentTask, type WorkbenchFocus, type WorkflowStep } from "@/lib/navigation";
 import type { Diagnosis } from "@/lib/quickStart";
 import { fetchWithTemporaryAI, requestAgentTask as agentRequest, useActiveAI } from "@/lib/temporaryAI";
-import { CatalogIcon } from "./CatalogEffects";
-import { DiagnosisSummary } from "./QuickStartDiagnosis";
-import { SortingReplay } from "./SimulationReplay";
-import { LazyTutorReply } from "./LazyTutorReply";
+import { WorkbenchIcon } from "./WorkbenchIcon";
+import { WorkbenchActivity, agentPhases } from "./WorkbenchActivity";
+import { AnalysisStage, PlanStage, ResearchStage, RoundPicker, RunStage, StageEmpty, proposalHypothesis, type Plan, type RunDetails } from "./WorkbenchStages";
 
-const phases: Record<AgentTask["phase"], string> = {
-  draft: "等待规划", deciding: "AI 正在分析", confirm: "等待确认", running: "工具运行中",
-  observe: "等待分析", clarify: "需要补充", finished: "任务完成", unsupported: "暂不支持",
-  cancelled: "任务已取消", limit: "已到任务上限", "ai-error": "分析失败", "tool-error": "运行失败",
-};
-
-function ToolDetails({ config }: { config: ExperimentConfig }) {
-  return <>
-    <p>{config.goalLabel}</p>
-    {"values" in config && <p>输入 · {config.values.join("、")}</p>}
-    {"processes" in config && <p>
-      {config.policy === "fcfs" ? "FCFS" : `RR · 时间片 ${config.quantum}`}
-      {" · "}{config.processes.map(({ arrival, burst }, index) => `P${index + 1} (${arrival}, ${burst})`).join("、")}
-    </p>}
-    {"nodes" in config && <p>树节点 · {config.nodes.map((node) => node ?? "空").join("、")}</p>}
-    <details>
-      <summary>查看完整参数</summary>
-      <pre className="agent-config">{JSON.stringify(config, null, 2)}</pre>
-    </details>
-  </>;
-}
-
-function SavedSortingReplay({ taskId, runId }: { taskId: string; runId: string }) {
-  const [trace, setTrace] = useState<ComponentProps<typeof SortingReplay>>();
-  const [failed, setFailed] = useState(false);
-  useEffect(() => {
-    const controller = new AbortController();
-    async function load() {
-      try {
-        const response = await fetchWithTemporaryAI("/api/experiments/agent", undefined,
-          { action: "sorting-replay", id: taskId, runId }, controller.signal);
-        if (!response.ok) throw new Error("Could not load sorting replay");
-        const replay = await response.json();
-        if (!controller.signal.aborted) setTrace(replay);
-      } catch {
-        if (!controller.signal.aborted) setFailed(true);
-      }
-    }
-    void load();
-    return () => controller.abort();
-  }, [taskId, runId]);
-  if (!trace) return <p role="status">{failed ? "未能加载回放。可打开详情。" : "正在加载排序过程。"}</p>;
-  return <div className="agent-sorting-replay"><SortingReplay {...trace} /></div>;
-}
-
-export function DecisionDetails({ decision, runs, report = false }: { decision: Pick<AgentDecision, "observation" | "evidence">; runs: AgentRun[]; report?: boolean }) {
-  const scheduling = report && decision.evidence.some(({ metric }) => metric === "waiting") ? schedulingWaitReport(runs) : null;
-  return <>
-    {!report && decision.observation && <LazyTutorReply answer={decision.observation} reveal={false} />}
-    {scheduling && <dl className="preset-details">
-      <div><dt>已测 RR 中等待最短</dt><dd>时间片 {scheduling.bestTrials.map(({ config }) => config.quantum).join("、")}
-        {" · "}{scheduling.bestWait.toFixed(2)}</dd></div>
-      <div><dt>RR 基线 → 最短等待</dt><dd>{scheduling.firstRR.wait.toFixed(2)} → {scheduling.bestWait.toFixed(2)}</dd></div>
-      {scheduling.fcfs && <div><dt>同进程的 FCFS 等待</dt><dd>{scheduling.fcfs.wait.toFixed(2)}</dd></div>}
-    </dl>}
-    {decision.evidence.length > 0 && <dl className="preset-details">
-      {decision.evidence.map(({ from, to, metric }, index) => {
-        const first = runs[from - 1]?.metrics[metric];
-        const second = runs[to - 1]?.metrics[metric];
-        if (first === undefined || second === undefined) return null;
-        const numeric = /^-?\d+(?:\.\d+)?$/;
-        const difference = from !== to && numeric.test(first) && numeric.test(second)
-          ? Number((Number(second) - Number(first)).toFixed(6)) : null;
-        return <div key={index}>
-          <dt>{evidenceLabels[metric]}</dt>
-          <dd>第 {from} 轮 {first}{from !== to && ` → 第 ${to} 轮 ${second}`}
-            {difference !== null && `（差 ${difference > 0 ? "+" : ""}${difference}）`}</dd>
-        </div>;
-      })}
-    </dl>}
-  </>;
-}
-
-function SchedulingDetails({ evidence }: { evidence: SchedulingEvidence[] }) {
-  return <section aria-label="调度模型与实测">
-    <p>RR 按时间片轮转。进程没跑完会重新排队。切换只计次数。切换不计时。</p>
-    {evidence.map(({ from, to, metric, processes }, index) => <dl className="preset-details" key={index}>
-      <div><dt>{({ waiting: "每个进程的等待", response: "每个进程的响应", turnaround: "每个进程的周转" })[metric]}</dt>
-        <dd>{from === to ? `第 ${from} 轮` : `第 ${from} 轮 → 第 ${to} 轮`}</dd></div>
-      {processes.map(({ process, before, after }) => <div key={process}>
-        <dt>P{process}</dt><dd>{from === to ? before : `${before} → ${after}`}</dd>
-      </div>)}
-    </dl>)}
-  </section>;
-}
-
-function RunEntry({ taskId, run, number, diagnosis, discuss }: {
-  taskId: string; run: AgentRun; number: number; diagnosis?: Diagnosis; discuss: (message: string) => void;
-}) {
-  const connection = useActiveAI();
-  const [saved, setSaved] = useState(diagnosis);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const request = useRef<AbortController | null>(null);
-  useEffect(() => () => request.current?.abort(), []);
-
-  async function diagnose() {
-    if (request.current || !connection) return;
-    const controller = new AbortController();
-    request.current = controller;
-    setBusy(true);
-    setError("");
-    try {
-      const response = await fetchWithTemporaryAI(`/api/experiments/runs/${run.id}/diagnosis`, connection, {}, controller.signal);
-      const payload = await response.json();
-      if (!response.ok || payload.diagnosis?.runId !== run.id) throw new Error(payload.message ?? "诊断失败。请重试。");
-      if (!controller.signal.aborted) setSaved(payload.diagnosis);
-    } catch (failure) {
-      if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : "诊断失败。请重试。");
-    } finally {
-      if (request.current === controller) {
-        request.current = null;
-        setBusy(false);
-      }
-    }
-  }
-
-  const report = diagnosis ?? saved;
-  return <section className="agent-result" id={`agent-run-${run.id}`}>
-    <p className="agent-entry-tag">实测结果 · 第 {number} 轮</p>
-    <h3>{getExperimentEngine(run.tool)?.creator.title}</h3>
-    {run.tool === "sorting" && <p>指标顺序 · 冒泡 / 快排</p>}
-    <dl className="agent-metrics">{Object.entries(run.metrics).map(([key, value]) => <div key={key}>
-      <dt>{evidenceLabels[key]}</dt><dd>{value}</dd>
-    </div>)}</dl>
-    {run.tool === "sorting" && <details className="agent-replay">
-      <summary>查看排序过程</summary>
-      <SavedSortingReplay taskId={taskId} runId={run.id} />
-    </details>}
-    <div className="agent-actions">
-      <Link className="agent-secondary" href={runAnalysisLink(run.id)}>打开详细分析 <CatalogIcon icon="lucide:arrow-up-right" width={15} /></Link>
-      {busy ? <button type="button" className="agent-secondary" onClick={() => request.current?.abort()}>停止诊断</button>
-        : !report && <button type="button" className="agent-secondary" disabled={!connection} onClick={() => void diagnose()}>生成诊断</button>}
-      <button type="button" className="agent-secondary" onClick={() => discuss(`结合第 ${number} 轮的实测，建议下一轮实验。`)}>试下一轮</button>
-    </div>
-    {busy && <p role="status">AI 正在诊断。</p>}
-    {error && <p role="alert" className="agent-error">{error}</p>}
-    {report && <details className="agent-report" open>
-      <summary>本轮 AI 诊断</summary>
-      <DiagnosisSummary diagnosis={report} evidence={run.metrics} />
-    </details>}
-  </section>;
-}
+const steps = Object.keys(workflowSteps) as WorkflowStep[];
+const stageDetails = {
+  idea: { icon: "lightbulb", description: "写下问题，带上你的猜想。" },
+  plan: { icon: "clipboard-list", description: "核对条件，再确认运行。" },
+  run: { icon: "play", description: "看回放，读实测指标。" },
+  analysis: { icon: "scan-search", description: "对照证据，想想下一轮。" },
+} as const;
 
 type SendAction = "message" | "retry-message" | "decide" | "approve" | "import" | "status";
 type ActiveRequest = { controller: AbortController; operationId: string; taskId?: string };
 
-export function AgentWorkbench({ initial, initialMessage = "", reference, savedPlan, intent, fresh, selectedRunId, diagnoses = {} }: {
+const statusReadError = "读取状态失败。请刷新状态。";
+
+export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, reference, referenceRun, savedPlan, fresh, selectedRunId, diagnoses = {} }: {
   initial: AgentTask | null;
-  initialMessage?: string;
+  initialQuestion?: string;
+  initialFocus?: WorkbenchFocus;
   reference?: ExperimentTask;
-  savedPlan?: ExperimentConfig;
-  intent?: WorkflowStep;
+  referenceRun?: AgentRun;
+  savedPlan?: Plan;
   fresh?: boolean;
   selectedRunId?: string;
   diagnoses?: Record<string, Diagnosis>;
 }) {
+  const startFocus = initialFocus ?? (initial?.pending.length || savedPlan ? "plan" : initial?.runs.length || referenceRun ? "run" : "idea");
   const [task, setTask] = useState(initial);
-  const [message, setMessage] = useState(initialMessage);
-  const [sent, setSent] = useState("");
+  const [focus, setFocus] = useState<WorkbenchFocus>(startFocus);
+  const [message, setMessage] = useState(initialQuestion);
+  const [guess, setGuess] = useState<string>();
   const [selectedRun, setSelectedRun] = useState(selectedRunId);
-  const connection = useActiveAI();
+  const [collapsed, setCollapsed] = useState(false);
+  const [drawer, setDrawer] = useState(false);
   const [busy, setBusy] = useState<"deciding" | "running" | "status" | null>(null);
   const [error, setError] = useState("");
+  const [recovery, setRecovery] = useState("");
+  const [runDetails, setRunDetails] = useState<Record<string, RunDetails>>({});
+  const [reports, setReports] = useState(diagnoses);
+  const [diagnosing, setDiagnosing] = useState<string>();
+  const [diagnosisError, setDiagnosisError] = useState<{ id: string; message: string }>();
+  const [requestCooldown, setRequestCooldown] = useState<AICooldown>();
+  const [clock, setClock] = useState<number>();
+  const connection = useActiveAI();
   const active = useRef<ActiveRequest | null>(null);
+  const diagnosisRequest = useRef<AbortController | null>(null);
   const input = useRef<HTMLTextAreaElement>(null);
-  const end = useRef<HTMLDivElement>(null);
-  const entryHandled = useRef(false);
+  const canvas = useRef<HTMLDivElement>(null);
+  const drawerToggle = useRef<HTMLButtonElement>(null);
+  const drawerClose = useRef<HTMLButtonElement>(null);
+  const navigation = useRef(0);
+  const view = useRef({ focus: startFocus, selectedRun: selectedRunId });
+
+  const runs = task?.runs ?? (referenceRun ? [referenceRun] : []);
+  const firstRun = task?.dialogue?.focus?.firstRun ?? 0;
+  const latest = runs.length > firstRun ? runs.at(-1) : undefined;
+  const explicitRun = runs.find(({ id }) => id === selectedRun);
+  const run = explicitRun ?? latest;
+  const number = run ? runs.indexOf(run) + 1 : 0;
+  const question = (task?.goal ?? initialQuestion).split("\n我的猜想：")[0];
+  const target = task?.dialogue?.focus?.goal ?? task?.experimentGoal ?? task?.dialogue?.focus?.topic ?? "";
+  const hasResearch = !!(initialQuestion || target);
+  const activePlan = !!task?.pending.length || (!task && !!savedPlan);
+  const savedGuess = proposalHypothesis(task, task?.pending[0] ?? latest);
+  const hypothesis = guess ?? savedGuess ?? "";
   const dialogueBusy = !!task && agentDialogueActive(task);
   const expired = !!task?.leaseUntil && task.leaseUntil <= Date.now();
   const workBusy = !!task && (task.phase === "running" || task.phase === "deciding") && !expired;
+  const activeUntil = dialogueBusy ? task?.dialogue?.activeUntil : workBusy ? task?.leaseUntil : undefined;
   const blocked = !!busy || dialogueBusy || workBusy;
+  const provider = connection && ("selection" in connection ? connection.selection.provider : "siliconflow");
+  const savedCooldown = agentCooldown(task, provider, 0);
+  const cooldown = requestCooldown && requestCooldown.provider === provider && requestCooldown.until > (savedCooldown?.until ?? 0)
+    ? requestCooldown : savedCooldown;
+  const retryUntil = cooldown?.until ?? 0;
+  const retrySeconds = clock === undefined ? undefined : Math.max(0, Math.ceil((retryUntil - clock) / 1000));
+  const modelCooling = !!cooldown && (retrySeconds === undefined || retrySeconds > 0);
+  const modelBlocked = blocked || modelCooling || !!diagnosing;
+  const maySend = !blocked && (!modelBlocked || !!task && isAgentConfirmation(task, message));
+  const waitHint = modelCooling ? (retrySeconds === undefined ? "等待恢复" : formatAIRetryTime(retrySeconds)) : "";
+  const runningNow = busy === "running" || (workBusy && task?.phase === "running");
   const restoredOperation = dialogueBusy ? task?.dialogue?.operationId : workBusy && task?.phase === "deciding" ? task.operationId : undefined;
   const canStop = busy === "deciding" || (!busy && !!restoredOperation);
-  const settingsHref = workflowAISettingsRoute(task ? agentWorkbenchLink({ agentId: task.id }) : agentWorkbenchLink({ intent, fresh, ...reference }));
-  const approvalVisible = task && (task.phase === "confirm" || task.phase === "tool-error" || (task.phase === "running" && expired));
+  const retryRun = task?.phase === "tool-error" || (task?.phase === "running" && expired);
+  const canApprove = !!task?.pending.length && !task.dialogue?.pending && !blocked && (task.phase === "confirm" || retryRun);
+  const canContinue = !!task && !task.dialogue?.pending && (task.phase === "ai-error" || (task.phase === "observe" && task.autoContinue === true)
+    || (task.phase === "deciding" && expired));
+  const savedError = error || task?.dialogue?.error || task?.error || "";
+  const visibleError = waitHint ? `${cooldown?.message} ${waitHint}`
+    : cooldown && savedError === cooldown.message ? "现在可以重试。" : savedError;
+  const hasReply = !!task?.dialogue?.turns.at(-1)?.action;
+  const activityStatus = busy === "status" ? "正在更新" : busy === "running" ? "工具运行中"
+    : busy === "deciding" || dialogueBusy ? "Agent 正在回复"
+    : task && task.phase !== "draft" ? retryRun && expired ? "运行中断" : agentPhases[task.phase] : "";
+  const completed = {
+    idea: activePlan || !!latest || !!target || !!(initialQuestion && reference),
+    plan: !activePlan && !!latest,
+    run: !!latest,
+    analysis: !!latest && (!!reports[latest.id] || !!task?.decisions.at(-1)?.evidence.length && task.phase === "finished"
+      || !!task?.dialogue?.turns.some((turn) => turn.action === "explain" && turn.evidence.some(({ from, to }) => from === runs.length || to === runs.length))),
+  };
 
-  async function send(action: SendAction, text = message) {
-    if (active.current || busy || (action === "message" && !text.trim())) return;
+  function workbenchHref(nextFocus: WorkbenchFocus, id?: string, picked?: AgentRun) {
+    return agentWorkbenchLink({
+      agentId: id, focus: nextFocus, fresh: !id && fresh,
+      ...(!id && reference),
+      ...(picked && { sessionId: picked.sessionId, runId: picked.id }),
+    });
+  }
+  const settingsHref = workflowAISettingsRoute(workbenchHref(focus, task?.id, explicitRun));
+
+  function show(nextFocus: WorkbenchFocus, pickedId = view.current.selectedRun, current = task, manual = true) {
+    if (manual) navigation.current++;
+    if (nextFocus !== view.current.focus || pickedId !== view.current.selectedRun) canvas.current?.scrollTo({ top: 0, behavior: "instant" });
+    view.current = { focus: nextFocus, selectedRun: pickedId };
+    setFocus(nextFocus);
+    setSelectedRun(pickedId);
+    const picked = (current?.runs ?? runs).find(({ id }) => id === pickedId);
+    // Keep the router's current state. This view already owns the navigation change.
+    window.history.replaceState(window.history.state, "", workbenchHref(nextFocus, current?.id, picked));
+  }
+
+  function prefill(text: string) {
+    setMessage(text);
+    input.current?.focus();
+  }
+
+  function promptForQuestion() {
+    show("idea");
+    input.current?.focus();
+  }
+
+  async function send(action: SendAction, text = message, startingGoal?: string) {
+    text = text.trim();
+    if (active.current || blocked || (action === "message" && !text)) return false;
+    if (action === "message" && text.length > maxQuestionLength) {
+      setError("请把指令缩到 300 字。");
+      return false;
+    }
     const confirmation = action === "message" && !!task && isAgentConfirmation(task, text);
+    const waiting = task?.dialogue;
+    if (action === "message" && !confirmation && waiting?.pending === text
+      && (waiting.pendingRound === undefined || waiting.pendingRound === (explicitRun ? number : null))) {
+      action = "retry-message";
+    }
     const needsModel = (action === "message" && !confirmation) || action === "retry-message" || action === "decide";
-    if (needsModel && !connection) { setError("请先配置 AI 服务。"); return; }
+    if (needsModel && !connection) { setError("请先配置 AI 服务。"); return false; }
+    if (needsModel && (diagnosisRequest.current || retryUntil > Date.now())) return false;
     const running = action === "approve" || (confirmation && task?.phase === "confirm");
+    if (running && !canApprove) return false;
     const request = { controller: new AbortController(), operationId: crypto.randomUUID(), taskId: task?.id };
     const { signal } = request.controller;
+    const startNavigation = navigation.current;
     active.current = request;
     setError("");
+    setRecovery("");
     setBusy(running ? "running" : needsModel ? "deciding" : "status");
-    if (action === "message" && !confirmation) setSent(text);
     try {
       let current = task;
       if (!current && (action === "message" || action === "import")) {
-        current = await agentRequest({ action: "start", goal: action === "import" ? initialMessage || savedPlan?.goalLabel : text,
-          ...reference, ...(action === "import" && { importPlan: true }) }, connection, signal);
-        if (signal.aborted) return;
+        current = await agentRequest({
+          action: "start", goal: startingGoal ?? (initialQuestion || (action === "import" ? savedPlan?.config.goalLabel : text)),
+          ...reference, ...(action === "import" && { importPlan: true }),
+        }, connection, signal);
+        if (signal.aborted) return false;
         request.taskId = current.id;
         setTask(current);
-        window.history.replaceState(null, "", agentWorkbenchLink({ agentId: current.id }));
+        show(action === "import" && navigation.current === startNavigation ? "plan" : view.current.focus, view.current.selectedRun, current, false);
       }
-      if (!current || action === "import") return;
-      let next = await agentRequest({ action, operationId: request.operationId,
-        ...(needsModel && selectedRun && { selectedRunId: selectedRun }),
-        ...(action === "message" && { message: text }), id: current.id, revision: current.revision }, needsModel ? connection : undefined, signal);
-      if (signal.aborted) return;
+      if (!current || action === "import") return !!current;
+      const next = await agentRequest({
+        action, operationId: request.operationId, id: current.id, revision: current.revision,
+        ...(needsModel && explicitRun && { selectedRunId: explicitRun.id }),
+        ...(action === "message" && { message: text }),
+      }, needsModel ? connection : undefined, signal);
+      if (signal.aborted) return false;
       setTask(next);
-      if (running && next.runs.length > current.runs.length) setSelectedRun(undefined);
-      if (action === "message") setMessage("");
-      if (running && next.phase === "observe" && next.autoContinue !== false && connection) {
-        setBusy("deciding");
-        next = await agentRequest({ action: "decide", id: next.id, revision: next.revision, operationId: request.operationId }, connection, signal);
-        if (!signal.aborted) setTask(next);
+      const newTurn = (action === "message" || action === "retry-message") && !confirmation
+        && next.dialogue && !next.dialogue.pending && next.dialogue.turns.length > (current.dialogue?.turns.length ?? 0)
+        ? next.dialogue.turns.at(-1) : undefined;
+      if (action === "message" && !next.dialogue?.pending) setMessage((draft) => draft.trim() === text ? "" : draft);
+      if (action === "retry-message" && newTurn) setMessage((draft) => draft.trim() === current.dialogue?.pending ? "" : draft);
+      const navigated = navigation.current !== startNavigation;
+      if (running && next.runs.length > current.runs.length) {
+        show(navigated ? view.current.focus : "run", navigated ? view.current.selectedRun : "", next, false);
+      } else if (!navigated && newTurn?.action === "explain" && newTurn.evidence.length) {
+        const cited = newTurn.evidence.at(-1);
+        show("analysis", next.runs[(cited?.to ?? 1) - 1]?.id, next, false);
+      } else if (!navigated && (newTurn?.action === "run" || (action === "decide" && next.phase === "confirm"))) {
+        show("plan", view.current.selectedRun, next, false);
+      } else if (!navigated && action === "decide" && next.phase === "finished") {
+        show("analysis", view.current.selectedRun, next, false);
       }
+      if (running && next.phase === "observe" && next.autoContinue === true && connection
+        && !diagnosisRequest.current && retryUntil <= Date.now()) {
+        setBusy("deciding");
+        const analyzed = await agentRequest({ action: "decide", id: next.id, revision: next.revision, operationId: request.operationId }, connection, signal);
+        if (!signal.aborted) setTask(analyzed);
+      }
+      return !signal.aborted && !next.dialogue?.error;
     } catch (failure) {
-      if (!signal.aborted) setError(failure instanceof Error ? failure.message : "请求失败。请重试。");
+      if (!signal.aborted) {
+        if (provider && failure instanceof AIResponseError && failure.retryAfter) {
+          setRequestCooldown({ provider, until: Date.now() + failure.retryAfter * 1000, message: failure.message });
+        }
+        setError(failure instanceof Error ? failure.message : "请求失败。请重试。");
+        if (request.taskId && action !== "status" && failure instanceof AIResponseError && !failure.retryAfter
+          && (failure.status === 0 || failure.status === 409 || failure.status >= 500)) {
+          const snapshot = await agentRequest({ action: "status", id: request.taskId }, undefined, signal).catch(() => null);
+          if (snapshot?.id === request.taskId && !signal.aborted) {
+            setTask((current) => current?.id === snapshot.id && current.revision <= snapshot.revision ? snapshot : current);
+            const stayed = navigation.current === startNavigation;
+            if (running && snapshot.runs.length > runs.length) {
+              if (stayed) show("run", "", snapshot, false);
+              setError("");
+              setRecovery("运行记录已同步。");
+            } else if (!confirmation && (action === "message" || action === "retry-message")) {
+              const sent = action === "retry-message" ? waiting?.pending : text;
+              const restored = snapshot.dialogue?.turns.at(-1);
+              if (snapshot.dialogue && !snapshot.dialogue.pending && snapshot.dialogue.turns.length > (waiting?.turns.length ?? 0)
+                && restored?.action && restored.message === sent) {
+                setMessage((draft) => draft.trim() === sent ? "" : draft);
+                if (stayed && restored.action === "run") show("plan", view.current.selectedRun, snapshot, false);
+                setError("");
+                setRecovery("Agent 回复已同步。");
+                return true;
+              }
+            }
+          }
+        }
+      }
+      return false;
     } finally {
       if (active.current === request) {
         active.current = null;
-        setSent("");
         setBusy(null);
       }
     }
@@ -244,12 +257,11 @@ export function AgentWorkbench({ initial, initialMessage = "", reference, savedP
     if (!canStop || !operationId) return;
     active.current = null;
     request?.controller.abort();
-    setSent("");
     setBusy("status");
     try {
-      const taskId = request?.taskId ?? task?.id;
-      if (taskId) {
-        const stopRequest = () => agentRequest({ action: "stop", id: taskId, operationId });
+      const id = request?.taskId ?? task?.id;
+      if (id) {
+        const stopRequest = () => agentRequest({ action: "stop", id, operationId });
         setTask(await stopRequest().catch(stopRequest));
       }
     } catch (failure) {
@@ -260,166 +272,250 @@ export function AgentWorkbench({ initial, initialMessage = "", reference, savedP
     }
   }
 
-  const canPlan = !task?.pending.length && !task?.runs.length && !savedPlan && (!!task?.dialogue?.focus || (!task?.dialogue && !!(task?.goal || initialMessage)));
-  const planningPrompt = !task?.dialogue ? task?.goal || initialMessage : "帮我设计一个实验。";
-
+  const taskId = task?.id;
   useEffect(() => {
-    if (entryHandled.current) return;
-    entryHandled.current = true;
-    if (intent === "question" || (intent && !task?.pending.length)) input.current?.focus({ preventScroll: true });
-    if (intent === "config" && canPlan && connection && !blocked) {
-      window.history.replaceState(null, "", task ? agentWorkbenchLink({ agentId: task.id }) : agentWorkbenchLink(reference));
-      void send("message", planningPrompt);
-    } else if (intent === "run" && savedPlan && reference && !task) {
-      void send("import");
-    }
-  });
-
-  useEffect(() => {
-    if (busy || !(dialogueBusy || workBusy) || !task) return;
-    const id = task.id;
+    if (!retryUntil) return;
+    setClock(Date.now());
+    if (retryUntil <= Date.now()) return;
     const timer = window.setInterval(() => {
-      void agentRequest({ action: "status", id }).then((next) => {
-        setTask((current) => current?.id === next.id && current.revision <= next.revision ? next : current);
-      }).catch(() => {});
-    }, 1500);
+      const now = Date.now();
+      setClock(now);
+      if (now >= retryUntil) window.clearInterval(timer);
+    }, 1000);
     return () => window.clearInterval(timer);
-  }, [busy, dialogueBusy, workBusy, task?.id]); // Poll only restored server work.
+  }, [retryUntil]);
 
   useEffect(() => {
-    if (sent || busy === "running") end.current?.scrollIntoView({ block: "nearest" });
-  }, [sent, busy, task?.revision]);
+    if (busy || !activeUntil || !taskId) return;
+    const deadline = activeUntil;
+    const controller = new AbortController();
+    const { signal } = controller;
+    const expire = window.setTimeout(() => setClock(Date.now()), Math.max(0, deadline - Date.now()) + 20);
+    async function poll() {
+      let nextDelay = 1500;
+      try {
+        const next = await agentRequest({ action: "status", id: taskId }, undefined, signal);
+        if (!signal.aborted) {
+          setTask((current) => current?.id === next.id && current.revision <= next.revision ? next : current);
+          setError((current) => current === statusReadError ? "" : current);
+        }
+      } catch {
+        if (!signal.aborted) setError((current) => current || statusReadError);
+        nextDelay = 3000;
+      }
+      if (!signal.aborted && Date.now() < deadline) timer = window.setTimeout(() => void poll(), nextDelay);
+    }
+    let timer = window.setTimeout(() => void poll(), 1500);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+      window.clearTimeout(expire);
+    };
+  }, [busy, activeUntil, taskId]);
 
-  function prefill(text: string) {
-    setMessage(text);
-    input.current?.focus();
+  const visibleRunId = focus === "run" || focus === "analysis" ? run?.id : undefined;
+  const details = visibleRunId ? runDetails[visibleRunId] : undefined;
+  useEffect(() => {
+    if (!visibleRunId || details !== undefined) return;
+    const controller = new AbortController();
+    const query = taskId ? `?${new URLSearchParams({ agentId: taskId })}` : "";
+    const path = `/api/experiments/runs/${encodeURIComponent(visibleRunId)}/replay${query}`;
+    void fetch(path, { cache: "no-store", signal: controller.signal })
+      .then((response) => response.ok ? response.json() : null)
+      .catch(() => null)
+      .then((payload: RunDetails) => {
+        if (!controller.signal.aborted) setRunDetails((current) => ({ ...current, [visibleRunId]: payload }));
+      });
+    return () => controller.abort();
+  }, [details, taskId, visibleRunId]);
+
+  useEffect(() => () => diagnosisRequest.current?.abort(), []);
+
+  useEffect(() => {
+    if (!drawer) return;
+    drawerClose.current?.focus();
+    const desktop = window.matchMedia("(min-width: 901px)");
+    const dismiss = () => { if (desktop.matches) setDrawer(false); };
+    desktop.addEventListener("change", dismiss);
+    return () => desktop.removeEventListener("change", dismiss);
+  }, [drawer]);
+
+  async function diagnose(runId: string) {
+    if (diagnosisRequest.current || active.current || !connection || blocked || retryUntil > Date.now()) return;
+    const controller = new AbortController();
+    diagnosisRequest.current = controller;
+    setDiagnosing(runId);
+    setDiagnosisError(undefined);
+    try {
+      const response = await fetchWithTemporaryAI(`/api/experiments/runs/${runId}/diagnosis`, connection, {}, controller.signal);
+      const { diagnosis } = await readAIResponse<{ diagnosis?: Diagnosis }>(response);
+      if (diagnosis?.runId !== runId || !Array.isArray(diagnosis.evidence)) throw new Error("未收到本轮诊断。请重试。");
+      if (!controller.signal.aborted) setReports((current) => ({ ...current, [runId]: diagnosis }));
+    } catch (failure) {
+      if (!controller.signal.aborted) {
+        if (provider && failure instanceof AIResponseError && failure.retryAfter) {
+          setRequestCooldown({ provider, until: Date.now() + failure.retryAfter * 1000, message: failure.message });
+        }
+        setDiagnosisError({ id: runId, message: failure instanceof Error ? failure.message : "诊断失败。请重试。" });
+      }
+    } finally {
+      if (diagnosisRequest.current === controller) {
+        diagnosisRequest.current = null;
+        setDiagnosing(undefined);
+      }
+    }
   }
 
-  function proposal(calls: AgentCall[], decision?: AgentDecision) {
-    if (!task || !calls.length) return null;
-    const current = calls.some(({ id }) => task.pending.some((call) => call.id === id));
-    return <section className="agent-proposal">
-      <p className="agent-entry-tag">实验方案{current ? ` · ${phases[busy === "running" ? "running" : task.phase]}` : ""}</p>
-      {calls.map((call) => {
-        const saved = task.runs.find(({ id }) => id === call.id);
-        const pending = task.pending.some(({ id }) => id === call.id);
-        return <article className="agent-tool" key={call.id}>
-          <h3>{getExperimentEngine(call.tool)?.creator.title}</h3>
-          <p className="agent-tool-id">{call.tool} · {saved ? "已运行" : pending ? phases[busy === "running" ? "running" : task.phase] : "方案已结束"}</p>
-          <ToolDetails config={call.config} />
-          <p>观察 · {creatorObservations[call.tool].metrics}</p>
-        </article>;
-      })}
-      {decision && <details className="agent-events">
-        <summary>计划与工具记录</summary>
-        <p className="agent-entry-tag">AI 规划</p>
-        {!!decision.plan?.length && <ol>{decision.plan.map((step, index) => <li key={index}>{step}</li>)}</ol>}
-        <DecisionDetails decision={decision} runs={task.runs} />
-        <p>记录模型 · {decision.model}</p>
-      </details>}
-      {current && <div className="agent-actions">
-        <button type="button" className="agent-secondary" onClick={() => prefill("把实验参数改为：")} disabled={blocked}>修改参数</button>
-        {approvalVisible && <button type="button" className="agent-primary" disabled={blocked || !!task.dialogue?.pending} onClick={() => void send("approve")}>
-          <CatalogIcon icon="lucide:play" width={15} />{task.phase === "tool-error" || expired ? "重试运行" : "确认并运行"}
-        </button>}
-      </div>}
-      {calls.map((call) => {
-        const index = task.runs.findIndex(({ id }) => id === call.id);
-        return index < 0 ? null : <RunEntry key={call.id} taskId={task.id} run={task.runs[index]} number={index + 1}
-          diagnosis={diagnoses[call.id]} discuss={prefill} />;
-      })}
-    </section>;
+  function closeDrawer() {
+    setDrawer(false);
+    requestAnimationFrame(() => drawerToggle.current?.focus());
   }
 
-  const turnIds = new Set(task?.dialogue?.turns.flatMap((turn) => turn.proposalIds ?? []));
-  const described = new Set(task?.decisions.flatMap((decision) => decision.calls?.map(({ id }) => id) ?? []));
-  const legacyPending = task?.pending.filter(({ id }) => !described.has(id)) ?? [];
-  const legacyRuns = task?.runs.filter(({ id }) => !described.has(id)) ?? [];
-  const lastDecision = task?.decisions.at(-1);
-  const hasMessages = !!(task?.dialogue?.turns.length || task?.dialogue?.pending || sent);
-  const notice = intent === "diagnosis" && !task?.runs.length ? "运行一轮，即可诊断。" : intent === "run" && !task?.pending.length && !task?.runs.length && !savedPlan
-    ? "先生成方案，再运行。" : intent === "config" && !canPlan && !task?.pending.length && !task?.runs.length && !savedPlan
-      ? "先说说你想研究什么。" : undefined;
+  function planResearch() {
+    const draft = message.trim();
+    const goal = draft || question;
+    if (!goal) { input.current?.focus(); return; }
+    const prefix = draft || !task ? "请设计实验。\n" : "请根据当前问题设计实验。";
+    const request = draft || !task ? prefix + goal : prefix;
+    const inherited = !draft || draft === question ? savedGuess : undefined;
+    const note = (guess ?? inherited ?? "").trim().replace(/\s+/gu, " ");
+    const text = (request.length + (note ? note.length + 6 : 0) <= maxQuestionLength ? request : goal)
+      + (note ? `\n我的猜想：${note}` : "");
+    void send("message", text, goal).then((ok) => {
+      if (!ok) return;
+      setMessage((current) => current.trim() === draft ? "" : current);
+      setGuess(undefined);
+    });
+  }
 
-  return <section className="agent-workbench" aria-labelledby="creator-headline">
-    <header className="agent-header">
-      <div><p className="agent-entry-tag"><CatalogIcon icon="lucide:flask-conical" width={16} /> AI 实验创造台</p>
-        <h1 id="creator-headline">聊聊你的想法。</h1></div>
-      <nav className="agent-actions" aria-label="对话操作">
-        <Link className="agent-secondary" href={settingsHref}><CatalogIcon icon="lucide:settings-2" width={15} /> AI 设置</Link>
-        {task && !blocked && <Link className="agent-secondary" href={agentWorkbenchLink({ fresh: true })}><CatalogIcon icon="lucide:plus" width={15} /> 新对话</Link>}
+  function selectRound(id: string) { show(focus, id); }
+  function openRun(id: string) {
+    if (drawer) closeDrawer();
+    show("run", id);
+  }
+  function retryDetails() {
+    if (run) setRunDetails((current) => ({ ...current, [run.id]: undefined }));
+  }
+
+  const stage = steps.find((step) => workbenchFocus[step] === focus)!;
+  const displayTitle = target || question || "未命名研究";
+  return <main className="algoverse-workbench" onKeyDown={(event) => {
+    if (drawer && event.key === "Escape") { event.preventDefault(); closeDrawer(); }
+  }}>
+    <header className="wb-top" inert={drawer}>
+      <div className="wb-brand-row">
+        <Link className="wb-brand" href="/" aria-label="AlgoVerse 智算万象，首页"><WorkbenchIcon icon="triangle" width={21} /><b>AlgoVerse</b></Link>
+        <span className="wb-brand-divider" aria-hidden="true" />
+        <span className="wb-product">动态实验工作台</span>
+      </div>
+      <nav className="wb-top-tools" aria-label="工作台操作">
+        <Link className="wb-button wb-top-link" href="/experiments" title="实验中心" aria-label="实验中心"><WorkbenchIcon icon="layout-grid" width={16} /><span>实验中心</span></Link>
+        <Link className="wb-button wb-top-link" href={settingsHref} title="AI 设置" aria-label="AI 设置"><WorkbenchIcon icon="settings-2" width={16} /><span>AI 设置</span></Link>
       </nav>
     </header>
-    <div className="agent-stream" aria-label="对话记录">
-      {notice && <p className="agent-notice" role="status">{notice}</p>}
-      {!hasMessages && !task?.pending.length && !task?.runs.length && !savedPlan && <div className="agent-empty">
-        <p>问个概念，或做个实验。</p>
-        <div className="agent-actions">
-          <button type="button" className="agent-secondary" onClick={() => prefill("比较冒泡排序和快速排序。")}>比较两种排序 <CatalogIcon icon="lucide:arrow-up-right" width={14} /></button>
-          <button type="button" className="agent-secondary" onClick={() => prefill("先序遍历和后序遍历有什么区别？")}>聊聊树遍历 <CatalogIcon icon="lucide:arrow-up-right" width={14} /></button>
-        </div>
-      </div>}
-      {task?.dialogue?.turns.map((turn, index) => {
-        const decision = turn.proposalIds?.length ? task.decisions.find(({ calls }) => calls?.some(({ id }) => turn.proposalIds?.includes(id))) : undefined;
-        return <article key={index} className="agent-turn">
-          <p className="agent-user">{turn.message}</p>
-          <div className="agent-answer">
-            {turn.action ? <><span className="agent-speaker"><CatalogIcon icon="lucide:sparkles" width={16} /> Agent</span>
-              {turn.tutor ? <LazyTutorReply answer={turn.reply} codeBlocks={turn.tutor.codeBlocks} reveal={false} />
-                : turn.action !== "run" || !decision
-                ? <DecisionDetails decision={{ observation: turn.reply, evidence: turn.evidence }} runs={task.runs} />
-                : proposal(decision.calls ?? [], decision)}
-              {turn.scheduling && <SchedulingDetails evidence={turn.scheduling} />}</>
-              : <p className="agent-muted">{turn.stopped ? "已停止回复。" : "未收到回复。"}</p>}
+    <div className="wb-frame">
+      <div className="wb-session" inert={drawer}>
+        <div className="wb-session-name">
+          <span className="wb-session-icon"><WorkbenchIcon icon="folder-open" width={19} /></span>
+          <div>
+            <p>实验会话</p>
+            <h1 title={displayTitle}>{displayTitle}</h1>
           </div>
-        </article>;
-      })}
-      {task?.decisions.filter((decision) => decision.calls?.length && decision.calls.every(({ id }) => !turnIds.has(id)))
-        .map((decision) => <div key={decision.calls?.[0].id} className="agent-answer">{proposal(decision.calls ?? [], decision)}</div>)}
-      {!!legacyPending.length && <div className="agent-answer">{proposal(legacyPending)}</div>}
-      {task && legacyRuns.map((run) => <div key={run.id} className="agent-answer">
-        <RunEntry taskId={task.id} run={run} number={task.runs.indexOf(run) + 1} diagnosis={diagnoses[run.id]} discuss={prefill} />
-      </div>)}
-      {savedPlan && !task && <section className="agent-proposal agent-answer">
-        <p className="agent-entry-tag">上次保存的方案</p><ToolDetails config={savedPlan} />
-        <button type="button" className="agent-primary" disabled={blocked} onClick={() => void send("import")}>继续本次方案</button>
-      </section>}
-      {task?.phase === "finished" && lastDecision && <details className="agent-report agent-answer" open>
-        <summary>最终实验报告</summary><DecisionDetails decision={lastDecision} runs={task.runs} report />
-      </details>}
-      {task?.question && <p className="agent-answer">{task.question}</p>}
-      {(sent || task?.dialogue?.pending) && <article className="agent-turn">
-        <p className="agent-user">{sent || task?.dialogue?.pending}</p>
-        {!blocked && task?.dialogue?.pending && <button type="button" className="agent-secondary" onClick={() => void send("retry-message")}>重试回复</button>}
-      </article>}
-      {task && (task.phase === "ai-error" || (task.phase === "observe" && task.autoContinue === true) || (task.phase === "deciding" && expired)) && !task.dialogue?.pending &&
-        <button type="button" className="agent-secondary" disabled={blocked} onClick={() => void send("decide")}>继续分析</button>}
-      {(busy || dialogueBusy || workBusy) && <p className="agent-loading" role="status">
-        <CatalogIcon icon="lucide:loader-circle" width={17} />
-        {busy === "running" || task?.phase === "running" ? "工具运行中" : busy === "status" ? "正在更新" : "AI 正在回复"}
-      </p>}
-      {(error || task?.dialogue?.error || task?.error) && <div>
-        <p className="agent-error" role="alert">{error || task?.dialogue?.error || task?.error}</p>
-        {task && error && <button className="agent-secondary" type="button" disabled={blocked} onClick={() => void send("status")}>刷新状态</button>}
-      </div>}
-      <div className="agent-tail" ref={end} />
+        </div>
+        <div className="wb-session-actions">
+          <span className="wb-chip" data-tone={task || reference ? "good" : undefined}><i aria-hidden="true" />{task || reference ? "已保存" : "未开始"}</span>
+          {runs.length > 0 && <button type="button" className="wb-button wb-history" onClick={() => show("run", selectedRun || latest?.id || runs.at(-1)?.id)}>
+            <WorkbenchIcon icon="history" width={16} />{runs.length} 轮记录
+          </button>}
+          {(task || reference) && <Link className="wb-button wb-new" href={agentWorkbenchLink({ fresh: true, focus: "idea" })} aria-label="新建会话" title="新建会话"
+            aria-disabled={blocked || undefined} onClick={(event) => { if (blocked) event.preventDefault(); }}><WorkbenchIcon icon="plus" width={16} /><span>新建</span></Link>}
+        </div>
+      </div>
+      <nav className="wb-steps" aria-label="实验阶段" inert={drawer}>
+        {steps.map((step, index) => {
+          const value = workbenchFocus[step];
+          return <button key={step} type="button" aria-current={focus === value ? "step" : undefined} data-complete={completed[value]}
+            aria-controls="wb-canvas" onClick={() => show(value)}>
+            <span className="wb-step-index">{String(index + 1).padStart(2, "0")}</span><span>{workflowSteps[step]}</span>
+            {completed[value] && <span className="wb-step-done"><WorkbenchIcon icon="check" width={14} /><span className="sr-only">已完成</span></span>}
+          </button>;
+        })}
+      </nav>
+      <div className="wb-main" data-collapsed={collapsed}>
+        <section className="wb-canvas" id="wb-canvas" aria-labelledby="wb-stage-title" inert={drawer}>
+          <header className="wb-canvas-head">
+            <div className="wb-stage-name">
+              <span className="wb-stage-icon"><WorkbenchIcon icon={stageDetails[focus].icon} width={21} /></span>
+              <div><h2 id="wb-stage-title">{workflowSteps[stage]}</h2><p>{stageDetails[focus].description}</p></div>
+            </div>
+            <div className="wb-stage-actions">
+              {(focus === "run" || focus === "analysis") && <RoundPicker runs={runs} run={run} select={selectRound} />}
+              <button type="button" className="wb-button wb-open-drawer" ref={drawerToggle} aria-expanded={drawer} aria-controls="wb-activity" onClick={() => setDrawer(true)}>
+                <WorkbenchIcon icon="panel-right-open" width={17} /><span>{hasReply ? "回复" : "活动"}</span>
+                {(hasReply || activityStatus || visibleError) && <i aria-hidden="true" />}
+              </button>
+            </div>
+          </header>
+          <div className="wb-canvas-body" ref={canvas}>
+            {focus === "idea" && <ResearchStage question={question} target={target} hypothesis={hypothesis} onHypothesis={setGuess}
+              prefill={prefill} submit={planResearch} blocked={blocked} canSubmit={!modelBlocked && !!(message.trim() || question)} hasPlan={activePlan || !!latest}
+              showPlan={() => show("plan")} />}
+            {focus === "plan" && <PlanStage task={task} savedPlan={!task ? savedPlan : undefined} lastRun={latest} hasResearch={hasResearch} blocked={blocked} modelBlocked={modelBlocked} canApprove={canApprove}
+              retry={retryRun} approve={() => void send("approve")} edit={() => prefill("把实验参数改为：")} importPlan={() => void send("import")}
+              showRun={() => show("run", latest?.id)} ask={hasResearch ? planResearch : promptForQuestion} />}
+            {focus === "run" && (run ? <RunStage key={run.id} run={run} details={details} number={number} retry={retryDetails} showAnalysis={() => show("analysis")} />
+              : <StageEmpty icon="chart-no-axes-column" title={runningNow ? "正在运行实验" : "这里还没有实测"}
+                description={runningNow ? "结果就绪后会显示在这里。" : activePlan ? "先确认方案，再运行。" : "先设计方案，再确认运行。"}>
+                <button type="button" className="wb-button" onClick={() => show("plan")}>查看实验方案 <WorkbenchIcon icon="arrow-right" width={16} /></button>
+              </StageEmpty>)}
+            {focus === "analysis" && (run ? <AnalysisStage run={run} runs={runs} task={task} details={details} diagnosis={reports[run.id]}
+              diagnosing={diagnosing === run.id} diagnosisError={diagnosisError?.id === run.id ? diagnosisError.message : ""}
+              blocked={blocked} modelBlocked={modelBlocked} canDiagnose={!!connection} canAdopt={run.id === latest?.id && !activePlan}
+              retry={retryDetails} diagnose={() => void diagnose(run.id)} stopDiagnosis={() => diagnosisRequest.current?.abort()}
+              discuss={prefill} adopt={(text) => void send("message", text)} />
+              : <StageEmpty icon="scan-search" title="还没有可诊断的结果" description="跑完一轮，再来看证据。">
+                <button type="button" className="wb-button" onClick={() => show("run")}>查看运行区 <WorkbenchIcon icon="arrow-right" width={16} /></button>
+              </StageEmpty>)}
+          </div>
+        </section>
+        {drawer && <div className="wb-backdrop" aria-hidden="true" onClick={closeDrawer} />}
+        <aside className="wb-activity" id="wb-activity" data-drawer={drawer} aria-labelledby="wb-activity-title"
+          role={drawer ? "dialog" : undefined} aria-modal={drawer || undefined}>
+          <header className="wb-activity-head">
+            <div className="wb-activity-title"><WorkbenchIcon icon="activity" width={19} /><h2 id="wb-activity-title">Agent 活动</h2></div>
+            <button type="button" className="wb-button wb-activity-close" ref={drawerClose} aria-label="关闭活动" onClick={closeDrawer}><WorkbenchIcon icon="x" width={18} /></button>
+            <button type="button" className="wb-button wb-collapse" aria-expanded={!collapsed} aria-controls="wb-activity-content"
+              aria-label={collapsed ? "展开 Agent 活动" : "收起 Agent 活动"} title={collapsed ? "展开 Agent 活动" : "收起 Agent 活动"}
+              onClick={() => setCollapsed(!collapsed)}><WorkbenchIcon icon={collapsed ? "panel-right-open" : "panel-right-close"} width={19} /></button>
+          </header>
+          <div className="wb-activity-content" id="wb-activity-content">
+            <WorkbenchActivity task={task} status={diagnosing ? "AI 正在诊断" : activityStatus} error={visibleError} blocked={blocked} modelBlocked={modelBlocked}
+              inFlight={blocked || !!diagnosing} retryReply={() => void send("retry-message")} retryAnalysis={canContinue ? () => void send("decide") : undefined}
+              recover={task && error ? () => void send("status") : undefined} openRun={openRun} />
+          </div>
+        </aside>
+      </div>
+      <footer className="wb-dock" inert={drawer}>
+        <div className="wb-dock-head">
+          <label htmlFor="agent-message"><WorkbenchIcon icon="sparkles" width={17} /> AI 实验指令</label>
+          {visibleError ? <span className="wb-dock-error" role={waitHint ? undefined : "alert"}>{visibleError}</span>
+            : recovery ? <span className="wb-dock-context" role="status">{recovery}</span>
+            : explicitRun && <span className="wb-dock-context">引用第 {number} 轮</span>}
+        </div>
+        <form className="wb-composer" onSubmit={(event) => { event.preventDefault(); void send("message"); }}>
+          <textarea id="agent-message" ref={input} value={message} onChange={(event) => setMessage(event.target.value)}
+            rows={1} maxLength={maxQuestionLength} placeholder="提问、改参数，或分析本轮。"
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                if (maySend) event.currentTarget.form?.requestSubmit();
+              }
+            }} />
+          {canStop ? <button className="wb-button" type="button" onClick={() => void stop()}><WorkbenchIcon icon="square" width={15} /> 停止</button>
+            : <button className="wb-button wb-primary" type="submit" disabled={!maySend || !message.trim()}><WorkbenchIcon icon="arrow-up" width={17} /> 发送</button>}
+        </form>
+        <p className="wb-keyboard"><kbd>Enter</kbd> 发送 <span /> <kbd>Shift + Enter</kbd> 换行</p>
+      </footer>
     </div>
-    <div className="agent-dock">
-      <form className="agent-composer" onSubmit={(event: FormEvent) => { event.preventDefault(); void send("message"); }}>
-        <label htmlFor="agent-message" className="sr-only">发送消息</label>
-        <textarea ref={input} id="agent-message" value={message} onChange={(event) => setMessage(event.target.value)}
-          maxLength={maxQuestionLength} rows={2} placeholder="问个问题，或试个实验。"
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-              event.preventDefault();
-              if (!blocked) event.currentTarget.form?.requestSubmit();
-            }
-          }} />
-        {canStop ? <button type="button" className="agent-primary" onClick={() => void stop()}>
-          <CatalogIcon icon="lucide:square" width={15} /> 停止</button> : <button type="submit" className="agent-primary" disabled={blocked || !message.trim()}>
-          <CatalogIcon icon="lucide:arrow-up" width={17} /> 发送</button>}
-      </form>
-      <p className="agent-dock-hint">Enter 发送 · Shift + Enter 换行</p>
-    </div>
-  </section>;
+  </main>;
 }

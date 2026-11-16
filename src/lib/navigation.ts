@@ -19,13 +19,16 @@ export function tutorConversationLink(agentId: string) {
 export type ExperimentTask = { sessionId: string; runId?: string };
 export const workflowSteps = { question: "提出想法", config: "AI 生成实验", run: "运行对比", diagnosis: "诊断改进" } as const;
 export type WorkflowStep = keyof typeof workflowSteps;
+export const workbenchFocus = { question: "idea", config: "plan", run: "run", diagnosis: "analysis" } as const satisfies Record<WorkflowStep, string>;
+export type WorkbenchFocus = typeof workbenchFocus[WorkflowStep];
 
-export function agentWorkbenchLink({ agentId, intent, fresh, sessionId, runId }: {
-  agentId?: string; intent?: WorkflowStep; fresh?: boolean; sessionId?: string; runId?: string;
+export function agentWorkbenchLink({ agentId, focus, intent, fresh, sessionId, runId }: {
+  agentId?: string; focus?: WorkbenchFocus; intent?: WorkflowStep; fresh?: boolean; sessionId?: string; runId?: string;
 } = {}) {
   const query = new URLSearchParams();
   if (agentId) query.set("agentId", agentId);
   if (intent) query.set("intent", intent);
+  if (focus) query.set("focus", focus);
   if (fresh) query.set("new", "1");
   if (sessionId) query.set("sessionId", sessionId);
   if (runId) query.set("runId", runId);

@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
-import { DecisionDetails } from "@/components/experiments/AgentWorkbench";
+import { DecisionDetails } from "@/components/experiments/WorkbenchEvidence";
 import { ExperimentBench } from "@/components/experiments/ExperimentBench";
 import { ExperimentRunReports } from "@/components/experiments/ExperimentRunReports";
 import { LabWorkspace } from "@/components/experiments/LabWorkspace";
@@ -29,7 +29,7 @@ export default async function ExperimentRunPage({ params, searchParams }: {
       session.source?.type === "agent" ? getAgentTask(session.source.taskId) : null,
     ]);
     const member = agent?.runs.some(({ id }) => id === run.id) ? agent : null;
-    const conversation = agentWorkbenchLink({ ...task, agentId: member?.id });
+    const conversation = agentWorkbenchLink({ ...task, agentId: member?.id, focus: "run" });
     const returnLink = member ? `${conversation}#agent-run-${run.id}` : conversation;
     const final = member?.phase === "finished" ? member.decisions.at(-1) : undefined;
     return <LabWorkspace className={`catalog-page creator-studio theme-${engine.domain}`} back={{ href: returnLink, label: member ? "返回 Agent 继续讨论" : "到 Agent 讨论" }}>

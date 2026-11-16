@@ -28,7 +28,7 @@ export const aiProviders = {
     label: "通义千问（阿里云百炼）",
     models: [
       { apiId: "qwen3.8-flash", label: "Qwen3.8 Flash", capability: "快速问答", billing: "token", thinking: "disabled", output: "json-object", regions: supportedQwenRegions },
-      { apiId: "qwen3.7-plus", label: "Qwen3.7 Plus", capability: "综合问答与实验设计", billing: "token", thinking: "disabled", output: "json-object", regions: supportedQwenRegions },
+      { apiId: "qwen3.7-plus", label: "Qwen3.7 Plus", capability: "综合问答与实验设计", billing: "token", thinking: "enabled", output: "json-object", regions: supportedQwenRegions },
       { apiId: "qwen3.8-max", label: "Qwen3.8 Max", capability: "复杂推理", billing: "token", thinking: "enabled", output: "json-object", regions: supportedQwenRegions },
       { apiId: "qwen3-coder-flash", label: "Qwen3 Coder Flash", capability: "编程与代码分析", billing: "token", thinking: "provider-default", output: "text", regions: supportedQwenRegions },
     ],

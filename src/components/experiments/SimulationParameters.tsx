@@ -46,7 +46,7 @@ export function SimulationWorkbench({ engineId, initial, results, action, sessio
   const engine = getExperimentEngine(engineId);
   const curriculum = engine && "curriculum" in engine ? engine : undefined;
   const validated = engine?.configure(parameters, "seed" in initial ? initial.seed : 0);
-  const config = validated ?? initial;
+  const config = validated && !("walls" in validated) ? validated : initial;
   const visibleResults = changed ? undefined : results;
   function setParameters(next: Parameters) {
     setParametersState(next);
@@ -108,6 +108,19 @@ export function SimulationWorkbench({ engineId, initial, results, action, sessio
       </form>
     </aside>}
     <div className="creator-stage" id="experiment-replay" tabIndex={-1}>
+      <SimulationResultReplay engineId={engineId} config={config} results={visibleResults} />
+    </div>
+  </div>;
+}
+
+export function SimulationResultReplay({ engineId, config, results: visibleResults }: {
+  engineId: Exclude<EngineId, "pathfinding">;
+  config: Exclude<ExperimentConfig, { walls: readonly number[] }>;
+  results?: ExperimentResults;
+}) {
+  const engine = getExperimentEngine(engineId);
+  const curriculum = engine && "curriculum" in engine ? engine : undefined;
+  return <>
       {curriculum && <CurriculumReplay key={visibleResults ? "saved" : "preview"} lab={curriculum.curriculum} description={curriculum.creator.description}
         results={visibleResults && "report" in visibleResults && visibleResults.kind === engineId ? visibleResults : undefined} />}
       {"values" in config && <SortingReplay config={config} results={visibleResults && "kind" in visibleResults && visibleResults.kind === "sorting" ? visibleResults : undefined} />}
@@ -127,6 +140,5 @@ export function SimulationWorkbench({ engineId, initial, results, action, sessio
       {"topology" in config && <DynamicRoutingReplay key={visibleResults ? "saved" : "preview"} config={config} results={visibleResults && "kind" in visibleResults && visibleResults.kind === "dynamic-routing" ? visibleResults : undefined} />}
       {"commands" in config && <HeapReplay key={visibleResults ? "saved" : "preview"} config={config} results={visibleResults && "kind" in visibleResults && visibleResults.kind === "memory-allocation" ? visibleResults : undefined} />}
       {"schedule" in config && <TransactionReplay key={visibleResults ? "saved" : "preview"} config={config} results={visibleResults && "kind" in visibleResults && visibleResults.kind === "transaction-concurrency" ? visibleResults : undefined} />}
-    </div>
-  </div>;
+  </>;
 }

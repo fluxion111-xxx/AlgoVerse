@@ -1,5 +1,6 @@
 import type { EngineId, ExperimentConfig } from "./experimentEngines";
 import type { TutorCodeBlock } from "./tutorReply";
+import type { AICooldown } from "./aiRateLimit";
 
 export const agentLimits = { decisions: 6, runs: 4, steps: 12, batch: 2, outputTokens: 1000 } as const;
 export const agentDialogueLimits = { requests: 24, context: 10, outputTokens: 1200 } as const;
@@ -47,6 +48,9 @@ export type AgentDialogue = {
   requests: number;
   focus?: AgentFocus;
   pending?: string;
+  pendingRound?: number | null;
+  pendingPlan?: Omit<AgentFocus, "firstRun"> & { switchTopic?: boolean };
+  cooldown?: AICooldown;
   activeUntil?: number;
   operationId?: string;
   error?: string;
@@ -71,10 +75,16 @@ export type AgentTask = {
   question?: string;
   error?: string;
   leaseUntil?: number;
+  cooldown?: AICooldown;
   operationId?: string;
   requests: number;
   steps: number;
 };
+
+export function agentCooldown(task: AgentTask | null, provider: AICooldown["provider"] | undefined, now = Date.now()) {
+  return [task?.dialogue?.cooldown, task?.cooldown].reduce<AICooldown | undefined>((latest, cooldown) =>
+    cooldown && cooldown.provider === provider && cooldown.until > (latest?.until ?? now) ? cooldown : latest, undefined);
+}
 
 const confirmationCommands = new Set([
   "确认", "确认运行", "确认并运行", "开始", "开始运行", "开始实验", "运行", "运行实验", "执行", "执行实验",

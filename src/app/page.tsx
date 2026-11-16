@@ -6,7 +6,7 @@ import { CatalogIcon } from "@/components/experiments/CatalogEffects";
 import { EditorialStory } from "@/components/experiments/EditorialStory";
 import { ExperimentPrompt } from "@/components/experiments/ExperimentPrompt";
 import { courseRoute, courses } from "@/lib/courses";
-import { agentWorkbenchLink, quickStartRoute, workflowSteps } from "@/lib/navigation";
+import { agentWorkbenchLink, quickStartRoute, workbenchFocus, workflowSteps } from "@/lib/navigation";
 import { getActiveAIWorkflow, getActiveAgentTask } from "@/lib/server/experimentRecords";
 import "./home-editorial.css";
 import "./story-editorial.css";
@@ -51,7 +51,7 @@ export default function Home() {
       <EditorialStory id="process" titleId="atlas-title" mode="workflow" kicker="一题四步"
         headline={["把想法", "放进实验。"]} intro="从一个问题，到一轮实测。"
         entries={steps.map((step) => ({ id: step, title: workflowSteps[step], ...workflowImages[step],
-          link: { href: agentWorkbenchLink({ intent: step }), label: "进入这一步" } }))}>
+          link: { href: agentWorkbenchLink({ focus: workbenchFocus[step] }), label: "进入这一步" } }))}>
         <div id="home-ask" className="editorial-story-form">
           <div className="story-form-copy">
             <p className="editorial-kicker">AI 实验创造台</p>

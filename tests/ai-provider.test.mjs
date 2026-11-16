@@ -18,6 +18,7 @@ const hooks = registerHooks({
 });
 const { POST } = await import("../src/app/api/ai/connection/route.ts");
 const { POST: tutorPOST } = await import("../src/app/api/ai/tutor/route.ts");
+const { fetchAI, readAIResponse } = await import("../src/lib/aiHttp.ts");
 const { readAICredentials, requestAIJson, reusePendingAI } = await import("../src/lib/server/aiProvider.ts");
 const { confirmZeroSiliconFlowPrice, hasZeroSiliconFlowPrice } = await import("../src/lib/server/siliconflowPricing.ts");
 const { reservePlatformCall } = await import("../src/lib/platformQuota.ts");
@@ -1904,11 +1905,11 @@ test("connection tests route each model and regional key to its official endpoin
     [deepseek(), deepseekEndpoint, { thinking: { type: "disabled" }, max_tokens: 32 }],
     [deepseek("deepseek-v4-pro"), deepseekEndpoint, { thinking: { type: "enabled" }, reasoning_effort: "low", max_tokens: 1056 }],
     [qwen("qwen3.8-flash", "cn-beijing"), beijing, { enable_thinking: false, max_tokens: 32 }],
-    [qwen("qwen3.7-plus", "cn-beijing"), beijing, { enable_thinking: false, max_tokens: 32 }],
+    [qwen("qwen3.7-plus", "cn-beijing"), beijing, { enable_thinking: true, thinking_budget: 1024, max_tokens: 32 }],
     [qwen("qwen3.8-max", "cn-beijing"), beijing, { enable_thinking: true, thinking_budget: 1024, max_tokens: 32 }],
     [qwen("qwen3-coder-flash", "cn-beijing"), beijing, { max_tokens: 32 }],
     [qwen("qwen3.8-flash", "ap-southeast-1"), singapore, { enable_thinking: false, max_tokens: 32 }],
-    [qwen("qwen3.7-plus", "ap-southeast-1"), singapore, { enable_thinking: false, max_tokens: 32 }],
+    [qwen("qwen3.7-plus", "ap-southeast-1"), singapore, { enable_thinking: true, thinking_budget: 1024, max_tokens: 32 }],
     [qwen("qwen3.8-max", "ap-southeast-1"), singapore, { enable_thinking: true, thinking_budget: 1024, max_tokens: 32 }],
     [qwen("qwen3-coder-flash", "ap-southeast-1"), singapore, { max_tokens: 32 }],
   ];
@@ -1970,15 +1971,18 @@ test("Qwen failures and malformed completions never show connected or echo provi
   const cases = [
     [(key) => Response.json({ error: { code: "invalid_api_key", message: key } }, { status: 401 }), 401, /地域/],
     [(key) => Response.json({ error: { code: "Arrearage", message: key } }, { status: 403 }), 402, /余额不足/],
+    [(key) => Response.json({ error: { code: "Model.AccessDenied", message: key } }, { status: 403 }), 403, /模型权限/],
     [() => Response.json({ error: { code: "ModelNotFound" } }, { status: 400 }), 404, /所选模型不可用/],
+    [(key) => Response.json({ error: { code: "InvalidParameter", message: key } }, { status: 400 }), 422, /拒绝请求参数/],
     [() => Response.json({ error: { code: "insufficient_quota" } }, { status: 429 }), 429, /额度不足/],
-    [() => completion('{"ok":false}', "qwen3.7-plus"), 502, /格式有误/],
+    [() => completion('{"ok":false}', "qwen3.7-plus"), 502, /格式有误/, 2],
     [() => completion(undefined, "qwen3.8-flash"), 502, /未确认所选模型/],
     [() => completion(), 502, /未确认所选模型/],
     [() => Response.json({ choices: [] }), 502, /格式有误/],
   ];
-  for (const [index, [reply, status, message]] of cases.entries()) {
+  for (const [index, [reply, status, message, attempts = 1]] of cases.entries()) {
     const key = `sk-fixture-private-${index}`;
+    const before = fetch.mock.callCount();
     fetch.mock.mockImplementation(async () => reply(key));
     const response = await POST(request(qwen("qwen3.7-plus", "cn-beijing"), key));
     assert.equal(response.status, status);
@@ -1986,8 +1990,80 @@ test("Qwen failures and malformed completions never show connected or echo provi
     assert.equal(body.status, "error");
     assert.match(body.message, message);
     assert.ok(!JSON.stringify(body).includes(key));
+    assert.equal(fetch.mock.callCount() - before, attempts);
   }
-  assert.equal(fetch.mock.callCount(), cases.length);
+});
+
+test("a Qwen thinking JSON incompatibility retries the selected model in text mode with validation", async (t) => {
+  isolatePersonalLimits(t);
+  const model = "qwen3.7-plus";
+  const requestBodies = [];
+  const upstream = t.mock.method(globalThis, "fetch", async (_url, init) => {
+    requestBodies.push(JSON.parse(init.body));
+    if (requestBodies.length === 1) return Response.json({ error: {
+      code: "invalid_parameter_error", message: "Json mode response is not supported when enable_thinking is true",
+    } }, { status: 400 });
+    return completion('```json\n{"ok":true}\n```', model);
+  });
+  const response = await POST(request(qwen(model, "ap-southeast-1"), "sk-fixture-qwen-format"));
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).model, model);
+  assert.equal(upstream.mock.callCount(), 2);
+  const [structured, text] = requestBodies;
+  assert.deepEqual(structured.response_format, { type: "json_object" });
+  assert.equal(text.response_format, undefined);
+  assert.equal(text.enable_thinking, true);
+  assert.equal(text.model, structured.model);
+
+  const next = await POST(request(qwen(model, "ap-southeast-1"), "sk-fixture-qwen-format"));
+  assert.equal(next.status, 200);
+  assert.equal(upstream.mock.callCount(), 3);
+  assert.equal(requestBodies[2].response_format, undefined);
+
+  const otherRegion = await POST(request(qwen(model, "cn-beijing"), "sk-fixture-qwen-format"));
+  assert.equal(otherRegion.status, 200);
+  assert.deepEqual(requestBodies[3].response_format, { type: "json_object" });
+});
+
+test("DeepSeek verification recovers blank and truncated JSON with one bounded retry", async (t) => {
+  isolatePersonalLimits(t);
+  for (const [index, [model, failure]] of [
+    ["deepseek-flash", completion("   ", "deepseek-flash")],
+    ["deepseek-v4-pro", Response.json({ model: "deepseek-v4-pro",
+      choices: [{ finish_reason: "length", message: { content: "", reasoning_content: "private reasoning" } }],
+      usage: { prompt_tokens: 14, completion_tokens: 5, total_tokens: 19 } })],
+  ].entries()) {
+    let attempts = 0;
+    const upstream = t.mock.method(globalThis, "fetch", async (_url, init) => {
+      if (++attempts === 1) return failure;
+      assert.match(JSON.parse(init.body).messages[0].content, /请重新作答/);
+      return completion('{"ok":true}', model);
+    });
+    const response = await POST(request(deepseek(model), `sk-fixture-deepseek-format-${index}`));
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).model, model);
+    assert.equal(attempts, 2);
+    upstream.mock.restore();
+  }
+});
+
+test("DeepSeek parameter errors and interrupted completions have distinct safe messages", async (t) => {
+  isolatePersonalLimits(t);
+  const key = "sk-test-deepseek-error-details";
+  const failures = [
+    [Response.json({ error: { message: key } }, { status: 422 }), 422, /拒绝请求参数/],
+    [Response.json({ choices: [{ finish_reason: "insufficient_system_resource", message: { content: key } }] }), 503, /服务中断/],
+  ];
+  const upstream = t.mock.method(globalThis, "fetch", async () => completion());
+  for (const [failure, status, message] of failures) {
+    upstream.mock.mockImplementation(async () => failure);
+    const response = await POST(request(deepseek(), key));
+    assert.equal(response.status, status);
+    const body = await response.json();
+    assert.match(body.message, message);
+    assert.ok(!JSON.stringify(body).includes(key));
+  }
+  assert.equal(upstream.mock.callCount(), 2);
 });
 
 test("connection tests reject custom URLs without reaching a provider", async (t) => {
@@ -2022,6 +2098,53 @@ test("connection tests report provider outages and enforce the existing per-key 
   assert.equal(limited.status, 429);
   assert.ok(Number(limited.headers.get("retry-after")) > 0);
   assert.equal(fetch.mock.callCount(), 6);
+});
+
+test("AI clients handle gateway responses and preserve retry hints without exposing response HTML", async () => {
+  await assert.rejects(readAIResponse(new Response("<html>private gateway data</html>", {
+    status: 429, headers: { "Retry-After": "7" },
+  })), { status: 429, retryAfter: 7, message: "服务请求过多。请稍后重试。" });
+  await assert.rejects(readAIResponse(new Response("busy", {
+    status: 503, headers: { "Retry-After": "15" },
+  })), { status: 503, retryAfter: 15, message: "服务暂不可用。请稍后重试。" });
+  await assert.rejects(readAIResponse(new Response("gateway timeout", { status: 524 })), { status: 524, message: "服务响应超时。请重试。" });
+  await assert.rejects(readAIResponse(Response.json(null)), { status: 502, message: "服务响应异常。请重试。" });
+  await assert.rejects(readAIResponse(Response.json({ status: "error", message: "已到本对话上限。" }, { status: 429 })),
+    { status: 429, retryAfter: undefined, message: "已到本对话上限。" });
+});
+
+test("AI clients explain network failure and propagate explicit cancellation", async (t) => {
+  const abort = new DOMException("User cancelled", "AbortError");
+  const fetch = t.mock.method(globalThis, "fetch", async () => { throw new TypeError("Failed to fetch"); });
+  await assert.rejects(fetchAI("/api/ai/connection", { method: "POST" }), { status: 0, message: "连不上本站。请检查网络。" });
+  fetch.mock.mockImplementation(async () => { throw abort; });
+  await assert.rejects(fetchAI("/api/ai/connection", { method: "POST", signal: AbortSignal.abort(abort) }),
+    (error) => error === abort);
+});
+
+test("a busy personal provider passes its Retry-After through connection testing", async (t) => {
+  isolatePersonalLimits(t);
+  const mock = t.mock.method(globalThis, "fetch", async () => new Response("private", {
+    status: 503, headers: { "Retry-After": "11" },
+  }));
+  const response = await POST(request(deepseek(), "sk-fixture-busy-retry"));
+  assert.equal(response.status, 503);
+  assert.equal(response.headers.get("Retry-After"), "11");
+  assert.equal((await response.json()).message, "AI 服务正忙。请稍后重试。");
+  assert.equal(mock.mock.callCount(), 1);
+});
+
+test("six personal connection checks can each repair output without using another action slot", async (t) => {
+  isolatePersonalLimits(t);
+  let attempts = 0;
+  const key = "sk-fixture-personal-operation";
+  const fetch = t.mock.method(globalThis, "fetch", async () =>
+    completion(++attempts % 2 === 1 ? "" : '{"ok":true}', "deepseek-flash"));
+  for (let i = 0; i < 6; i++) assert.equal((await POST(request(deepseek(), key))).status, 200);
+  const limited = await POST(request(deepseek(), key));
+  assert.equal(limited.status, 429);
+  assert.ok(Number(limited.headers.get("Retry-After")) > 0);
+  assert.equal(fetch.mock.callCount(), 12);
 });
 
 test("timeouts use the same safe response for both providers", async (t) => {

@@ -2,6 +2,7 @@ import "server-only";
 import { createHmac, randomBytes } from "node:crypto";
 import { aiProviders, getAIModel, isApiKey, modelSelectionMessage, parseAISelection, type AIProvider, type AISelection, type TokenUsage } from "@/lib/aiSettings";
 import { isPlatformModel, type PlatformModel } from "@/lib/platformAI";
+import { retryAfterSeconds } from "@/lib/aiRateLimit";
 import { platformQuotaConfigured, platformVisitor, reservePlatformAttempt } from "./platformLimits";
 import { confirmZeroSiliconFlowPrice } from "./siliconflowPricing";
 
@@ -14,11 +15,14 @@ const requestTimeoutMs = 25_000;
 const reasoningTimeoutMs = 55_000;
 const minuteMs = 60_000;
 const maxPerKey = 6;
+const maxAttemptsPerKey = 12;
 const maxPerProcess = 60;
 const maxConcurrent = 8;
+const qwenTextModeTtlMs = 10 * minuteMs;
 
 type PlatformSelection = { provider: "siliconflow"; model: PlatformModel };
-type BYOKCredentials = { apiKey: string; selection: AISelection; signal: AbortSignal; visitor?: undefined };
+type PersonalOperation = { admitted?: boolean };
+type BYOKCredentials = { apiKey: string; selection: AISelection; signal: AbortSignal; visitor?: undefined; operation?: PersonalOperation };
 type PlatformCredentials = { apiKey: string; selection: PlatformSelection; signal: AbortSignal; visitor: string };
 export type AICredentials = BYOKCredentials | PlatformCredentials;
 
@@ -63,9 +67,14 @@ export class AIRequestError extends Error {
 
 export class AIUnverifiedError extends AIRequestError {}
 
-type Limits = { secret: Buffer; keys: Map<string, number>; expiresAt: number; count: number; active: number };
+type Limits = { secret: Buffer; keys: Map<string, number>; attempts?: Map<string, number>; expiresAt: number; count: number; active: number };
 const processState = globalThis as typeof globalThis & { algoVerseAILimits?: Limits };
 const pendingRequestSecret = randomBytes(32);
+const qwenTextModeUntil = new Map<string, number>();
+
+export function sharePersonalOperation(credentials: AICredentials): AICredentials {
+  return credentials.visitor === undefined ? { ...credentials, operation: credentials.operation ?? {} } : credentials;
+}
 
 export function reusePendingAI<T>(pending: Map<string, PendingAIRequest<T>>, id: string, credentials: AICredentials, generate: () => Promise<T>) {
   const fingerprint = createHmac("sha256", pendingRequestSecret)
@@ -80,23 +89,30 @@ export function reusePendingAI<T>(pending: Map<string, PendingAIRequest<T>>, id:
   return task;
 }
 
-function reserveRequest(provider: AIProvider, apiKey: string) {
+function reserveRequest(provider: AIProvider, apiKey: string, operation: PersonalOperation) {
   const now = Date.now();
-  const limits = processState.algoVerseAILimits ??= {
+  const limits: Limits = processState.algoVerseAILimits ??= {
     secret: randomBytes(32), keys: new Map(), expiresAt: now + minuteMs, count: 0, active: 0,
   };
+  const attempts = limits.attempts ??= new Map();
   if (now >= limits.expiresAt) {
     limits.keys.clear();
+    attempts.clear();
     limits.count = 0;
     limits.expiresAt = now + minuteMs;
   }
   if (limits.active >= maxConcurrent) throw new AIRequestError("请求较多，请稍后再试。", 429, 5);
   const fingerprint = createHmac("sha256", limits.secret).update(`${provider}:${apiKey}`).digest("hex");
   const keyCount = limits.keys.get(fingerprint) ?? 0;
-  if (keyCount >= maxPerKey || limits.count >= maxPerProcess) {
+  const attemptCount = attempts.get(fingerprint) ?? 0;
+  if ((!operation.admitted && keyCount >= maxPerKey) || attemptCount >= maxAttemptsPerKey || limits.count >= maxPerProcess) {
     throw new AIRequestError("请求太频繁，请稍后再试。", 429, Math.ceil((limits.expiresAt - now) / 1000));
   }
-  limits.keys.set(fingerprint, keyCount + 1);
+  if (!operation.admitted) {
+    limits.keys.set(fingerprint, keyCount + 1);
+    operation.admitted = true;
+  }
+  attempts.set(fingerprint, attemptCount + 1);
   limits.count += 1;
   limits.active += 1;
   return () => { limits.active -= 1; };
@@ -195,8 +211,8 @@ function readUsage(value: unknown): TokenUsage | null {
 class PlatformUpstreamError extends AIRequestError {
   readonly retryable: boolean;
 
-  constructor(status: number, retryable: boolean) {
-    super(retryable ? "平台免费 AI 暂不可用。" : "免费服务异常。请联系管理员。", status);
+  constructor(status: number, retryable: boolean, retryAfter?: number) {
+    super(retryable ? "平台免费 AI 暂不可用。" : "免费服务异常。请联系管理员。", status, retryAfter);
     this.retryable = retryable;
   }
 }
@@ -213,6 +229,12 @@ class AICompletionFormatError extends AIRequestError {
   }
 }
 
+class QwenThinkingFormatError extends AIRequestError {
+  constructor() {
+    super("百炼暂不支持此思考输出格式。", 422);
+  }
+}
+
 async function retryCompletionFormat<T>(enabled: boolean, attempt: (retry: boolean) => Promise<T>) {
   try {
     return await attempt(false);
@@ -226,26 +248,37 @@ function repairInstructions(instructions: string) {
   return `${instructions}\n上次回复为空、未写完或未通过格式校验。请重新作答。只输出一个完整的 JSON 对象。保留用户的要求，缩短解释，按上面的字段和类型输出。省略用不到的可选字段。`;
 }
 
-async function providerError(provider: AIProvider | "siliconflow", response: Response, testing: boolean) {
+async function providerError(provider: AIProvider | "siliconflow", response: Response) {
   const { status } = response;
+  const retryAfter = status === 429 || status === 503 ? retryAfterSeconds(response.headers.get("Retry-After")) : undefined;
   if (provider === "siliconflow") {
     void response.body?.cancel().catch(() => {});
     if (status === 429 || status === 408 || status >= 500) {
-      return new PlatformUpstreamError(status === 429 ? 429 : status === 408 || status === 504 ? 504 : 503, true);
+      return new PlatformUpstreamError(status === 429 ? 429 : status === 408 || status === 504 ? 504 : 503, true,
+        retryAfter ?? (status === 429 ? 30 : undefined));
     }
     console.warn("AlgoVerse SiliconFlow request rejected.", { status });
     return new PlatformUpstreamError(503, false);
   }
-  if (provider === "qwen" && [400, 403, 429].includes(status)) {
+  if (provider === "qwen" && [400, 403, 422, 429].includes(status)) {
     const body = asObject(await response.json().catch((error: unknown) => {
       if (error instanceof SyntaxError) return null;
       throw error;
     }));
-    const code = asObject(body?.error)?.code ?? body?.code;
+    const detail = asObject(body?.error) ?? body;
+    const code = detail?.code ?? body?.code;
+    const message = detail?.message ?? body?.message;
+    if ((status === 400 || status === 422) && typeof message === "string"
+      && /json mode response is not supported when enable_thinking is true/i.test(message)) {
+      return new QwenThinkingFormatError();
+    }
     if (code === "Arrearage" || code === "isv.OUT_OF_SERVICE") return new AIRequestError("百炼余额不足。请充值后重试。", 402);
     if (code === "insufficient_quota" || code === "Throttling.AllocationQuota") return new AIRequestError("百炼额度不足。请检查用量。", 429);
     if (code === "model_not_found" || code === "ModelNotFound" || code === "model_not_supported") {
       return new AIRequestError(modelSelectionMessage, 404);
+    }
+    if (code === "Model.AccessDenied" || code === "access_denied") {
+      return new AIRequestError("百炼拒绝访问。请检查模型权限。", 403);
     }
   } else {
     void response.body?.cancel().catch(() => {});
@@ -255,9 +288,12 @@ async function providerError(provider: AIProvider | "siliconflow", response: Res
   }
   if (status === 402) return new AIRequestError("余额不足，请充值后重试。", 402);
   if (status === 404) return new AIRequestError(modelSelectionMessage, 404);
-  if (status === 429) return new AIRequestError("AI 请求过多。请稍后重试。", 429);
-  if (testing && (status === 408 || status === 504)) return new AIRequestError("AI 响应超时，请重试。", 504);
-  if (status === 503) return new AIRequestError("AI 服务正忙。请稍后重试。", 503);
+  if (status === 429) return new AIRequestError("服务商限流。请稍后重试。", 429, retryAfter ?? 30);
+  if (status === 400 || status === 422) {
+    return new AIRequestError(provider === "qwen" ? "百炼拒绝请求参数。请检查所选模型。" : "DeepSeek 拒绝请求参数。请检查所选模型。", 422);
+  }
+  if (status === 408 || status === 504) return new AIRequestError("AI 响应超时，请重试。", 504);
+  if (status >= 500) return new AIRequestError("AI 服务正忙。请稍后重试。", 503, retryAfter);
   return new AIRequestError("AI 请求失败。请稍后重试。", 502);
 }
 
@@ -265,10 +301,12 @@ export async function requestAIJson<T>(credentials: AICredentials, options: Requ
   if (JSON.stringify(options.input)?.includes(credentials.apiKey) || options.dialogue?.some(({ content }) => content.includes(credentials.apiKey))) {
     throw new AIRequestError("请先移除问题里的 Key。", 400);
   }
-  const completion = options.operation === "experiment_agent" ? { ...options, retryFormat: true } : options;
+  const canRepair = options.operation === "experiment_agent" || (credentials.visitor === undefined && options.operation === "connection_test");
+  const completion = canRepair ? { ...options, retryFormat: true } : options;
   if (credentials.visitor !== undefined) return requestPlatformAI(credentials, completion);
   const byok = credentials.selection;
   const { provider, model } = byok;
+  const operation = credentials.operation ?? {};
   const profile = getAIModel(byok);
   const reasoning = profile.thinking === "enabled";
   const testing = options.operation === "connection_test";
@@ -282,17 +320,32 @@ export async function requestAIJson<T>(credentials: AICredentials, options: Requ
       ...(profile.thinking !== "provider-default" && { enable_thinking: reasoning }),
       ...(reasoning && { thinking_budget: reasoningBudget }),
     };
-  return retryCompletionFormat(!!completion.retryFormat, async (retry) => {
+  const qwenThinkingModel = byok.provider === "qwen" && reasoning && profile.output === "json-object" ? `${byok.region}:${model}` : undefined;
+  const output = qwenThinkingModel && (qwenTextModeUntil.get(qwenThinkingModel) ?? 0) > Date.now() ? "text" : profile.output;
+  const attempt = async (format = output, repair = false) => {
     if (credentials.signal.aborted) throw new AIRequestError("请求已取消。", 499);
-    const release = reserveRequest(provider, credentials.apiKey);
+    const release = reserveRequest(provider, credentials.apiKey, operation);
     try {
-      return await requestCompletion(credentials, retry ? { ...completion, instructions: repairInstructions(completion.instructions) } : completion,
-        { endpoint, model, parameters, output: profile.output,
-          timeoutMs: reasoning ? reasoningTimeoutMs : requestTimeoutMs, region: byok.provider === "qwen" ? byok.region : undefined });
+      return await requestCompletion(credentials, repair
+        ? { ...completion, instructions: repairInstructions(completion.instructions) } : completion, {
+        endpoint, model, parameters, output: format,
+        timeoutMs: reasoning ? reasoningTimeoutMs : requestTimeoutMs, region: byok.provider === "qwen" ? byok.region : undefined,
+      });
     } finally {
       release();
     }
-  });
+  };
+  try {
+    return await attempt();
+  } catch (error) {
+    // Some Bailian deployments reject JSON mode with thinking enabled. Keep the model and validate its text locally.
+    if (qwenThinkingModel && output === "json-object" && error instanceof QwenThinkingFormatError) {
+      qwenTextModeUntil.set(qwenThinkingModel, Date.now() + qwenTextModeTtlMs);
+      return attempt("text");
+    }
+    if (completion.retryFormat && error instanceof AICompletionFormatError) return attempt(output, true);
+    throw error;
+  }
 }
 
 async function requestPlatformAI<T>(credentials: PlatformCredentials, options: RequestOptions<T>) {
@@ -310,12 +363,10 @@ async function requestPlatformAI<T>(credentials: PlatformCredentials, options: R
     } catch (error) {
       if (!(error instanceof PlatformUpstreamError) || !error.retryable) throw error;
       if (choice === choices.at(-1)) {
-        if (options.operation === "connection_test") {
-          if (error.status === 429) throw new AIRequestError("服务商限流。请稍后重试。", 429);
-          if (error.status === 504) throw new AIRequestError("AI 响应超时，请重试。", 504);
-        }
+        if (error.status === 429) throw new AIRequestError("服务商限流。请稍后重试。", 429, error.retryAfter);
+        if (choices.length === 1 && error.status === 504) throw new AIRequestError("AI 响应超时，请重试。", 504);
         const message = choices.length === 2 ? "两个免费模型暂不可用。" : "所选免费模型暂不可用。";
-        throw new AIRequestError(message, error.status);
+        throw new AIRequestError(message, error.status, error.retryAfter);
       }
     }
   }
@@ -377,7 +428,7 @@ async function requestCompletion<T>({ apiKey, selection: { provider }, signal }:
       }),
     });
     const testing = options.operation === "connection_test";
-    if (!response.ok) throw await providerError(provider, response, testing);
+    if (!response.ok) throw await providerError(provider, response);
 
     const body = asObject(await response.json().catch((error: unknown) => {
       if (error instanceof SyntaxError) return null;
@@ -391,6 +442,12 @@ async function requestCompletion<T>({ apiKey, selection: { provider }, signal }:
       const code = asObject(body.error)?.code;
       if (code === 50505 || code === "50505") throw new PlatformUpstreamError(503, true);
     }
+    if (provider !== "siliconflow") {
+      if (choice?.finish_reason === "content_filter" || message?.refusal) throw new AIRequestError("服务商拦截了本次内容。", 400);
+      if (choice?.finish_reason === "insufficient_system_resource" || choice?.finish_reason === "aborted") {
+        throw new AIRequestError("AI 服务中断。请稍后重试。", 503);
+      }
+    }
     if (body?.error || !usage || !message || message.refusal) throw invalidResult;
     if (provider === "siliconflow" && body?.model !== model) {
       console.warn("AlgoVerse SiliconFlow returned an unexpected model.", { model });
@@ -401,10 +458,10 @@ async function requestCompletion<T>({ apiKey, selection: { provider }, signal }:
     }
 
     const canRepair = options.retryFormat || (provider === "siliconflow" && model === siliconFlowModels.backup.id && options.backupTutorFormat);
-    if (choice?.finish_reason === "length" && canRepair) throw new AICompletionFormatError("truncated");
+    if (choice?.finish_reason === "length" && (canRepair || provider !== "siliconflow")) throw new AICompletionFormatError("truncated");
     if (choice?.finish_reason !== "stop") throw invalidResult;
     const content = typeof message.content === "string" ? message.content.trim() : message.content;
-    if ((content === "" || content == null) && canRepair) throw new AICompletionFormatError("empty");
+    if ((content === "" || content == null) && (canRepair || provider !== "siliconflow")) throw new AICompletionFormatError("empty");
     if (typeof content !== "string") throw canRepair ? new AICompletionFormatError("schema") : invalidResult;
     let value: unknown;
     // Accept a single complete JSON fence without extracting tool calls from surrounding prose.
