@@ -2,7 +2,12 @@ import type { useAIModelChoices } from "@/lib/temporaryAI";
 
 export function AIModelSelect({ id, models, disabled }: { id: string; models: ReturnType<typeof useAIModelChoices>; disabled: boolean }) {
   const { current, options, select } = models;
-  const hint = current.reason || (!current.verified && "selection" in current.choice ? "此模型未验证。" : "");
+  let hint = current.reason;
+  if (!hint && "selection" in current.choice) {
+    if (current.choice.selection.provider === "deepseek") {
+      hint = current.verified ? "API Key 已连接。" : "API Key 已连接。当前模型未验证。";
+    } else if (!current.verified) hint = "此模型未验证。";
+  }
   return <>
     <label className="sr-only" htmlFor={id}>切换 AI 模型</label>
     <select id={id} value={current.id} onChange={(event) => select(event.target.value)} disabled={disabled}

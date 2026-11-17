@@ -816,6 +816,30 @@ test("Tutor and Workbench omit legacy DashScope models even with saved credentia
   assert.equal(current.credentialVersion, undefined);
 });
 
+test("disabled platform models disappear even when saved as the mode and surface selections", () => {
+  const selection = { provider: "deepseek", model: "deepseek-v4-pro" };
+  const previous = { platformModel: "backup" };
+  const snapshot = {
+    mode: "platform", provider: "deepseek", platformModel: "primary",
+    choices: { tutor: previous, workbench: previous }, personalModels: {},
+    configuration: { platformConfigured: false, providers: {} },
+  };
+  for (const surface of ["tutor", "workbench"]) {
+    const { current, options } = getAIModelChoices(snapshot, surface);
+    assert.ok(options.length && options.every(({ choice }) => "selection" in choice));
+    assert.equal(current.id, "deepseek:deepseek-flash");
+    assert.match(current.reason, /AI 设置验证 Key/);
+    const connected = getAIModelChoices({
+      ...snapshot, configuration: { platformConfigured: false, providers: {
+        deepseek: { selection, credentialVersion: "saved-key", verifications: [{ model: selection.model }] },
+      } },
+    }, surface);
+    assert.deepEqual(connected.current.choice, { selection });
+    assert.equal(connected.current.reason, "");
+    assert.equal(connected.current.verified, true);
+  }
+});
+
 test("Qianwen AI Platform saves and reuses its key only on its own endpoint", async (t) => {
   isolatePersonalLimits(t);
   const model = "qwen3.8-flash";
@@ -931,6 +955,15 @@ test("transient retest and failed replacements keep a saved key, while saved-key
   assert.equal(limited.status, 429);
   assert.equal(limited.headers.get("Retry-After"), "14");
   assert.equal((await configured()).providers.deepseek.verifications.length, 1);
+  reply = () => new Response(null, { status: 503, headers: { "Retry-After": "9" } });
+  const unavailable = await tutorPOST(new Request("https://algoverse.test/api/ai/tutor", {
+    method: "POST", headers: { "Content-Type": "application/json", ...deepseek(), Cookie: cookie },
+    body: JSON.stringify({ question: "请解释排序。" }),
+  }));
+  assert.equal(unavailable.status, 503);
+  const reloaded = (await configured()).providers.deepseek;
+  assert.equal(reloaded.verifications.length, 1);
+  assert.equal(reloaded.authenticationFailed, undefined);
   reply = () => Response.json({}, { status: 401 });
   assert.equal((await POST(request(headers, "sk-test-wrong-replacement"))).status, 401);
   assert.ok(readAICredentials(request(headers, "")).apiKey === key);
@@ -1826,7 +1859,8 @@ const platformHeaders = (choice) => ({ "X-AI-Provider": "siliconflow", ...(choic
 
 function setTestEnv(t, key, value) {
   const previous = process.env[key];
-  process.env[key] = value;
+  if (value === undefined) delete process.env[key];
+  else process.env[key] = value;
   t.after(() => {
     if (previous === undefined) delete process.env[key];
     else process.env[key] = previous;
@@ -2052,7 +2086,36 @@ test("production quota counts attempts across visitors and resets at UTC midnigh
   assert.equal(reservePlatformCall(state, "same", origin).blocked, "minute");
 });
 
+test("disabled platform requests stop before quota, pricing or model calls even with an existing server key", async (t) => {
+  setTestEnv(t, "NODE_ENV", "production");
+  setTestEnv(t, "PLATFORM_AI_ENABLED", undefined);
+  setTestEnv(t, "SILICONFLOW_API_KEY", "sk-platform-test");
+  setTestEnv(t, "PLATFORM_AI_QUOTA_URL", "https://quota.algoverse.test");
+  setTestEnv(t, "PLATFORM_AI_QUOTA_SECRET", "quota-test-secret");
+  const fetch = t.mock.method(globalThis, "fetch", () => assert.fail("Disabled platform made a network request"));
+  assert.equal((await (await configurationGET(request({}, ""))).json()).platformConfigured, false);
+
+  for (const headers of [platformHeaders("backup"), { "X-AI-Mode": "platform" }, { "X-AI-Platform-Model": "primary" }]) {
+    const response = await POST(request(headers, ""));
+    assert.equal(response.status, 503);
+    assert.match((await response.json()).message, /平台服务暂不可用/);
+  }
+  const tutor = await tutorPOST(new Request("https://algoverse.test/api/ai/tutor", {
+    method: "POST", headers: { "Content-Type": "application/json", ...platformHeaders("primary") },
+    body: JSON.stringify({ question: "什么是排序？" }),
+  }));
+  assert.equal(tutor.status, 503);
+  assert.match((await tutor.json()).message, /平台服务暂不可用/);
+
+  const credentials = { apiKey: "sk-platform-test", visitor: "fixture", selection: { provider: "siliconflow", model: "primary" },
+    signal: new AbortController().signal };
+  await assert.rejects(interpretCreatorRequest({ question: "比较排序。" }, null, credentials),
+    { status: 503, message: /平台服务暂不可用/ });
+  assert.equal(fetch.mock.callCount(), 0);
+});
+
 test("free connection tests check each selected model and reject injected selections and BYOK keys", async (t) => {
+  setTestEnv(t, "PLATFORM_AI_ENABLED", "1");
   setTestEnv(t, "SILICONFLOW_API_KEY", "sk-platform-test");
   const fetch = t.mock.method(globalThis, "fetch", async (url, init) => {
     if (url === pricingUrl) {
@@ -2079,6 +2142,7 @@ test("free connection tests check each selected model and reject injected select
 });
 
 test("platform requests fail closed without production quota or confirmed prices", async (t) => {
+  setTestEnv(t, "PLATFORM_AI_ENABLED", "1");
   setTestEnv(t, "SILICONFLOW_API_KEY", "sk-platform-test");
   const fetch = t.mock.method(globalThis, "fetch", async () => new Response(pricePage({ paid: primaryModel })));
   const response = await POST(request({ ...platformHeaders("primary"), "CF-Connecting-IP": "192.0.2.1" }, ""));
@@ -2095,6 +2159,7 @@ test("platform requests fail closed without production quota or confirmed prices
 });
 
 test("the production quota gate is consulted before each attempted model", async (t) => {
+  setTestEnv(t, "PLATFORM_AI_ENABLED", "1");
   const quotaUrl = "https://quota.algoverse.test";
   setTestEnv(t, "NODE_ENV", "production");
   setTestEnv(t, "SILICONFLOW_API_KEY", "sk-platform-test");
@@ -2121,6 +2186,7 @@ test("the production quota gate is consulted before each attempted model", async
 });
 
 test("backup tutor retries bad formats once with fresh quota and price, and never after a model mismatch", async (t) => {
+  setTestEnv(t, "PLATFORM_AI_ENABLED", "1");
   const quotaUrl = "https://quota.algoverse.test";
   setTestEnv(t, "NODE_ENV", "production");
   setTestEnv(t, "SILICONFLOW_API_KEY", "sk-platform-test");
@@ -2273,7 +2339,13 @@ test("backup tutor retries bad formats once with fresh quota and price, and neve
 });
 
 test("platform retries only the free backup on upstream failure and validates its experiment", async (t) => {
+  setTestEnv(t, "PLATFORM_AI_ENABLED", "1");
   setTestEnv(t, "SILICONFLOW_API_KEY", "sk-platform-test");
+  let now = Math.floor(Date.now() / 60_000) * 60_000 + 1000;
+  t.mock.method(Date, "now", () => now);
+  const priorQuota = globalThis.algoVersePlatformQuota;
+  delete globalThis.algoVersePlatformQuota;
+  t.after(() => { globalThis.algoVersePlatformQuota = priorQuota; });
   const sent = [];
   let fail = 429;
   let backupFails = false;
@@ -2303,7 +2375,11 @@ test("platform retries only the free backup on upstream failure and validates it
     assert.deepEqual(result.result.config.values, [3, 1, 2]);
   }
   assert.deepEqual(sent, [primaryModel, backupModel, primaryModel, backupModel, primaryModel, backupModel]);
+  const perMinute = Math.min(platformQuota.visitorPerMinute, platformQuota.totalPerMinute);
+  while (sent.length + 2 <= perMinute) await run();
   await assert.rejects(run(), { status: 429, message: "免费请求过多。请稍后再试。" });
+  assert.equal(sent.length, perMinute);
+  now += 60_000;
   backupFails = true;
   fail = 503;
   await assert.rejects(interpretCreatorRequest(question, null, credentials("192.0.2.3")), { status: 503, message: "两个免费模型暂不可用。" });
@@ -2414,7 +2490,7 @@ test("Qwen failures and malformed completions never show connected or echo provi
     [(key) => Response.json({ error: { code: "Endpoint.AccessDenied", message: key } }, { status: 403 }), 403, /业务空间 ID/],
     [() => Response.json({ error: { code: "ModelNotFound" } }, { status: 400 }), 404, /所选模型不可用/],
     [(key) => Response.json({ error: { code: "InvalidParameter", message: key } }, { status: 400 }), 422, /拒绝请求参数/],
-    [() => Response.json({ error: { code: "insufficient_quota" } }, { status: 429 }), 429, /额度不足/],
+    [() => Response.json({ error: { code: "insufficient_quota" } }, { status: 429, headers: { "Retry-After": "16" } }), 429, /额度不足/],
     [() => completion('{"ok":false}', "qwen3.7-plus"), 502, /格式有误/, 2],
     [() => completion(undefined, "qwen3.8-flash"), 502, /未确认所选模型/],
     [() => completion(), 502, /未确认所选模型/],
@@ -2426,6 +2502,7 @@ test("Qwen failures and malformed completions never show connected or echo provi
     fetch.mock.mockImplementation(async () => reply(key));
     const response = await POST(request(qwen("qwen3.7-plus", "cn-beijing"), key));
     assert.equal(response.status, status);
+    if (status === 429) assert.equal(response.headers.get("Retry-After"), "16");
     const body = await response.json();
     assert.equal(body.status, "error");
     assert.match(body.message, message);
@@ -2623,8 +2700,14 @@ test("workbench with a personal key retries empty output once and keeps authoriz
   };
   let attempts = 0;
   const upstream = t.mock.method(globalThis, "fetch", async (_url, init) => {
-    if (++attempts === 1) return completion(null);
-    assert.match(JSON.parse(init.body).messages[0].content, /请重新作答/);
+    const body = JSON.parse(init.body);
+    assert.equal(body.model, "deepseek-flash");
+    if (++attempts === 1) {
+      assert.deepEqual(body.response_format, { type: "json_object" });
+      return completion(null);
+    }
+    assert.equal(body.response_format, undefined);
+    assert.match(body.messages[0].content, /请重新作答/);
     return completion('{"action":"answer","observation":"可以。"}');
   });
   const repaired = await requestAIJson(credentials, options);
@@ -2633,6 +2716,114 @@ test("workbench with a personal key retries empty output once and keeps authoriz
   upstream.mock.mockImplementation(async () => new Response(null, { status: 401 }));
   await assert.rejects(() => requestAIJson(credentials, options), { status: 401 });
   assert.equal(upstream.mock.callCount(), 3);
+});
+
+test("DeepSeek Tutor makes only one conditional retry for blank answers and strictly checks its JSON", async (t) => {
+  const credentials = readAICredentials(request(deepseek("deepseek-v4-pro"), "sk-tutor-empty-retry"));
+  const options = {
+    operation: "tutor", retryFormat: true, instructions: "输出 JSON。", input: "测试",
+    maxTokens: 100, validate: (value) => value?.answer === "可以。" ? value : null,
+    normalizeContent: (content) => content.replace(",}", "}"),
+  };
+  const blank = () => Response.json({
+    choices: [{ finish_reason: "stop", message: { content: "  ", reasoning_content: "private reasoning" } }],
+    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+  });
+  let replies;
+  const upstream = t.mock.method(globalThis, "fetch", async (_url, init) => {
+    const body = JSON.parse(init.body);
+    assert.equal(body.model, "deepseek-v4-pro");
+    assert.deepEqual(body.response_format, replies.length === 2 ? { type: "json_object" } : undefined);
+    return replies.shift()();
+  });
+  replies = [blank, () => completion('{"answer":"可以。"}', "deepseek-v4-pro")];
+  assert.deepEqual((await requestAIJson(credentials, options)).result, { answer: "可以。" });
+  for (const [fallback, status, message] of [
+    [blank, 502, /未返回正文/],
+    [() => completion('{"answer":"可以。",}', "deepseek-v4-pro"), 502, /格式有误/],
+    [() => completion('{"answer":"不符合预期结构。"}', "deepseek-v4-pro"), 502, /格式有误/],
+    [() => new Response(null, { status: 429, headers: { "Retry-After": "1" } }), 429, /服务商限流/],
+  ]) {
+    const before = upstream.mock.callCount();
+    replies = [blank, fallback];
+    await assert.rejects(requestAIJson(credentials, options), { status, message, ...(status === 429 && { retryAfter: 1 }) });
+    assert.equal(upstream.mock.callCount() - before, 2);
+  }
+});
+
+test("DeepSeek separates malformed model JSON from unexpected HTTP response bodies", async (t) => {
+  const credentials = readAICredentials(request(deepseek(), "sk-deepseek-response-types"));
+  const options = {
+    operation: "experiment_agent", instructions: "输出 JSON。", input: {}, maxTokens: 100,
+    validate: (value) => value?.action === "answer" ? value : null,
+  };
+  let replies;
+  const upstream = t.mock.method(globalThis, "fetch", async () => replies.shift());
+  for (const [response, message] of [
+    [new Response("data: [DONE]\n\n", { headers: { "Content-Type": "text/event-stream; charset=utf-8" } }), /意外的流式响应/],
+    [Response.json({ error: { message: "private upstream details" } }), /DeepSeek 响应异常/],
+    [Response.json({ choices: [] }), /DeepSeek 响应异常/],
+    [new Response("<html>gateway</html>", { headers: { "Content-Type": "text/html" } }), /DeepSeek 响应异常/],
+  ]) {
+    const before = upstream.mock.callCount();
+    replies = [response];
+    await assert.rejects(requestAIJson(credentials, options), { status: 502, message });
+    assert.equal(upstream.mock.callCount() - before, 1);
+  }
+  replies = [completion('{"action":'), completion('{"action":"answer","observation":"可以。"}')];
+  assert.equal((await requestAIJson(credentials, options)).result.observation, "可以。");
+  assert.deepEqual(replies, []);
+});
+
+test("DeepSeek Tutor and Agent don't repeat a completion after the local model timer expires", async (t) => {
+  const timeout = AbortSignal.timeout.bind(AbortSignal);
+  let modelTimer;
+  t.mock.method(AbortSignal, "timeout", (ms) => {
+    if (ms !== 25_000 && ms !== 55_000) return timeout(ms);
+    modelTimer = new AbortController();
+    return modelTimer.signal;
+  });
+  const upstream = t.mock.method(globalThis, "fetch", async (_url, { signal }) => {
+    modelTimer.abort(new DOMException("Timed out", "TimeoutError"));
+    signal.throwIfAborted();
+  });
+  const onAuthFailure = t.mock.fn();
+  for (const model of ["deepseek-flash", "deepseek-v4-pro"]) {
+    for (const operation of ["tutor", "experiment_agent"]) {
+      const credentials = readAICredentials(request(deepseek(model), "sk-deepseek-local-timeout"));
+      const options = { operation, instructions: "输出 JSON。", input: {}, maxTokens: 32, validate: () => true };
+      const before = upstream.mock.callCount();
+      await assert.rejects(requestAIJson({ ...credentials, onAuthFailure }, options), { status: 504, code: "timeout", message: /超时/ });
+      assert.equal(upstream.mock.callCount() - before, 1);
+    }
+  }
+  assert.equal(onAuthFailure.mock.callCount(), 0);
+});
+
+test("personal chat and Agent share concurrency slots without sharing a minute budget", async (t) => {
+  isolatePersonalLimits(t);
+  const credentials = readAICredentials(request(deepseek(), "sk-shared-concurrency-fixture"));
+  const options = { instructions: "输出 JSON。", input: {}, maxTokens: 32, validate: (value) => value?.ok ? true : null };
+  const release = Promise.withResolvers();
+  const upstream = t.mock.method(globalThis, "fetch", async (url) => {
+    assert.equal(url, "https://api.deepseek.com/chat/completions");
+    await release.promise;
+    return completion();
+  });
+  const active = Array.from({ length: 8 }, (_, index) =>
+    requestAIJson(credentials, { ...options, operation: index % 2 === 0 ? "tutor" : "experiment_agent" }));
+  try {
+    await assert.rejects(requestAIJson(credentials, { ...options, operation: "tutor" }),
+      { status: 503, retryAfter: 5, message: /本站繁忙/ });
+    assert.equal(upstream.mock.callCount(), 8);
+  } finally {
+    release.resolve();
+    await Promise.all(active);
+  }
+  assert.equal((await requestAIJson(credentials, { ...options, operation: "tutor" })).result, true);
+  upstream.mock.mockImplementation(async () => new Response(null, { status: 429, headers: { "Retry-After": "9" } }));
+  await assert.rejects(requestAIJson(credentials, { ...options, operation: "experiment_agent" }),
+    { status: 429, retryAfter: 9, code: "upstream_rate_limit", message: /服务商限流/ });
 });
 
 test("pending generation is shared only by the same selection and key", async () => {

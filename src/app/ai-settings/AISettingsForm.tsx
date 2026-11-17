@@ -18,6 +18,7 @@ const connectionLabels: Record<ConnectionState, string> = {
 
 export function AISettingsForm({ configured }: { configured: boolean }) {
   const { mode, configurationError } = useTemporaryAI();
+  const selectedMode = configured ? mode : "byok";
   const test = useConnectionTest();
   useEffect(() => { void refreshAIConfiguration(); }, []);
   return (
@@ -26,8 +27,8 @@ export function AISettingsForm({ configured }: { configured: boolean }) {
         <h1 id="ai-settings-title"><span>AI 服务</span><span>设置</span></h1>
         <fieldset className="ai-settings-modes">
           <legend>使用方式</legend>
-          {modeOptions.map(({ value, label, detail, icon }) => <label key={value} className="ai-settings-mode">
-            <input className="sr-only" type="radio" name="ai-service-mode" value={value} checked={mode === value}
+          {modeOptions.filter(({ value }) => configured || value === "byok").map(({ value, label, detail, icon }) => <label key={value} className="ai-settings-mode">
+            <input className="sr-only" type="radio" name="ai-service-mode" value={value} checked={selectedMode === value}
               onChange={() => { test.reset(); selectAIMode(value); }} />
             <span className="ai-settings-mode-body">
               <CatalogIcon icon={icon} width={20} />
@@ -41,18 +42,20 @@ export function AISettingsForm({ configured }: { configured: boolean }) {
         {configurationError && <p className="ai-settings-feedback" role="status">
           {configurationError} <button className="ai-settings-clear" type="button" onClick={() => void refreshAIConfiguration()}>重读配置</button>
         </p>}
-        {mode === "platform" ? <PlatformConnectionForm configured={configured} test={test} /> : <CustomConnection test={test} />}
+        {selectedMode === "platform" ? <PlatformConnectionForm configured={configured} test={test} /> : <CustomConnection test={test} />}
       </section>
       {test.result && <ConnectionResult result={test.result} dismiss={test.dismiss} />}
     </div>
   );
 }
 
-function ConnectionSummary({ provider, model, state, usage }: { provider: string; model?: string; state: ConnectionState; usage?: TokenUsage }) {
+function ConnectionSummary({ provider, model, state, usage, label }: {
+  provider: string; model?: string; state: ConnectionState; usage?: TokenUsage; label?: string;
+}) {
   return <header className="ai-settings-summary">
     <div className="ai-settings-summary-head">
       <h2 id="ai-connection-title">连接详情</h2>
-      <span className="ai-settings-badge" data-state={state === "auth" ? "error" : state} role="status">{connectionLabels[state]}</span>
+      <span className="ai-settings-badge" data-state={state === "auth" ? "error" : state} role="status">{label ?? connectionLabels[state]}</span>
     </div>
     <dl className="ai-settings-readout">
       <div><dt>服务商</dt><dd>{provider}</dd></div>
@@ -126,7 +129,7 @@ function PlatformConnectionForm({ configured, test }: FormProps & { configured: 
 }
 
 function ProviderConnectionForm({ provider, test }: FormProps & { provider: AIProvider }) {
-  const { configuration, configurationError } = useTemporaryAI();
+  const { configuration, configurationError, mode } = useTemporaryAI();
   const saved = configuration?.providers[provider];
   const [draft, setDraft] = useState("");
   const [regionOverride, setRegion] = useState<string>();
@@ -216,7 +219,10 @@ function ProviderConnectionForm({ provider, test }: FormProps & { provider: AIPr
         ...(provider === "qwen" && apiKey && workspaceId && { "X-AI-Qwen-Workspace": workspaceId }) },
       provider: aiProviders[provider].label, model: selection.model,
       onVerified: (_verification, configuration) => {
-        if (configuration) setAIConfiguration(configuration, selection);
+        if (configuration) {
+          if (mode !== "byok") selectAIMode("byok");
+          setAIConfiguration(configuration, selection);
+        }
         setDraft("");
       },
       onConfigurationChanged: () => void refreshAIConfiguration(),
@@ -228,10 +234,14 @@ function ProviderConnectionForm({ provider, test }: FormProps & { provider: AIPr
   const verification = !draft && retainedKey ? saved?.verifications.find(({ model }) => model === modelValue) : undefined;
   const state = test.attempt?.kind ?? (!draft && retainedKey && saved?.authenticationFailed ? "auth"
     : verification ? "connected" : hasKey || (!configuration && !configurationError) ? "unverified" : "unconfigured");
+  const deepSeekAuthFailed = provider === "deepseek" && saved?.authenticationFailed;
+  const deepSeekConnected = provider === "deepseek" && !deepSeekAuthFailed && !!saved?.verifications.length;
+  const summaryState = deepSeekAuthFailed ? "auth" : deepSeekConnected ? "connected" : state;
+  const connectionLabel = deepSeekAuthFailed ? "连接已失效。请重新验证。" : deepSeekConnected ? "API Key 已连接" : undefined;
   return (
     <>
       <ConnectionSummary provider={aiProviders[provider].label} model={selected?.label}
-        state={state} usage={state === "connected" ? verification?.usage : undefined} />
+        state={summaryState} label={connectionLabel} usage={summaryState === "connected" ? verification?.usage : undefined} />
       <form className="ai-settings-fields" onSubmit={testConnection} autoComplete="off">
         <div className="ai-settings-provider-fields">
           <div>
@@ -276,6 +286,7 @@ function ProviderConnectionForm({ provider, test }: FormProps & { provider: AIPr
         </select>
         <div id="ai-model-help" className="ai-settings-help">
           <p>{selected ? <>API 模型 <code>{selected.apiId}</code> · {billingLabels[selected.billing]}</> : modelSelectionMessage}</p>
+          {deepSeekConnected && selected && !draft && !verification && <p>当前模型未验证。</p>}
           {selected?.output === "text" && <p>文本返回，服务端校验。</p>}
         </div>
 

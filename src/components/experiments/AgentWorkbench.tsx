@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { agentCooldown, agentDialogueActive, hasAgentOperation, isAgentConfirmation, type AgentRun, type AgentTask } from "@/lib/experimentAgent";
+import { agentCooldown, agentDialogueActive, agentOperationProgress, hasAgentOperation, isAgentConfirmation, type AgentRun, type AgentTask } from "@/lib/experimentAgent";
 import { AIResponseError, readAIResponse } from "@/lib/aiHttp";
 import { formatAIRetryTime, type AICooldown } from "@/lib/aiRateLimit";
 import { maxQuestionLength } from "@/lib/experimentCreator";
@@ -30,12 +30,12 @@ const stageDetails = {
 } as const;
 
 type SendAction = "message" | "retry-message" | "decide" | "approve" | "import" | "status" | "adopt-exploration";
-type ActiveRequest = { controller: AbortController; operationId: string; taskId?: string };
+type ActiveRequest = { controller: AbortController; operationId: string; taskId?: string; settle?: (task: AgentTask) => void };
+type WatchedOperation = { taskId: string; operationId: string; navigation: number; until: number };
 
-const statusReadError = "读取状态失败。请刷新状态。";
-
-export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, initialGuess, reference, referenceRun, savedPlan, fresh, selectedRunId, initialEvidence, diagnoses = {}, restoreError }: {
+export function AgentWorkbench({ initial, initialOperationId, initialQuestion = "", initialFocus, initialGuess, reference, referenceRun, savedPlan, fresh, selectedRunId, initialEvidence, diagnoses = {}, restoreError }: {
   initial: AgentTask | null;
+  initialOperationId?: string;
   initialQuestion?: string;
   initialFocus?: WorkbenchFocus;
   initialGuess?: string;
@@ -65,6 +65,12 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
   const [creationError, setCreationError] = useState("");
   const historyToggle = useRef<HTMLButtonElement>(null);
   const [busy, setBusy] = useState<"deciding" | "running" | "status" | null>(null);
+  const [watch, setWatch] = useState<WatchedOperation | undefined>(() => {
+    const operationId = initialOperationId ?? (initial?.dialogue?.activeUntil ? initial.dialogue.operationId
+      : initial?.phase === "deciding" ? initial.operationId : undefined);
+    return initial && operationId ? { taskId: initial.id, operationId, navigation: 0, until: Date.now() + 6000 } : undefined;
+  });
+  const watched = useRef(watch);
   const [error, setError] = useState("");
   const [recovery, setRecovery] = useState("");
   const [runDetails, setRunDetails] = useState<Record<string, RunDetails>>({});
@@ -104,8 +110,12 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
   const dialogueBusy = !!task && agentDialogueActive(task);
   const expired = !!task?.leaseUntil && task.leaseUntil <= Date.now();
   const workBusy = !!task && (task.phase === "running" || task.phase === "deciding") && !expired;
-  const activeUntil = dialogueBusy ? task?.dialogue?.activeUntil : workBusy ? task?.leaseUntil : undefined;
-  const blocked = !!busy || dialogueBusy || workBusy;
+  const activeUntil = task?.dialogue?.activeUntil ?? (task?.phase === "running" || task?.phase === "deciding" ? task.leaseUntil : undefined);
+  const progress = watch && task?.id === watch.taskId ? agentOperationProgress(task, watch.operationId) : undefined;
+  const awaitingStatus = !!watch && !progress;
+  const watchUntil = watch ? progress && "until" in progress ? progress.until : awaitingStatus ? watch.until : undefined
+    : !busy ? activeUntil : undefined;
+  const blocked = !!busy || dialogueBusy || workBusy || awaitingStatus;
   const provider = "selection" in models.current.choice ? models.current.choice.selection.provider : "siliconflow";
   const savedCooldown = agentCooldown(task, provider, 0);
   const cooldown = requestCooldown && requestCooldown.provider === provider && requestCooldown.until > (savedCooldown?.until ?? 0)
@@ -127,9 +137,13 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
   const visibleError = waitHint ? `${cooldown?.message} ${waitHint}`
     : cooldown && savedError === cooldown.message ? "现在可以重试。" : savedError;
   const hasReply = !!task?.dialogue?.turns.at(-1)?.action;
+  const progressText = progress?.stage === "plan" ? "意图已保存，正在生成方案。"
+    : progress?.stage === "ready" ? "方案已就绪，等待确认。"
+      : progress?.stage === "intent" ? "正在理解指令。"
+        : progress?.stage === "analysis" ? "正在分析实验。" : awaitingStatus && !busy ? "正在恢复任务。" : "";
   const activityStatus = busy === "status" ? "正在更新" : busy === "running" ? "工具运行中"
-    : busy === "deciding" || dialogueBusy ? "Agent 正在回复"
-    : task && task.phase !== "draft" ? retryRun && expired ? "运行中断" : agentPhases[task.phase] : "";
+    : progressText || (busy === "deciding" || dialogueBusy ? "Agent 正在回复"
+    : task && task.phase !== "draft" ? retryRun && expired ? "运行中断" : agentPhases[task.phase] : "");
   const completed = {
     idea: activePlan || !!latest || !!target || !!(initialQuestion && reference),
     plan: !activePlan && !!latest,
@@ -176,9 +190,9 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
     requestAnimationFrame(() => historyToggle.current?.focus());
   }
 
-  function workbenchHref(nextFocus: WorkbenchFocus, id?: string, picked?: AgentRun, position?: string) {
+  function workbenchHref(nextFocus: WorkbenchFocus, id?: string, picked?: AgentRun, position?: string, operationId?: string) {
     return agentWorkbenchLink({
-      agentId: id, focus: nextFocus, fresh: !id && fresh,
+      agentId: id, operationId, focus: nextFocus, fresh: !id && fresh,
       ...(!id && reference),
       ...(picked && { sessionId: picked.sessionId, runId: picked.id }),
       evidence: position,
@@ -196,7 +210,41 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
     setEvidenceError("");
     const picked = (current?.runs ?? runs).find(({ id }) => id === pickedId);
     // Keep the router's current state. This view already owns the navigation change.
-    window.history.replaceState(window.history.state, "", workbenchHref(nextFocus, current?.id, picked, position));
+    const operation = watched.current;
+    window.history.replaceState(window.history.state, "", workbenchHref(nextFocus, current?.id, picked, position,
+      operation?.taskId === current?.id ? operation?.operationId : undefined));
+  }
+
+  function clearWatch(operationId: string) {
+    const current = watched.current;
+    if (!current || current.operationId !== operationId) return;
+    watched.current = undefined;
+    setWatch(undefined);
+    const url = new URL(window.location.href);
+    if (url.searchParams.get("agentId") === current.taskId && url.searchParams.get("operationId") === operationId) {
+      url.searchParams.delete("operationId");
+      window.history.replaceState(window.history.state, "", url);
+    }
+  }
+
+  async function requestModel(body: object, taskId: string, request: ActiveRequest, startNavigation: number) {
+    const operation = { taskId, operationId: request.operationId, navigation: startNavigation, until: Date.now() + 85_000 };
+    watched.current = operation;
+    setWatch(operation);
+    const url = new URL(window.location.href);
+    url.searchParams.set("agentId", taskId);
+    url.searchParams.set("operationId", request.operationId);
+    window.history.replaceState(window.history.state, "", url);
+    const transport = new AbortController();
+    const saved = new Promise<AgentTask>((resolve) => { request.settle = resolve; });
+    const signal = AbortSignal.any([request.controller.signal, transport.signal]);
+    try {
+      // A committed snapshot can arrive while the original HTTP response is still in transit.
+      return await Promise.race([agentRequest(body, connection, signal), saved]);
+    } finally {
+      request.settle = undefined;
+      transport.abort();
+    }
   }
 
   function prefill(text: string) {
@@ -230,7 +278,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
     const sentText = action === "retry-message" ? waiting?.pending : action === "message" ? text : undefined;
     const retryInput = JSON.stringify([action, sentText, explicitRun?.id]);
     const uncertain = uncertainOperation.current;
-    const request = { controller: new AbortController(),
+    const request: ActiveRequest = { controller: new AbortController(),
       operationId: needsModel && uncertain?.input === retryInput ? uncertain.operationId : crypto.randomUUID(), taskId: task?.id };
     if (needsModel) uncertainOperation.current = { input: retryInput, operationId: request.operationId, message: sentText };
     const { signal } = request.controller;
@@ -254,14 +302,24 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
         show(action === "import" && navigation.current === startNavigation ? "plan" : view.current.focus, view.current.selectedRun, current, false);
       }
       if (!current || action === "import") return !!current;
-      const next = await agentRequest({
+      const body = {
         action, operationId: request.operationId, id: current.id, revision: current.revision,
         ...(needsModel && explicitRun && { selectedRunId: explicitRun.id }),
         ...(action === "message" && { message: text }),
         ...(exploration && { runId: exploration.run.id, sessionId: exploration.run.sessionId, change: exploration.change }),
-      }, needsModel ? connection : undefined, signal);
+      };
+      const next = await (needsModel ? requestModel(body, current.id, request, startNavigation) : agentRequest(body, undefined, signal));
       if (signal.aborted) return false;
-      setTask(next);
+      setTask((saved) => saved?.id === next.id && saved.revision > next.revision ? saved : next);
+      if (needsModel) {
+        const observed = agentOperationProgress(next, request.operationId);
+        if (observed && !("until" in observed)) clearWatch(request.operationId);
+        if (observed?.stage === "interrupted") {
+          uncertainOperation.current = null;
+          setRecovery("生成中断。可重试。");
+          return false;
+        }
+      }
       if (needsModel && !agentDialogueActive(next) && next.phase !== "deciding") uncertainOperation.current = null;
       const newTurn = (action === "message" || action === "retry-message") && !confirmation
         && next.dialogue && !next.dialogue.pending && next.dialogue.turns.length > (current.dialogue?.turns.length ?? 0)
@@ -284,10 +342,13 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
         autoAnalysis = true;
         uncertainOperation.current = { input: JSON.stringify(["decide", undefined, explicitRun?.id]), operationId: request.operationId };
         setBusy("deciding");
-        const analyzed = await agentRequest({ action: "decide", id: next.id, revision: next.revision, operationId: request.operationId }, connection, signal);
+        const analyzed = await requestModel({ action: "decide", id: next.id, revision: next.revision, operationId: request.operationId }, next.id, request, startNavigation);
         if (!signal.aborted) {
-          setTask(analyzed);
-          if (analyzed.phase !== "deciding") uncertainOperation.current = null;
+          setTask((saved) => saved?.id === analyzed.id && saved.revision > analyzed.revision ? saved : analyzed);
+          if (analyzed.phase !== "deciding") {
+            uncertainOperation.current = null;
+            clearWatch(request.operationId);
+          }
         }
       } else if (running && next.phase === "observe" && next.autoContinue === true && !connection) {
         setError(models.current.reason);
@@ -299,8 +360,13 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
           setRequestCooldown({ provider, until: Date.now() + failure.retryAfter * 1000, message: failure.message });
         }
         setError(failure instanceof Error ? failure.message : "请求失败。请重试。");
-        if (request.taskId && action !== "status" && failure instanceof AIResponseError && !failure.retryAfter && failure.code !== "credential_changed"
-          && (failure.status === 0 || failure.status === 408 || failure.status === 409 || failure.status >= 500)) {
+        const recoverable = failure instanceof AIResponseError && !failure.retryAfter && failure.code !== "credential_changed"
+          && (failure.status === 0 || failure.status === 408 || failure.status === 409 || failure.status >= 500);
+        if (!recoverable && watched.current?.operationId === request.operationId) {
+          clearWatch(request.operationId);
+          uncertainOperation.current = null;
+        }
+        if (request.taskId && action !== "status" && recoverable) {
           const snapshot = await recoverAgentTask(request.taskId, (next) =>
             autoAnalysis || action === "decide" || action === "adopt-exploration" ? next.operationId === request.operationId
               : running ? next.runs.length > runs.length : hasAgentOperation(next, request.operationId) === true, signal);
@@ -326,13 +392,15 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
               if (snapshot.dialogue?.operationId === request.operationId && snapshot.dialogue.error) {
                 uncertainOperation.current = null;
                 setError("");
+              } else if (snapshot.dialogue?.operationId === request.operationId && agentDialogueActive(snapshot)) {
+                setError("");
               }
             } else if (action === "adopt-exploration" && snapshot.operationId === request.operationId && snapshot.phase === "confirm") {
               if (stayed) show("plan", view.current.selectedRun, snapshot, false);
               setError("");
               return true;
-            } else if ((autoAnalysis || action === "decide") && snapshot.operationId === request.operationId && snapshot.phase !== "deciding") {
-              uncertainOperation.current = null;
+            } else if ((autoAnalysis || action === "decide") && snapshot.operationId === request.operationId) {
+              if (snapshot.phase !== "deciding") uncertainOperation.current = null;
               setError("");
             }
           }
@@ -354,6 +422,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
     uncertainOperation.current = null;
     active.current = null;
     request?.controller.abort();
+    clearWatch(operationId);
     setBusy("status");
     try {
       const id = request?.taskId ?? task?.id;
@@ -383,20 +452,25 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
   }, [retryUntil]);
 
   useEffect(() => {
-    if (busy || !activeUntil || !taskId) return;
-    const deadline = activeUntil;
+    if (!watchUntil || !taskId) return;
+    const deadline = watchUntil;
     const controller = new AbortController();
     const { signal } = controller;
     const expire = window.setTimeout(() => setClock(Date.now()), Math.max(0, deadline - Date.now()) + 20);
     async function poll() {
+      const last = Date.now() >= deadline;
       let nextDelay = 1500;
       try {
-        const next = await agentRequest({ action: "status", id: taskId }, undefined, signal);
-        if (!signal.aborted) {
+        const next = await agentRequest({ action: "status", id: taskId }, undefined, AbortSignal.any([signal, AbortSignal.timeout(3_000)]));
+        if (!signal.aborted && next.id === taskId && watched.current === watch) {
           setTask((current) => current?.id === next.id && current.revision <= next.revision ? next : current);
-          setError((current) => current === statusReadError ? "" : current);
+          const request = active.current;
+          if (watch && request?.taskId === taskId && request.operationId === watch.operationId) {
+            const observed = agentOperationProgress(next, watch.operationId);
+            if (observed && !("until" in observed) && observed.stage !== "interrupted") request.settle?.(next);
+          }
           const uncertain = uncertainOperation.current;
-          if (uncertain && !agentDialogueActive(next) && next.phase !== "deciding") {
+          if (!watch && uncertain && !agentDialogueActive(next) && next.phase !== "deciding") {
             const savedReply = next.dialogue?.turns.some(({ action, operationId }) => !!action && operationId === uncertain.operationId);
             const savedAnalysis = next.operationId === uncertain.operationId;
             if (savedReply || next.dialogue?.operationId === uncertain.operationId || savedAnalysis) {
@@ -410,18 +484,42 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
           }
         }
       } catch {
-        if (!signal.aborted) setError((current) => current || statusReadError);
         nextDelay = 3000;
       }
-      if (!signal.aborted && Date.now() < deadline) timer = window.setTimeout(() => void poll(), nextDelay);
+      if (!signal.aborted && !last) timer = window.setTimeout(() => void poll(), Math.min(nextDelay, Math.max(0, deadline - Date.now())));
     }
-    let timer = window.setTimeout(() => void poll(), 1500);
+    let timer = window.setTimeout(() => void poll(), Math.min(1500, Math.max(0, deadline - Date.now())));
     return () => {
       controller.abort();
       window.clearTimeout(timer);
       window.clearTimeout(expire);
     };
-  }, [busy, activeUntil, taskId]);
+  }, [watch, watchUntil, taskId]);
+
+  useEffect(() => {
+    if (!watch || watched.current !== watch || busy || !task || task.id !== watch.taskId) return;
+    if (!progress) {
+      if (Date.now() >= watch.until) {
+        clearWatch(watch.operationId);
+        setRecovery("未找到进度。可重试。");
+      }
+      return;
+    }
+    if ("until" in progress) return;
+    clearWatch(watch.operationId);
+    uncertainOperation.current = null;
+    setError("");
+    if (progress.stage === "interrupted") {
+      setRecovery("生成中断。可重试。");
+    } else if (progress.stage === "stopped") {
+      setRecovery("已停止。");
+    } else if (progress.stage === "ready" || progress.stage === "complete") {
+      const turn = progress.turn;
+      if (turn) setMessage((draft) => draft.trim() === turn.message ? "" : draft);
+      if (navigation.current === watch.navigation && progress.stage === "ready") show("plan", view.current.selectedRun, task, false);
+      setRecovery(progress.stage === "ready" ? "方案已就绪，等待确认。" : "Agent 回复已同步。");
+    }
+  }, [watch, progress, task, busy, clock]);
 
   const visibleRunId = focus === "run" || focus === "analysis" ? run?.id : undefined;
   const details = visibleRunId ? runDetails[visibleRunId] : undefined;
@@ -708,7 +806,7 @@ export function AgentWorkbench({ initial, initialQuestion = "", initialFocus, in
         <div className="wb-dock-head">
           <label htmlFor="agent-message"><WorkbenchIcon icon="sparkles" width={17} /> AI 实验指令</label>
           {visibleError ? <span className="wb-dock-error" role={waitHint ? undefined : "alert"}>{visibleError}</span>
-            : recovery ? <span className="wb-dock-context" role="status">{recovery}</span>
+            : progressText || recovery ? <span className="wb-dock-context" role="status">{progressText || recovery}</span>
             : models.current.reason ? <span className="wb-dock-context" role="status">{models.current.reason}</span>
             : explicitRun && <span className="wb-dock-context">引用第 {number} 轮</span>}
         </div>

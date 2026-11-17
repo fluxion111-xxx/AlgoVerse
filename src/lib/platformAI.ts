@@ -13,4 +13,4 @@ export function isPlatformModel(value: unknown): value is PlatformModel {
   return value === "primary" || value === "backup";
 }
 
-export const platformQuota = { visitorPerMinute: 6, totalPerMinute: 20, totalPerDay: 120 } as const;
+export const platformQuota = { visitorPerMinute: 20, totalPerMinute: 20, totalPerDay: 1000 } as const;

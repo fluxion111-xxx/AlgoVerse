@@ -88,9 +88,9 @@ export async function POST(request: Request) {
       return aiJson({ config: run.session.config, results: run.results });
     }
     if (body.action === "cancel") return aiJson({ task: await cancelAgentTask(task) });
-    if ((body.action === "message" || body.action === "retry-message") && hasAgentOperation(task, operationId)) return aiJson({ task });
-    if (body.action === "decide" && operationId && task.operationId === operationId
-      && (task.phase !== "deciding" || (task.leaseUntil ?? 0) > Date.now())) return aiJson({ task });
+    if ((body.action === "message" || body.action === "retry-message") && operationId
+      && (task.dialogue?.operationId === operationId || hasAgentOperation(task, operationId))) return aiJson({ task });
+    if (body.action === "decide" && operationId && task.operationId === operationId) return aiJson({ task });
     if (body.action === "adopt-exploration" && operationId && task.operationId === operationId && task.phase === "confirm") return aiJson({ task });
     if (body.revision !== task.revision) return aiJson({ message: "任务已更新。请刷新。" }, 409);
     switch (body.action) {

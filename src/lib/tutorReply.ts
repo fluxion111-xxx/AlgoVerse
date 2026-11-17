@@ -2,6 +2,72 @@ import { maxCreatorReplyLength } from "./experimentCreator";
 
 export type TutorCodeBlock = { language: string; lines: string[] };
 
+export const maxTutorTextLength = 8192;
+export const tutorPlanMarker = "[[ALGOVERSE_PLAN]]";
+export const tutorMetaMarker = "[[ALGOVERSE_META]]";
+const metadataLine = "\n" + tutorMetaMarker;
+
+export function splitTutorText(content: string) {
+  if (content.startsWith(tutorMetaMarker)) return { answer: "", metadata: content.slice(tutorMetaMarker.length).trim() };
+  const start = content.indexOf(metadataLine);
+  if (start === -1) return { answer: content, metadata: undefined };
+  const trailer = content.slice(start + metadataLine.length).trim();
+  // Only a single final line can be metadata.
+  if (trailer.includes("\n")) return { answer: content, metadata: undefined };
+  return { answer: content.slice(0, start).trimEnd(), metadata: trailer };
+}
+
+export function readPlainTutorPreview(content: string) {
+  const text = content.trimStart();
+  if (!text || [tutorPlanMarker, tutorMetaMarker].some((marker) => marker.startsWith(text) || text.startsWith(marker))) return "";
+  // Older replies may still use an answer envelope. Wait for its final validation.
+  if (text.startsWith("{") || /^\x60{1,3}(?:j(?:s(?:o(?:n)?)?)?)?$/i.test(text) || text.toLowerCase().startsWith("\x60\x60\x60json")) return "";
+  const end = text.indexOf(metadataLine);
+  if (end !== -1) return text.slice(0, end);
+  const lastLine = text.lastIndexOf("\n");
+  if (lastLine >= 0 && metadataLine.startsWith(text.slice(lastLine))) return text.slice(0, lastLine);
+  return text;
+}
+
+const answerStart = /^\s*(?:\x60{3}(?:json)?\s*)?\{\s*"answer"\s*:\s*"/i;
+const formula = /(\x60{3}[\s\S]*?\x60{3}|~{3}[\s\S]*?~{3}|\x60[^\x60\r\n]*\x60)|\$\$([\s\S]+?)\$\$|\$([^$\r\n]+)\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)/g;
+const mathCommands = /\\\\|\\(?:frac|tfrac|dfrac|lim|to|rightarrow|infty|left|right|sin|cos|tan|ln|exp|sqrt|cdot|pi|theta|text|mathrm|begin|end|sum)(?![A-Za-z])/g;
+
+// Repair an unescaped TeX command inside a formula without changing JSON or code escapes elsewhere.
+export function normalizeTutorFormulaJSON(json: string) {
+  const start = answerStart.exec(json)?.[0].length;
+  if (!start) return json;
+  const answer = /^(?:\\[\s\S]|[^"\\])*(?="|\\?$)/.exec(json.slice(start))?.[0];
+  if (!answer) return json;
+  const repaired = answer.replace(formula, (part, code) => code ? part : part.replace(mathCommands, (command) =>
+    command === "\\\\" ? command : "\\" + command));
+  return json.slice(0, start) + repaired + json.slice(start + answer.length);
+}
+
+export function readTutorAnswerPreview(json: string) {
+  const repaired = normalizeTutorFormulaJSON(json);
+  const start = answerStart.exec(repaired)?.[0].length;
+  if (!start) return "";
+  const prefix = /^(?:[^"\\\u0000-\u001f]|\\(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))*/.exec(repaired.slice(start))?.[0] ?? "";
+  return (JSON.parse('"' + prefix + '"') as string).replace(/[\uD800-\uDBFF]$/u, "").split(/[\b\f]/, 1)[0].slice(0, maxCreatorReplyLength);
+}
+
+export function formatTutorFormulas(answer: string) {
+  return answer.replace(formula, (part, code, display, inline, bracket, parenthesis) => {
+    if (code) return part;
+    const math: string = (display ?? inline ?? bracket ?? parenthesis).trim();
+    if (!/[\\=<>^_+\-→]/u.test(math) || math.includes("\x60")) return part;
+    const readable = math.replace(/\\(?:left|right)(?=[()[\]{}|.])/g, "")
+      .replace(/\\(?:to|rightarrow)(?![A-Za-z])\s*/g, "→").replace(/\\infty(?![A-Za-z])/g, "∞")
+      .replace(/\\(sin|cos|tan|ln|exp)(?![A-Za-z])/g, "$1")
+      .replace(/\\lim\s*_\{([^{}]+)\}/g, "lim($1) ")
+      .replace(/\\(?:frac|tfrac|dfrac)\{([^{}]+)\}\{([^{}]+)\}/g, "($1)/($2)")
+      .replace(/\^\{([^{}]+)\}/g, "^($1)");
+    const literal = "\x60" + readable.replace(/\s+/g, " ").trim() + "\x60";
+    return display || bracket ? "\n\n" + literal + "\n\n" : literal;
+  });
+}
+
 const pythonVerbatimOpening = /^(?:请)?用[ \t]*python[ \t]*代码块(?:原样|逐字)(?:展示|输出|返回)(?:(这(?:一)?行[：:])| )/i;
 const pythonString = String.raw`(?:"(?:[^"\\\r\n]|\\[^\r\n])*"|'(?:[^'\\\r\n]|\\[^\r\n])*')`;
 const pythonLiteralAssignment = String.raw`[ \t]*[a-zA-Z_]\w*[ \t]*=[ \t]*(?:${pythonString}|\[[ \t]*${pythonString}(?:[ \t]*,[ \t]*${pythonString})*[ \t]*\])`;

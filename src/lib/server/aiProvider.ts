@@ -1,9 +1,10 @@
 import "server-only";
-import { createHmac, randomBytes } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { aiKeyProviderMessage, aiProviders, getAIModel, isApiKey, isQwenWorkspaceId, modelSelectionMessage, parseAISelection, workbenchModelMessage, type AIErrorCode, type AIProvider, type AISelection, type TokenUsage } from "@/lib/aiSettings";
 import { isPlatformModel, platformModelIds, type PlatformModel } from "@/lib/platformAI";
 import { retryAfterSeconds } from "@/lib/aiRateLimit";
+import { isAIEventStream, readAIEventStream } from "@/lib/aiEventStream";
 import { platformQuotaConfigured, platformVisitor, reservePlatformAttempt } from "./platformLimits";
 import { confirmZeroSiliconFlowPrice } from "./siliconflowPricing";
 import { credentialAuthFailure, savedAICredential } from "./aiCredentialSession";
@@ -38,13 +39,18 @@ const siliconFlowEndpoint = "https://api.siliconflow.cn/v1/chat/completions";
 export type PendingAIRequest<T> = { fingerprint: string; task: Promise<T>; signal: AbortSignal };
 type Operation = "connection_test" | "quick_start_plan" | "experiment_diagnosis" | "experiment_keyframe" | "experiment_exploration" | "experiment_creator" | "experiment_agent" | "tutor" | "learning_advice";
 type DialogueMessage = { role: "user" | "assistant"; content: string };
+export type AIStageTrace = { id: string; stage: "tutor" | "intent" | "plan" | "analysis" | "diagnosis" };
 type RequestOptions<T> = {
   operation: Operation;
+  trace?: AIStageTrace;
   instructions: string;
   input: unknown;
   dialogue?: DialogueMessage[];
   maxTokens: number;
   normalizeContent?: (content: string) => string;
+  normalizeBeforeParse?: (content: string) => string;
+  tutorStream?: { onContent: (content: string) => void };
+  parseText?: (content: string) => T | null;
   backupTutorFormat?: { instructions: string; normalizeContent: (content: string) => string };
   retryFormat?: boolean;
   validate: (value: unknown) => T | null;
@@ -72,6 +78,14 @@ export class AIRequestError extends Error {
 }
 
 export class AIUnverifiedError extends AIRequestError {}
+
+function platformAIEnabled() {
+  return process.env.PLATFORM_AI_ENABLED === "1";
+}
+
+function assertPlatformAIEnabled() {
+  if (!platformAIEnabled()) throw new AIUnverifiedError("平台服务暂不可用。请去 AI 设置验证 Key。", 503);
+}
 
 type Limits = { secret: Buffer; keys: Map<string, number>; attempts?: Map<string, number>; expiresAt: number; count: number; active: number };
 const processState = globalThis as typeof globalThis & { algoVerseAILimits?: Limits };
@@ -104,31 +118,37 @@ export function reusePendingAI<T>(pending: Map<string, PendingAIRequest<T>>, id:
   return task;
 }
 
-function reserveRequest(provider: AIProvider, apiKey: string, operation: PersonalOperation) {
+function reserveRequest(provider: AIProvider, apiKey: string, meteredOperation?: PersonalOperation) {
   const now = Date.now();
   const limits: Limits = processState.algoVerseAILimits ??= {
     secret: randomBytes(32), keys: new Map(), expiresAt: now + minuteMs, count: 0, active: 0,
   };
-  const attempts = limits.attempts ??= new Map();
-  if (now >= limits.expiresAt) {
-    limits.keys.clear();
-    attempts.clear();
-    limits.count = 0;
-    limits.expiresAt = now + minuteMs;
+  if (limits.active >= maxConcurrent) {
+    if (meteredOperation) throw new AIRequestError("本站请求较多，请稍后再试。", 429, 5);
+    throw new AIRequestError("本站繁忙。请稍后重试。", 503, 5);
   }
-  if (limits.active >= maxConcurrent) throw new AIRequestError("本站请求较多，请稍后再试。", 429, 5);
-  const fingerprint = createHmac("sha256", limits.secret).update(`${provider}:${apiKey}`).digest("hex");
-  const keyCount = limits.keys.get(fingerprint) ?? 0;
-  const attemptCount = attempts.get(fingerprint) ?? 0;
-  if ((!operation.admitted && keyCount >= maxPerKey) || attemptCount >= maxAttemptsPerKey || limits.count >= maxPerProcess) {
-    throw new AIRequestError("本站请求太频繁，请稍后再试。", 429, Math.ceil((limits.expiresAt - now) / 1000));
+  // Meter non-interactive operations only. Interactive attempts use a slot until the upstream call ends.
+  if (meteredOperation) {
+    const attempts = limits.attempts ??= new Map();
+    if (now >= limits.expiresAt) {
+      limits.keys.clear();
+      attempts.clear();
+      limits.count = 0;
+      limits.expiresAt = now + minuteMs;
+    }
+    const fingerprint = createHmac("sha256", limits.secret).update(`${provider}:${apiKey}`).digest("hex");
+    const keyCount = limits.keys.get(fingerprint) ?? 0;
+    const attemptCount = attempts.get(fingerprint) ?? 0;
+    if ((!meteredOperation.admitted && keyCount >= maxPerKey) || attemptCount >= maxAttemptsPerKey || limits.count >= maxPerProcess) {
+      throw new AIRequestError("本站请求太频繁，请稍后再试。", 429, Math.ceil((limits.expiresAt - now) / 1000));
+    }
+    if (!meteredOperation.admitted) {
+      limits.keys.set(fingerprint, keyCount + 1);
+      meteredOperation.admitted = true;
+    }
+    attempts.set(fingerprint, attemptCount + 1);
+    limits.count += 1;
   }
-  if (!operation.admitted) {
-    limits.keys.set(fingerprint, keyCount + 1);
-    operation.admitted = true;
-  }
-  attempts.set(fingerprint, attemptCount + 1);
-  limits.count += 1;
   limits.active += 1;
   return () => { limits.active -= 1; };
 }
@@ -172,6 +192,9 @@ export function readAICredentials(request: Request, workbench = false, configuri
   }
   const provider = request.headers.get("x-ai-provider") ?? "deepseek";
   const mode = request.headers.get("x-ai-mode");
+  if (provider === "siliconflow" || mode === "platform" || request.headers.has("x-ai-platform-model")) {
+    assertPlatformAIEnabled();
+  }
   const model = request.headers.get("x-ai-model");
   const region = request.headers.get("x-ai-region");
   const authorization = request.headers.get("authorization");
@@ -215,7 +238,7 @@ export function readAICredentials(request: Request, workbench = false, configuri
 }
 
 export function platformAIConfigured() {
-  return Boolean(process.env.SILICONFLOW_API_KEY?.trim() && platformQuotaConfigured());
+  return platformAIEnabled() && Boolean(process.env.SILICONFLOW_API_KEY?.trim() && platformQuotaConfigured());
 }
 
 export function aiJson(value: unknown, status = 200, retryAfter?: number) {
@@ -265,6 +288,12 @@ class AICompletionFormatError extends AIRequestError {
     super(reason === "empty" ? "AI 未返回正文，请重试。"
       : reason === "truncated" ? "AI 回复未写完，请重试。" : "AI 返回格式有误，请重试。", 502);
     this.reason = reason;
+  }
+}
+
+class AICompletionTimeoutError extends AIRequestError {
+  constructor() {
+    super("AI 响应超时，请重试。", 504, undefined, "timeout");
   }
 }
 
@@ -339,7 +368,7 @@ async function providerError(provider: AIProvider | "siliconflow", response: Res
       return new AIRequestError(requestId ? hint + " 请求编号 " + requestId : hint, 401, undefined, "authentication");
     }
     if (invalidKey) return new AIRequestError(authMessage, 401, undefined, "authentication");
-    if (code === "insufficient_quota" || code === "Throttling.AllocationQuota") return new AIRequestError(`${vendor}额度不足。请检查用量。`, 429);
+    if (code === "insufficient_quota" || code === "Throttling.AllocationQuota") return new AIRequestError(`${vendor}额度不足。请检查用量。`, 429, retryAfter);
     if (code === "model_not_found" || code === "ModelNotFound" || code === "model_not_supported") {
       return new AIRequestError(modelSelectionMessage, 404, undefined, "model_unavailable");
     }
@@ -365,13 +394,21 @@ async function providerError(provider: AIProvider | "siliconflow", response: Res
   return new AIRequestError("AI 请求失败。请稍后重试。", 502);
 }
 
-export async function requestAIJson<T>(credentials: AICredentials, options: RequestOptions<T>) {
+type AICompletion<T> = { result: T; model: string; usage: TokenUsage | null };
+
+export function requestAIJson<T>(credentials: AICredentials, options: RequestOptions<T> & { parseText?: undefined }):
+  Promise<AICompletion<T> & { usage: TokenUsage }>;
+export function requestAIJson<T>(credentials: AICredentials, options: RequestOptions<T>): Promise<AICompletion<T>>;
+export async function requestAIJson<T>(credentials: AICredentials, options: RequestOptions<T>): Promise<AICompletion<T>> {
+  if (credentials.visitor !== undefined) assertPlatformAIEnabled();
   if (JSON.stringify(options.input)?.includes(credentials.apiKey) || options.dialogue?.some(({ content }) => content.includes(credentials.apiKey))) {
     throw new AIRequestError("请先移除问题里的 Key。", 400);
   }
   // Repair only model output. Tool execution and confirmation happen after validation.
   const canRepair = options.operation === "experiment_agent" || (credentials.visitor === undefined && options.operation === "connection_test");
-  const completion = canRepair ? { ...options, retryFormat: true } : options;
+  const stage = options.operation === "tutor" ? "tutor" : options.operation === "experiment_diagnosis" ? "diagnosis" : undefined;
+  const trace = options.trace ?? (stage && { id: randomUUID(), stage });
+  const completion = { ...options, trace, retryFormat: canRepair || options.retryFormat };
   if (credentials.visitor !== undefined) return requestPlatformAI(credentials, completion);
   const byok = credentials.selection;
   const { provider, model } = byok;
@@ -394,19 +431,24 @@ export async function requestAIJson<T>(credentials: AICredentials, options: Requ
     };
   const qwenThinkingModel = provider !== "deepseek" && reasoning && profile.output === "json-object"
     ? `${provider}:${byok.provider === "qwen" ? byok.region : ""}:${model}` : undefined;
-  const retryTransient = isInteractiveModelCall(options.operation);
-  const deadline = retryTransient ? AbortSignal.timeout(62_000) : undefined;
+  const interactive = isInteractiveModelCall(options.operation);
+  const deepSeekInteractive = provider === "deepseek" && interactive;
+  const deepSeekTurn = provider === "deepseek" && (options.operation === "tutor" || options.operation === "experiment_agent");
+  const deadline = interactive ? AbortSignal.timeout(62_000) : undefined;
   const signal = deadline ? AbortSignal.any([deadline, credentials.signal]) : credentials.signal;
-  let output = qwenThinkingModel && (qwenTextModeUntil.get(qwenThinkingModel) ?? 0) > Date.now() ? "text" : profile.output;
-  const attempt = async (repair: boolean) => {
+  let output = options.parseText || (qwenThinkingModel && (qwenTextModeUntil.get(qwenThinkingModel) ?? 0) > Date.now()) ? "text" : profile.output;
+  let attemptNumber = 0;
+  const stageStartedAt = Date.now();
+  const attempt = async (repair?: "format" | "empty") => {
     if (credentials.signal.aborted) throw new AIRequestError("请求已取消。", 499, undefined, "cancelled");
-    const release = reserveRequest(provider, credentials.apiKey, operation);
+    const release = reserveRequest(provider, credentials.apiKey, interactive ? undefined : operation);
     try {
-      return await requestCompletion({ ...credentials, signal }, repair
-        ? { ...completion, instructions: repairInstructions(completion.instructions) } : completion, {
-        endpoint, model, parameters, output,
+      const instructions = repair ? repairInstructions(completion.instructions) : completion.instructions;
+      const normalizeContent = repair === "empty" ? undefined : completion.normalizeContent;
+      return await requestCompletion({ ...credentials, signal }, { ...completion, instructions, normalizeContent }, {
+        endpoint, model, parameters, output: repair === "empty" ? "text" : output,
         timeoutMs: reasoning ? reasoningTimeoutMs : requestTimeoutMs, region: byok.provider === "qwen" ? byok.region : undefined,
-      });
+      }, { number: ++attemptNumber, stageStartedAt });
     } catch (error) {
       if (error instanceof AIRequestError && error.status === 401) credentials.onAuthFailure?.();
       throw error;
@@ -414,23 +456,28 @@ export async function requestAIJson<T>(credentials: AICredentials, options: Requ
       release();
     }
   };
-  let repair = false;
+  let repair: "format" | "empty" | undefined;
   for (;;) {
     try {
       return await attempt(repair);
     } catch (error) {
       if (credentials.signal.aborted) throw error;
       if (deadline?.aborted) throw new AIRequestError("AI 响应超时，请重试。", 504, undefined, "timeout");
+      if (options.tutorStream || options.parseText) throw error;
+      if (repair === "empty") throw error;
+      // A local deadline may have interrupted an already running completion. Don't repeat that turn automatically.
+      if (deepSeekTurn && error instanceof AICompletionTimeoutError) throw error;
       if (qwenThinkingModel && output === "json-object" && error instanceof QwenThinkingFormatError) {
         qwenTextModeUntil.set(qwenThinkingModel, Date.now() + qwenTextModeTtlMs);
         output = "text";
         continue;
       }
-      if (!repair && completion.retryFormat && error instanceof AICompletionFormatError) {
-        repair = true;
-        continue;
+      if (!repair && error instanceof AICompletionFormatError) {
+        if (deepSeekInteractive && error.reason === "empty" && output === "json-object") repair = "empty";
+        else if (completion.retryFormat) repair = "format";
+        if (repair) continue;
       }
-      const wait = retryTransient && transientRetryDelay(error, operation.retries ?? 0);
+      const wait = interactive && transientRetryDelay(error, operation.retries ?? 0);
       if (wait === false || wait === undefined) throw error;
       operation.retries = (operation.retries ?? 0) + 1;
       await delay(wait, undefined, { signal }).catch(() => {
@@ -521,14 +568,63 @@ async function requestPlatformCompletion<T>(credentials: PlatformCredentials, op
   });
 }
 
+async function readDeepSeekTutorStream(response: Response, signal: AbortSignal, onContent: (content: string) => void, onFirstByte: () => void) {
+  if (!response.body || !isAIEventStream(response)) {
+    void response.body?.cancel().catch(() => {});
+    throw new AIRequestError("DeepSeek 流式响应异常。请重试。", 502);
+  }
+  let content = "";
+  let finish: string | undefined;
+  let usage: unknown;
+  try {
+    for await (const data of readAIEventStream(response.body, signal, onFirstByte)) {
+      if (data === "[DONE]") {
+        if (!finish) break;
+        return { usage, choices: [{ finish_reason: finish, message: { content } }] };
+      }
+      const event = asObject(JSON.parse(data));
+      if (!event) throw new AICompletionFormatError("schema");
+      const error = asObject(event.error);
+      if (error) {
+        if (["429", "rate_limit_exceeded"].includes(String(error.code ?? error.status))) {
+          throw new AIRequestError("服务商限流。请稍后重试。", 429, retryAfterSeconds(response.headers.get("Retry-After")) ?? 30, "upstream_rate_limit");
+        }
+        throw new AIRequestError("DeepSeek 回复中断。请重试。", 502, undefined, "upstream");
+      }
+      if (event.usage != null) usage = event.usage;
+      const choice = asObject(Array.isArray(event.choices) ? event.choices[0] : null);
+      const delta = asObject(choice?.delta);
+      if (delta?.refusal || choice?.finish_reason === "content_filter") throw new AIRequestError("服务商拦截了本次内容。", 400);
+      if (typeof choice?.finish_reason === "string") finish = choice.finish_reason;
+      if (typeof delta?.content !== "string" || !delta.content) continue;
+      content += delta.content;
+      if (content.length > 64 * 1024) throw new AICompletionFormatError("schema");
+      onContent(content);
+    }
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new AICompletionFormatError("json");
+    throw error;
+  }
+  throw new AIRequestError("DeepSeek 回复中断。请重试。", 502, undefined, "network");
+}
+
 async function requestCompletion<T>({ apiKey, selection: { provider }, signal }: AICredentials, options: RequestOptions<T>,
-  { endpoint, model, parameters, output, timeoutMs, region }: CompletionOptions) {
+  { endpoint, model, parameters, output, timeoutMs, region }: CompletionOptions, attempt?: { number: number; stageStartedAt: number }) {
   const started = Date.now();
   const timeout = AbortSignal.timeout(timeoutMs);
   let usage: TokenUsage | null = null;
   let outcome = 500;
   let errorCode: AIErrorCode | undefined;
   let format: "normalized" | CompletionFormatError | undefined;
+  let requestBytes: number | undefined;
+  let firstByteMs: number | undefined;
+  let firstContentMs: number | undefined;
+  let headersMs: number | undefined;
+  let upstreamStatus: number | undefined;
+  let contentChars: number | undefined;
+  let finishReason: string | undefined;
+  const deepSeekInteractive = provider === "deepseek" && isInteractiveModelCall(options.operation);
+  const tutorStream = deepSeekInteractive && options.operation === "tutor" ? options.tutorStream : undefined;
   try {
     const body = JSON.stringify({
       model,
@@ -536,24 +632,36 @@ async function requestCompletion<T>({ apiKey, selection: { provider }, signal }:
       messages: [{ role: "system", content: options.instructions }, { role: "user", content: JSON.stringify(options.input) },
         ...(options.dialogue ?? [])],
       ...(output === "json-object" && { response_format: { type: "json_object" } }),
+      ...(tutorStream && { stream: true, stream_options: { include_usage: true } }),
     });
-    if (provider !== "siliconflow" && Buffer.byteLength(body) > 192 * 1024) {
+    requestBytes = Buffer.byteLength(body);
+    if (provider !== "siliconflow" && requestBytes > 192 * 1024) {
       throw new AIRequestError("上下文超长。请缩短输入。", 422, undefined, "context_limit");
     }
+    const requestSignal = AbortSignal.any([signal, timeout]);
     const response = await fetch(endpoint, {
       method: "POST",
       cache: "no-store",
       redirect: "error",
-      signal: AbortSignal.any([signal, timeout]),
+      signal: requestSignal,
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body,
     });
+    if (tutorStream || options.parseText) headersMs = Date.now() - started;
+    if (options.parseText) upstreamStatus = response.status;
     signal.throwIfAborted();
     timeout.throwIfAborted();
     const testing = options.operation === "connection_test";
     if (!response.ok) throw await providerError(provider, response);
+    if (deepSeekInteractive && !tutorStream && isAIEventStream(response)) {
+      void response.body?.cancel().catch(() => {});
+      throw new AIRequestError("DeepSeek 返回了意外的流式响应。", 502);
+    }
 
-    const payload = asObject(await response.json().catch((error: unknown) => {
+    const payload = asObject(tutorStream ? await readDeepSeekTutorStream(response, requestSignal, (content) => {
+      if (content.trim()) firstContentMs ??= Date.now() - started;
+      tutorStream.onContent(content);
+    }, () => { firstByteMs = Date.now() - started; }) : await response.json().catch((error: unknown) => {
       if (error instanceof SyntaxError) return null;
       throw error;
     }));
@@ -562,7 +670,14 @@ async function requestCompletion<T>({ apiKey, selection: { provider }, signal }:
     usage = readUsage(payload?.usage);
     const choice = asObject(Array.isArray(payload?.choices) ? payload.choices[0] : null);
     const message = asObject(choice?.message);
+    if (options.parseText) {
+      const reason = choice?.finish_reason;
+      if (reason === "stop" || reason === "length" || reason === "content_filter" || reason === "aborted"
+        || reason === "insufficient_system_resource" || reason === "tool_calls") finishReason = reason;
+      contentChars = typeof message?.content === "string" ? message.content.trim().length : message?.content === null ? 0 : undefined;
+    }
     const invalidResult = new AIRequestError("AI 返回格式有误，请重试。", 502);
+    const invalidResponse = deepSeekInteractive ? new AIRequestError("DeepSeek 响应异常。请重试。", 502) : invalidResult;
     if (provider === "siliconflow" && payload?.error) {
       const code = asObject(payload.error)?.code;
       if (code === 50505 || code === "50505") throw new PlatformUpstreamError(503, true);
@@ -574,7 +689,7 @@ async function requestCompletion<T>({ apiKey, selection: { provider }, signal }:
     if (provider !== "siliconflow") {
       if (choice?.finish_reason === "content_filter" || message?.refusal) throw new AIRequestError("服务商拦截了本次内容。", 400);
     }
-    if (payload?.error || !usage || !message || message.refusal) throw invalidResult;
+    if (payload?.error || (!usage && !options.parseText) || !message || message.refusal) throw invalidResponse;
     if (provider === "siliconflow" && payload?.model !== model) {
       console.warn("AlgoVerse SiliconFlow returned an unexpected model.", { model });
       throw new AIRequestError("免费模型异常。请联系管理员。", 503);
@@ -585,14 +700,22 @@ async function requestCompletion<T>({ apiKey, selection: { provider }, signal }:
 
     const canRepair = options.retryFormat || (provider === "siliconflow" && model === siliconFlowModels.backup.id && options.backupTutorFormat);
     if (choice?.finish_reason === "length" && (canRepair || provider !== "siliconflow")) throw new AICompletionFormatError("truncated");
-    if (choice?.finish_reason !== "stop") throw invalidResult;
+    if (choice?.finish_reason !== "stop") throw invalidResponse;
     const content = typeof message.content === "string" ? message.content.trim() : message.content;
     if ((content === "" || content == null) && (canRepair || provider !== "siliconflow")) throw new AICompletionFormatError("empty");
     if (typeof content !== "string") throw canRepair ? new AICompletionFormatError("schema") : invalidResult;
+    if (options.parseText) {
+      const result = options.parseText(content);
+      if (result === null) throw new AICompletionFormatError("schema");
+      if (JSON.stringify(result).includes(apiKey)) throw invalidResult;
+      outcome = 200;
+      return { result, model, usage };
+    }
     let value: unknown;
     // Accept a single complete JSON fence without extracting tool calls from surrounding prose.
     const fenced = output === "text" || options.retryFormat ? content.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i) : null;
-    const json = fenced?.[1] ?? content;
+    const rawJson = fenced?.[1] ?? content;
+    const json = options.normalizeBeforeParse?.(rawJson) ?? rawJson;
     try {
       value = JSON.parse(json);
     } catch {
@@ -610,10 +733,12 @@ async function requestCompletion<T>({ apiKey, selection: { provider }, signal }:
     return { result, model, usage };
   } catch (error) {
     const timedOut = timeout.aborted || (error instanceof DOMException && error.name === "TimeoutError");
-    const failure = signal.aborted ? new AIRequestError("请求已取消。", 499, undefined, "cancelled")
+    const outerTimeout = options.parseText && signal.aborted && signal.reason?.name === "TimeoutError";
+    const failure = outerTimeout ? new AICompletionTimeoutError()
+      : signal.aborted ? new AIRequestError("请求已取消。", 499, undefined, "cancelled")
       : error instanceof AIRequestError ? error
       : provider === "siliconflow" ? new PlatformUpstreamError(timedOut ? 504 : 503, true, undefined, timedOut ? "timeout" : "network")
-      : timedOut ? new AIRequestError("AI 响应超时，请重试。", 504, undefined, "timeout")
+      : timedOut ? new AICompletionTimeoutError()
       : new AIRequestError(`无法连接${provider === "qwen" ? "百炼" : aiProviders[provider].label}。请稍后重试。`, 502, undefined, "network");
     outcome = failure.status;
     errorCode = failure.code;
@@ -621,9 +746,14 @@ async function requestCompletion<T>({ apiKey, selection: { provider }, signal }:
     throw failure;
   } finally {
     // Log only allowlisted metadata. Never log headers, prompts, or provider bodies.
+    const ended = Date.now();
     console.info("AlgoVerse AI", JSON.stringify({
       operation: options.operation, provider: provider === "siliconflow" ? "SiliconFlow" : aiProviders[provider].label, model,
-      region, format, status: outcome, code: errorCode, elapsedMs: Date.now() - started, usage,
+      region, format, status: outcome, code: errorCode, elapsedMs: ended - started, usage,
+      ...(tutorStream && { streaming: true, startedAt: new Date(started).toISOString(), headersMs, firstByteMs, firstContentMs }),
+      ...(options.parseText && { upstreamStatus, contentChars, finishReason, outputMode: "text", headersMs }),
+      ...(options.trace && { traceId: options.trace.id, stage: options.trace.stage, requestBytes, attempt: attempt?.number,
+        stageElapsedMs: attempt && ended - attempt.stageStartedAt }),
     }));
   }
 }

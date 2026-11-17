@@ -115,6 +115,35 @@ export function hasAgentOperation(task: Pick<AgentTask, "dialogue">, operationId
     || (dialogue?.operationId === operationId && (agentDialogueActive(task) || !!dialogue.error));
 }
 
+export type AgentOperationProgress =
+  | { stage: "intent" | "plan" | "analysis"; until: number }
+  | { stage: "ready" | "complete" | "failed" | "stopped" | "interrupted"; turn?: AgentTurn };
+
+export function agentOperationProgress(task: AgentTask, operationId: string, now = Date.now()): AgentOperationProgress | undefined {
+  const dialogue = task.dialogue;
+  const turn = dialogue?.turns.find((entry) => entry.operationId === operationId);
+  if (turn) {
+    if (turn.stopped) return { stage: "stopped", turn };
+    const ready = turn.action === "run" && task.phase === "confirm" && !dialogue?.pending && task.pending.length > 0
+      && task.pending.every(({ id }) => turn.proposalIds?.includes(id));
+    return { stage: ready ? "ready" : "complete", turn };
+  }
+  if (dialogue?.operationId === operationId && dialogue.pending) {
+    if (dialogue.error) return { stage: "failed" };
+    const until = dialogue.activeUntil ?? 0;
+    if (until <= now) return { stage: "interrupted" };
+    return { stage: dialogue.pendingPlan ? "plan" : "intent", until };
+  }
+  if (task.operationId !== operationId || dialogue?.pending) return;
+  if (task.phase === "deciding") {
+    const until = task.leaseUntil ?? 0;
+    if (until <= now) return { stage: "interrupted" };
+    return { stage: "analysis", until };
+  }
+  if (task.error) return { stage: "failed" };
+  return { stage: task.phase === "confirm" && task.pending.length ? "ready" : "complete" };
+}
+
 export function agentFinished(phase: AgentTask["phase"]) {
   return phase === "finished" || phase === "unsupported" || phase === "cancelled" || phase === "limit";
 }

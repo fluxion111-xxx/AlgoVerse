@@ -1,9 +1,11 @@
 import "server-only";
+import { randomUUID } from "node:crypto";
 import { agentCooldown, agentDialogueActive, agentDialogueLimits, agentFinished, agentLimits, type AgentCall, type AgentDialogue, type AgentEvidence, type AgentFocus, type AgentTask, type AgentTurn, type AgentTurnAction, type SchedulingEvidence, type TutorContext, type TutorTurnDetails } from "@/lib/experimentAgent";
+import type { EngineId } from "@/lib/experimentEngines";
 import { evidenceLabels } from "@/lib/experiments/evidence";
 import type { keyframeContext } from "@/lib/experiments/keyframeEvidence";
-import { AIRequestError, asObject, requestAIJson, sharePersonalOperation, type AICredentials } from "./aiProvider";
-import { agentPlanningTools, agentTools, callAgentTool, prepareToolCall } from "./agentTools";
+import { AIRequestError, asObject, requestAIJson, sharePersonalOperation, type AICredentials, type AIStageTrace } from "./aiProvider";
+import { agentPlanningTools, agentTools, callAgentTool, compactAgentCatalog, prepareToolCall, recognizeAgentPlan, selectAgentPlanningTools } from "./agentTools";
 import { agentOperationKey, getDiagnosis, getExperimentRun, saveAgentTask, type ExperimentRun } from "./experimentRecords";
 
 const leaseMs = 75_000;
@@ -43,6 +45,9 @@ Use clarify with one necessary question only when the combined conversation leav
 
 const planningInstructions = `Plan the experiment defined in focus. request is the latest user message: copy any exact input or requested parameter change from it. Use focus to resolve omitted subjects. Return one JSON object in the user's language. Describe what the proposal will do; nothing has run yet. Scope the plan to the requested methods and the listed tool metrics. Do not promise extra comparisons, implementations or measurements. Use only a matching tool from tools. If no registered tool can perform the requested experiment, return {"action":"unsupported","observation":"the specific limitation"}. If remainingBatch is zero, explain the limit.
 For a proposal return {"action":"run","observation":"one sentence","plan":["step"],"calls":[{"tool":"registered tool ID","parameters":"preset"}]}. Use 1–3 steps. Do not add a focus field. Calls may not exceed remainingBatch. In a revision, use revisionBase when present. Set parameters to an object containing just the requested changes, using inputSchema field names and types. Unchanged values come from revisionBase. Do not use "preset" for a revision. When starting a fresh experiment, use "preset" if the engine default meets the goal and no specific data are required. Otherwise provide a complete configuration. Compare methods on the same inputs. CPU policies are lowercase; use quantum 1 for fcfs. Set autoContinue:true only if the goal requires multiple rounds and further analysis. The workbench asks for confirmation. Use clarify only for missing requirements that change the experiment.`;
+const sharedSchemaInstruction = "\nMerge sharedInputSchema into each tool's inputSchema. An explicit field in a tool's inputSchema overrides the shared definition.";
+const explicitInputsInstruction = "\nWhen focus.defaults is forbidden, do not use preset. Copy the requested inputs from request into the call parameters.";
+const candidateToolsInstruction = '\nThe listed tools are candidates. Cover the entire request, including all named methods. If the listed tools cannot cover it or you are unsure, return only {"action":"expand_catalog"} to check all registered tools. Use clarify only when user input is missing.';
 
 type DialogueDecision = Decision | { action: "plan"; focus: FocusUpdate };
 
@@ -103,7 +108,7 @@ export type TutorResolution = PlanRequest | TutorAnswer;
 type TutorDelegate = {
   access: TutorContext;
   run: ExperimentRun | null;
-  resolve: (turns: AgentTurn[], context: { focus?: AgentFocus; pendingTool?: string }, credentials: AICredentials) => Promise<(PlanRequest & { model?: string }) | (TutorAnswer & { model: string })>;
+  resolve: (turns: AgentTurn[], context: { focus?: AgentFocus; pendingTool?: string }, credentials: AICredentials, trace: AIStageTrace) => Promise<(PlanRequest & { model?: string }) | (TutorAnswer & { model: string })>;
 };
 
 export function readPlanFocus(value: unknown) {
@@ -246,15 +251,15 @@ function availableBatch(task: AgentTask, steps: number, requests: number) {
   return requests > agentLimits.decisions ? 0 : Math.max(0, Math.min(agentLimits.runs - task.runs.length, agentLimits.batch, agentLimits.steps - steps));
 }
 
-function decisionContext(task: AgentTask, currentTopicOnly = false) {
+function decisionContext(task: AgentTask, currentTopicOnly = false, includeConversation = true) {
   const focus = task.dialogue?.focus;
   const firstRun = focus?.firstRun ?? 0;
   const currentExperiment = currentProposal(task);
-  const conversation = recentAgentTurns(visibleTurns(task.dialogue?.turns ?? []), agentDialogueLimits.context)
+  const conversation = includeConversation ? recentAgentTurns(visibleTurns(task.dialogue?.turns ?? []), agentDialogueLimits.context)
     .map(({ message, reply, action, evidence, tutor }) => ({
       message, reply: tutor?.codeBlocks?.length ? JSON.stringify({ answer: reply, codeBlocks: tutor.codeBlocks }) : reply,
       action, evidence,
-    }));
+    })) : [];
   return {
     goal: focus?.goal ?? task.experimentGoal ?? (task.dialogue ? undefined : task.goal),
     focus: focus && { topic: focus.topic, goal: focus.goal, constraints: focus.constraints, defaults: focus.defaults },
@@ -325,7 +330,11 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
   const priorScope = task.tutorContext;
   const turns = dialogue.pending && dialogue.pending !== message ? [...dialogue.turns, { message: dialogue.pending,
     ...((priorScope?.includeExperiment || priorScope?.includePractice) && { tutorScope: priorScope }) }] : dialogue.turns;
-  const pendingPlan = !tutor && dialogue.pending === message && dialogue.pendingRound === (selectedRound ?? null) ? dialogue.pendingPlan : undefined;
+  const fastPlan = credentials.selection.provider === "deepseek" && !tutor && !task.tutorContext && selectedRound === undefined
+    && task.phase === "draft" && task.goal === message && !turns.length && !dialogue.focus && !task.runs.length && !task.pending.length
+    && !task.referenceConfig && !task.clarifications.length && !task.plan.length && !task.question ? recognizeAgentPlan(message) : undefined;
+  const savedPlan = !tutor && dialogue.pending === message && dialogue.pendingRound === (selectedRound ?? null) ? dialogue.pendingPlan : undefined;
+  const pendingPlan = savedPlan ?? fastPlan?.focus;
   let requested: AgentDialogue = { turns, focus: dialogue.focus, requests: dialogue.requests + 1, pending: message,
     ...(!tutor && { pendingRound: selectedRound ?? null }), pendingPlan, activeUntil: Date.now() + leaseMs, operationId };
   if (credentials.signal.aborted) throw new AIRequestError("请求已取消。", 499, undefined, "cancelled");
@@ -333,20 +342,26 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
   const remainingBatch = availableBatch(task, task.steps + 1, task.requests + 1);
   let result: Decision;
   let model: string;
-  let details;
+  let details: Awaited<ReturnType<typeof schedulingDetails>> = [];
   let tutorDetails: TutorTurnDetails | undefined;
+  const traceId = randomUUID();
+  const started = Date.now();
+  let stage: AIStageTrace["stage"] = tutor ? "tutor" : "intent";
+  const compact = credentials.selection.provider === "deepseek";
   const deadline = AbortSignal.timeout(leaseMs - 5000);
   const { signal, release } = trackModelRequest(key, credentials.signal);
   try {
-    const evidenceOptions = dialogueEvidence(task);
-    const reports = await Promise.all(task.runs.map(async ({ id }, index) => {
+    const evidenceOptions = tutor ? new Map<string, AgentEvidence>() : dialogueEvidence(task);
+    const loadReports = () => Promise.all(task.runs.map(async ({ id }, index) => {
       if (tutor && tutor.run?.id !== id) return null;
       const diagnosis = await getDiagnosis(id);
       return diagnosis && { round: index + 1, conclusion: diagnosis.conclusion, evidence: diagnosis.evidence,
         explanation: diagnosis.explanation, suggestion: diagnosis.suggestion };
     }));
-    details = tutor ? [] : await schedulingDetails(task);
-    const context = decisionContext({ ...task, dialogue: { ...dialogue, turns } });
+    const classify = !tutor && !pendingPlan;
+    let reports: Awaited<ReturnType<typeof loadReports>> = [];
+    if (classify) [reports, details] = await Promise.all([loadReports(), schedulingDetails(task)]);
+    const { lastExchange, ...context } = decisionContext({ ...task, dialogue: { ...dialogue, turns } }, false, classify);
     const boundedCredentials = sharePersonalOperation({ ...credentials,
       signal: AbortSignal.any([signal, deadline]) });
     const accessibleFocus = tutor && (task.runs.length || turns.some(({ tutorScope }) => tutorScope?.includeExperiment || tutorScope?.includePractice))
@@ -354,22 +369,24 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
     const response = pendingPlan ? { action: "plan" as const, focus: pendingPlan, model: undefined }
       : tutor ? await tutor.resolve(visibleTurns(turns, tutor.access, !!task.runs.length), {
       focus: accessibleFocus, pendingTool: task.pending[0]?.tool,
-    }, boundedCredentials) : await requestAIJson<DialogueDecision>(boundedCredentials, {
+    }, boundedCredentials, { id: traceId, stage }) : await requestAIJson<DialogueDecision>(boundedCredentials, {
       operation: "experiment_agent", instructions: dialogueInstructions, maxTokens: agentDialogueLimits.outputTokens,
-      input: { ...context, ...(task.dialogue || task.runs.length ? {} : { goal: task.goal }),
+      trace: { id: traceId, stage },
+      input: { ...context, ...(!compact && { lastExchange }), ...(task.dialogue || task.runs.length ? {} : { goal: task.goal }),
         message, remainingBatch, lastError: dialogue.error, evidenceOptions: [...evidenceOptions.keys()],
         runDetails: details, diagnoses: reports.filter(Boolean), selectedRound },
-      dialogue: [...context.conversation.flatMap(({ message: previous, reply }) => [
+      dialogue: compact ? undefined : [...context.conversation.flatMap(({ message: previous, reply }) => [
         { role: "user" as const, content: previous },
         ...(reply ? [{ role: "assistant" as const, content: reply }] : []),
-      ]), { role: "user", content: `Resolve the following request using the conversation. Inherit the exact subject and methods when omitted.\n${JSON.stringify({ context: { focus: context.focus, lastExchange: context.lastExchange }, message })}` }],
+      ]), { role: "user", content: `Resolve the following request using the conversation. Inherit the exact subject and methods when omitted.\n${JSON.stringify({ context: { focus: context.focus, lastExchange }, message })}` }],
       validate: (value) => validateDialogueDecision(value, task, remainingBatch, evidenceOptions),
     }).then(({ result, model }) => ({ ...result, model }));
     if (response.action === "plan") {
       if (response.model !== undefined) {
         if (requested.requests >= agentDialogueLimits.requests) throw new AIRequestError("已到本对话上限。", 429);
-        requested = { ...requested, requests: requested.requests + 1, ...(!tutor && { pendingPlan: response.focus }) };
-        claimed = await update(claimed, { dialogue: requested });
+        const planned = { ...requested, requests: requested.requests + 1, ...(!tutor && { pendingPlan: response.focus }) };
+        claimed = await update(claimed, { dialogue: planned });
+        requested = planned;
       }
       const { focus: resolvedFocus } = response;
       const focus = { ...(resolvedFocus.switchTopic ? undefined : accessibleFocus), ...resolvedFocus };
@@ -377,21 +394,49 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
       const base = tutor ? task.pending[0] ?? (sharedSession && { tool: sharedSession.engineId, version: sharedSession.engineVersion, config: sharedSession.config })
         : currentProposal(task);
       const revisionBase = !focus.switchTopic && task.pending.length <= 1 ? base : undefined;
-      ({ result, model } = await requestAIJson<Decision>(boundedCredentials, {
-        operation: "experiment_agent", instructions: planningInstructions, maxTokens: agentDialogueLimits.outputTokens,
-        input: { stage: "plan", focus, request: message, currentExperiment: !focus.switchTopic && base ? { tool: base.tool, config: base.config } : undefined,
-          revisionBase: revisionBase && { tool: revisionBase.tool, config: revisionBase.config },
-          pendingTools: focus.switchTopic ? [] : context.pendingTools,
-          runs: focus.switchTopic ? [] : context.runs.filter((run) => run.currentTopic && (!tutor || task.runs[run.round - 1].id === tutor.run?.id)),
-          diagnoses: focus.switchTopic ? [] : reports.filter((report) => report && context.runs[report.round - 1].currentTopic),
-          tools: agentPlanningTools(task.seed), remainingBatch },
-        validate: (value) => {
-          const proposal = asObject(value);
-          if (proposal?.action !== "run" && proposal?.action !== "unsupported" && proposal?.action !== "clarify") return null;
-          if (tutor && Array.isArray(proposal.evidence) && proposal.evidence.length) return null;
-          return validateDecision({ ...proposal, focus }, task, remainingBatch, evidenceOptions, revisionBase, !!tutor && !base);
-        },
-      }));
+      if (!classify && !focus.switchTopic && task.runs.length) reports = await loadReports();
+      stage = "plan";
+      const candidates = fastPlan ? [fastPlan.tool] : !tutor && credentials.visitor === undefined
+        ? selectAgentPlanningTools(message, resolvedFocus.topic, resolvedFocus.goal, resolvedFocus.constraints) : undefined;
+      const planInput = { stage: "plan", focus, request: message,
+        currentExperiment: !focus.switchTopic && base ? { tool: base.tool, config: base.config } : undefined,
+        revisionBase: revisionBase && { tool: revisionBase.tool, config: revisionBase.config },
+        pendingTools: focus.switchTopic ? [] : context.pendingTools,
+        runs: focus.switchTopic ? [] : context.runs.filter((run) => run.currentTopic && (!tutor || task.runs[run.round - 1].id === tutor.run?.id)),
+        diagnoses: focus.switchTopic ? [] : reports.filter((report) => report && context.runs[report.round - 1].currentTopic),
+        remainingBatch };
+      const requestPlan = (toolIds?: readonly EngineId[]) => {
+        const tools = agentPlanningTools(task.seed, toolIds);
+        const catalog = compact && !toolIds ? compactAgentCatalog(tools) : { tools };
+        const canExpand = !!toolIds && !fastPlan && remainingBatch > 0;
+        return requestAIJson<Decision | "expand_catalog">(boundedCredentials, {
+          operation: "experiment_agent", maxTokens: agentDialogueLimits.outputTokens, trace: { id: traceId, stage },
+          instructions: planningInstructions + ("sharedInputSchema" in catalog ? sharedSchemaInstruction : "")
+            + (focus.defaults === "forbidden" ? explicitInputsInstruction : "") + (canExpand ? candidateToolsInstruction : ""),
+          input: { ...planInput, ...catalog },
+          validate: (value) => {
+            const proposal = asObject(value);
+            if (canExpand && proposal?.action === "expand_catalog" && Object.keys(proposal).length === 1) return "expand_catalog";
+            if (proposal?.action !== "run" && proposal?.action !== "unsupported" && proposal?.action !== "clarify") return null;
+            if (tutor && Array.isArray(proposal.evidence) && proposal.evidence.length) return null;
+            const decision = validateDecision({ ...proposal, focus }, task, remainingBatch, evidenceOptions, revisionBase, !!tutor && !base);
+            if (!decision) return null;
+            const outsideCatalog = toolIds && decision.calls.some(({ tool }) => !toolIds.includes(tool));
+            if (canExpand && (decision.action === "unsupported" || outsideCatalog)) return "expand_catalog";
+            return outsideCatalog ? null : decision;
+          },
+        });
+      };
+      let planned = await requestPlan(candidates);
+      if (planned.result === "expand_catalog") {
+        if (requested.requests >= agentDialogueLimits.requests) throw new AIRequestError("已到本对话上限。", 429);
+        const expanded = { ...requested, requests: requested.requests + 1 };
+        claimed = await update(claimed, { dialogue: expanded });
+        requested = expanded;
+        planned = await requestPlan();
+      }
+      if (planned.result === "expand_catalog") throw new Error("Unexpected request to expand full tool catalog");
+      ({ result, model } = planned);
     } else if ("tutor" in response) {
       tutorDetails = response.tutor;
       result = { action: "answer", plan: [], observation: response.observation, calls: [], evidence: [], focus: response.focus };
@@ -401,10 +446,15 @@ export async function replyToAgentMessage(task: AgentTask, message: string, cred
       model = response.model;
     }
   } catch (error) {
+    const errorCode = signal.aborted ? "cancelled" : deadline.aborted ? "timeout" : error instanceof AIRequestError ? error.code : undefined;
+    const resumable = stage === "plan" && !!claimed.dialogue?.pendingPlan && requested.requests < agentDialogueLimits.requests;
+    console.info("AlgoVerse AI task", JSON.stringify({ traceId, stage, code: errorCode ?? "failed", elapsedMs: Date.now() - started }));
     return update(claimed, { dialogue: { ...requested, activeUntil: undefined,
       cooldown: cooldownFrom(error, credentials),
-      errorCode: signal.aborted ? "cancelled" : deadline.aborted ? "timeout" : error instanceof AIRequestError ? error.code : undefined,
-      error: deadline.aborted && !signal.aborted ? "本次回复超时。可重试。"
+      errorCode,
+      error: errorCode === "timeout" && resumable ? "生成实验方案超时，已保留当前进度，可重试。"
+        : errorCode === "timeout" && stage === "plan" ? "生成实验方案超时。"
+        : errorCode === "timeout" && deadline.aborted ? "本次回复超时。可重试。"
         : signal.aborted ? "请求已取消。可重试。" : error instanceof AIRequestError ? error.message : "回复失败。请重试。" } });
   } finally {
     release();
@@ -461,18 +511,25 @@ export async function decideAgentTask(task: AgentTask, credentials: AICredential
   let response;
   const deadline = AbortSignal.timeout(leaseMs - 5000);
   const { signal, release } = trackModelRequest(key, credentials.signal);
+  const traceId = randomUUID();
+  const started = Date.now();
+  const stage = "analysis";
+  const catalog = credentials.selection.provider === "deepseek" ? compactAgentCatalog(agentTools) : { tools: agentTools };
   try {
     response = await requestAIJson<Decision>({ ...credentials, signal: AbortSignal.any([signal, deadline]) }, {
-      operation: "experiment_agent", instructions: `${instructions}\n${stageInstructions}`, maxTokens: agentLimits.outputTokens,
+      operation: "experiment_agent", instructions: `${instructions}\n${stageInstructions}${"sharedInputSchema" in catalog ? sharedSchemaInstruction : ""}`,
+      maxTokens: agentLimits.outputTokens, trace: { id: traceId, stage },
       input: {
-        ...decisionContext(task, true), tools: agentTools, remainingBatch, lastError: task.error,
+        ...decisionContext(task, true), ...catalog, remainingBatch, lastError: task.error,
       },
       validate: (value) => validateDecision(value, task, remainingBatch),
     });
   } catch (error) {
+    const errorCode = signal.aborted ? "cancelled" : deadline.aborted ? "timeout" : error instanceof AIRequestError ? error.code : undefined;
+    console.info("AlgoVerse AI task", JSON.stringify({ traceId, stage, code: errorCode ?? "failed", elapsedMs: Date.now() - started }));
     return update(claimed, { phase: "ai-error", leaseUntil: undefined,
       cooldown: cooldownFrom(error, credentials),
-      errorCode: deadline.aborted && !signal.aborted ? "timeout" : error instanceof AIRequestError ? error.code : undefined,
+      errorCode,
       error: deadline.aborted && !signal.aborted ? "本次分析超时。可重试。"
         : error instanceof AIRequestError ? error.message : "分析失败。请重试。" });
   } finally {
@@ -519,13 +576,19 @@ export async function approveAgentTools(task: AgentTask) {
   const claimed = await update(task, { phase: "running", steps, leaseUntil: Date.now() + leaseMs, error: undefined, errorCode: undefined });
   const runs = [...task.runs];
   let pending = task.pending;
+  const traceId = randomUUID();
+  const started = Date.now();
+  let code = "ok";
   try {
     for (const call of task.pending) {
       runs.push(await callAgentTool(claimed, call));
       pending = pending.slice(1);
     }
   } catch {
+    code = "tool_error";
     return update(claimed, { phase: "tool-error", runs, pending, leaseUntil: undefined, error: "工具运行失败。可重试。" });
+  } finally {
+    console.info("AlgoVerse AI task", JSON.stringify({ traceId, stage: "run", code, elapsedMs: Date.now() - started }));
   }
   return update(claimed, { phase: "observe", runs, pending: [], leaseUntil: undefined });
 }

@@ -29,7 +29,7 @@ type TemporaryAI = Preferences & {
 const storageKey = "algoverse-ai-model-preferences";
 const connectionRoute = "/api/ai/connection";
 const defaults: Preferences = {
-  provider: "deepseek", mode: "platform", platformModel: "primary", choices: {}, personalModels: {}, surfaceSelection: null,
+  provider: "deepseek", mode: "byok", platformModel: "primary", choices: {}, personalModels: {}, surfaceSelection: null,
 };
 let state: TemporaryAI = defaults;
 let loading: Promise<void> | undefined;
@@ -73,7 +73,7 @@ function readPreferences(): Preferences | undefined {
     const shared = saved.surfaceSelection;
     const surfaceSelection = parseAISelection(shared?.provider, shared?.model, shared?.region);
     return {
-      mode: saved.mode === "byok" ? "byok" : "platform", provider: isAIProvider(saved.provider) ? saved.provider : "deepseek",
+      mode: saved.mode === "platform" ? "platform" : "byok", provider: isAIProvider(saved.provider) ? saved.provider : "deepseek",
       platformModel: isPlatformModel(saved.platformModel) ? saved.platformModel : "primary", choices, personalModels, surfaceSelection,
     };
   } catch { /* An unavailable or invalid preference does not affect credentials. */ }
@@ -195,7 +195,7 @@ export function setPlatformAIVerification(model: PlatformModel, verification: Co
 }
 
 function defaultChoice(snapshot: TemporaryAI, remembered?: AISelection): ModelChoice {
-  if (snapshot.mode === "platform") return { platformModel: snapshot.platformModel };
+  if (snapshot.mode === "platform" && snapshot.configuration?.platformConfigured) return { platformModel: snapshot.platformModel };
   const { provider } = snapshot;
   const saved = remembered ?? snapshot.configuration?.providers[provider]?.selection;
   if (saved) return { selection: saved };
@@ -226,7 +226,7 @@ function modelOption(choice: ModelChoice, { configuration, configurationError }:
   const hasKey = selection.provider === "qwen"
     ? saved?.selection.provider === "qwen" && saved.selection.region === selection.region : !!saved;
   if (surface === "workbench" && !profile.workbench) reason = workbenchModelMessage;
-  else if (!hasKey) reason ||= "请到 AI 设置验证 Key。";
+  else if (!hasKey) reason ||= "请去 AI 设置验证 Key。";
   else reason = saved?.authenticationFailed ? "认证失败，请检查 Key。" : "";
   const provider = aiProviders[selection.provider].label;
   return {
@@ -243,16 +243,19 @@ export function useActiveAI(): ActiveConnection | undefined {
 
 export function getAIModelChoices(snapshot: TemporaryAI, surface: Surface) {
   const preferred = snapshot.choices[surface];
+  const platformConfigured = snapshot.configuration?.platformConfigured === true;
   const { surfaceSelection } = snapshot;
   const provider = snapshot.provider === "qwen"
     ? (snapshot.personalModels.qianwen || snapshot.configuration?.providers.qianwen) ? "qianwen" : "deepseek"
     : snapshot.provider;
-  const choice = preferred && !("selection" in preferred && preferred.selection.provider === "qwen")
+  const usePreferred = preferred && ("platformModel" in preferred ? platformConfigured : preferred.selection.provider !== "qwen");
+  const choice = usePreferred
     ? preferred : surfaceSelection && surfaceSelection.provider !== "qwen"
       ? { selection: surfaceSelection }
       : defaultChoice({ ...snapshot, provider }, snapshot.personalModels[provider]);
   const current = modelOption(choice, snapshot, surface);
-  const options = (["primary", "backup"] as const).map((platformModel) => modelOption({ platformModel }, snapshot, surface));
+  const options = platformConfigured
+    ? (["primary", "backup"] as const).map((platformModel) => modelOption({ platformModel }, snapshot, surface)) : [];
   for (const provider of selectableAIProviderIds) {
     for (const { apiId } of availableAIModels(provider)) {
       const selection = parseAISelection(provider, apiId, undefined);
@@ -284,7 +287,7 @@ export function containsTemporaryAIKey(value: string) {
   return containsPossibleAIKey(value);
 }
 
-export async function fetchWithTemporaryAI(url: string, connection: ActiveConnection | undefined, body: unknown, signal?: AbortSignal) {
+export async function fetchWithTemporaryAI(url: string, connection: ActiveConnection | undefined, body: unknown, signal?: AbortSignal, accept?: "text/event-stream") {
   const headers = connection && ("selection" in connection ? { ...aiRequestHeaders(connection.selection),
     ...(connection.credentialVersion && { "X-AI-Credential-Version": connection.credentialVersion }) }
     : { "X-AI-Provider": "siliconflow", "X-AI-Platform-Model": connection.platformModel,
@@ -292,7 +295,7 @@ export async function fetchWithTemporaryAI(url: string, connection: ActiveConnec
   const deadline = AbortSignal.timeout(connection ? 85_000 : 15_000);
   const response = await fetchAI(url, {
     method: "POST", cache: "no-store", redirect: "error", signal: signal ? AbortSignal.any([signal, deadline]) : deadline,
-    headers: { "Content-Type": "application/json", ...headers },
+    headers: { "Content-Type": "application/json", ...(accept && { Accept: accept }), ...headers },
     body: JSON.stringify(body),
   });
   if (connection && "selection" in connection && [400, 401, 409].includes(response.status)) {

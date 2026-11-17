@@ -25,17 +25,19 @@ const { POST: diagnosisPOST } = await import("../src/app/api/experiments/runs/[r
 const { GET: replayGET } = await import("../src/app/api/experiments/runs/[runId]/replay/route.ts");
 const { POST: explanationPOST } = await import("../src/app/api/experiments/runs/[runId]/explanation/route.ts");
 const { POST: tutorPOST } = await import("../src/app/api/ai/tutor/route.ts");
+const { readTutorResponse } = await import("../src/lib/aiHttp.ts");
 const connectionAPI = await import("../src/app/api/ai/connection/route.ts");
 const { recentAgentTurns } = await import("../src/lib/server/experimentAgent.ts");
+const { agentOperationProgress } = await import("../src/lib/experimentAgent.ts");
 const { POST: learningPOST } = await import("../src/app/api/ai/learning/route.ts");
-const { agentTools, prepareToolCall } = await import("../src/lib/server/agentTools.ts");
+const { agentPlanningTools, agentTools, compactAgentCatalog, prepareToolCall, recognizeAgentPlan } = await import("../src/lib/server/agentTools.ts");
 const { createAIExperimentSession, createWorkbenchSession, confirmExperimentSession, runExperimentSession, getComparableExperimentRuns,
   getActiveAgentTask, getExperimentRun, getExperimentSession, runConfirmedAgentCall, getAgentTask, getTutorHistory, saveAgentTask, saveDiagnosis,
   getLearningProgress, submitKnowledgeExercise, getDiagnosis, getWorkbenchResume, getWorkbenchView } = await import("../src/lib/server/experimentRecords.ts");
 const { learningSuggestion } = await import("../src/lib/learningPath.ts");
 const { getExperimentEngine, registeredEngines } = await import("../src/lib/experimentEngines.ts");
 const { experimentQuestions, nextExperimentQuestion } = await import("../src/lib/experimentQuestions.ts");
-const { maxQuestionLength } = await import("../src/lib/experimentCreator.ts");
+const { maxCreatorHistory, maxQuestionLength } = await import("../src/lib/experimentCreator.ts");
 const { courses } = await import("../src/lib/courses.ts");
 const { experimentDomains } = await import("../src/lib/experiments/engine.ts");
 const { experimentEvidence } = await import("../src/lib/experiments/evidence.ts");
@@ -45,6 +47,7 @@ const { evidencePositionToken, parseEvidencePosition } = await import("../src/li
 const { keyframeCandidates, keyframeContext } = await import("../src/lib/experiments/keyframeEvidence.ts");
 const { explorationBaseline, verifyExplorationChange } = await import("../src/lib/server/experimentExploration.ts");
 const { schedulingWaitReport } = await import("../src/lib/experimentAgent.ts");
+const { platformQuota } = await import("../src/lib/platformAI.ts");
 const model = "Qwen/Qwen3.5-4B";
 const key = "sk-agent-fixture-secret-key";
 const tool = "cpu-scheduling";
@@ -111,7 +114,7 @@ async function setup(t, ip, respond) {
   const values = new Map();
   globalThis[scope] = { get: (name) => values.get(name), set: (name, value) => values.set(name, { value }) };
   const dir = await mkdtemp(join(tmpdir(), "algoverse-agent-test-"));
-  const environment = { ALGOVERSE_DATA_DIR: dir, SILICONFLOW_API_KEY: key, NODE_ENV: "test" };
+  const environment = { ALGOVERSE_DATA_DIR: dir, PLATFORM_AI_ENABLED: "1", SILICONFLOW_API_KEY: key, NODE_ENV: "test" };
   for (const [name, value] of Object.entries(environment)) {
     const previous = process.env[name];
     t.after(() => { if (previous === undefined) delete process.env[name]; else process.env[name] = previous; });
@@ -126,10 +129,13 @@ async function setup(t, ip, respond) {
     const upstream = JSON.parse(init.body);
     assert.equal(upstream.model, url.includes("deepseek") ? "deepseek-flash" : model);
     const input = JSON.parse(upstream.messages[1].content);
-    const expectedTokens = Object.hasOwn(input, "alreadyTried") ? 1200 : Object.hasOwn(input, "angle") ? 600
+    const expectedTokens = Object.hasOwn(input, "alreadyTried") ? 1200 : Object.hasOwn(input, "angle") ? 600 : input.observations ? 800
       : Object.hasOwn(input, "question") ? 1100 : Object.hasOwn(input, "message") || input.stage === "plan" ? 1200 : 1000;
     assert.equal(upstream.max_tokens, expectedTokens);
-    if (Object.hasOwn(input, "message")) {
+    if (Object.hasOwn(input, "message") && url.includes("deepseek")) {
+      assert.equal(input.lastExchange, undefined);
+      assert.equal(upstream.messages.length, 2);
+    } else if (Object.hasOwn(input, "message")) {
       assert.deepEqual(upstream.messages.slice(2), [
         ...input.conversation.flatMap(({ message, reply }) => [
           { role: "user", content: message }, ...(reply ? [{ role: "assistant", content: reply }] : []),
@@ -169,6 +175,267 @@ function modelReply(content, finishReason = "stop") {
   return Response.json({ model, choices: [{ finish_reason: finishReason, message: { content } }],
     usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 } });
 }
+
+const streamHeaders = { "Content-Type": "application/json", "X-AI-Provider": "deepseek", "X-AI-Model": "deepseek-v4-pro" };
+const limitQuestion = "极限中的两个重要式子";
+function askDeepSeek(payload, stream = true, model = streamHeaders["X-AI-Model"]) {
+  return tutorPOST(new Request("https://algoverse.test/api/ai/tutor", {
+    method: "POST", headers: { ...streamHeaders, "X-AI-Model": model, Authorization: "Bearer " + key, ...(stream && { Accept: "text/event-stream" }) },
+    body: JSON.stringify({ conversation: true, question: limitQuestion, ...payload }),
+  }));
+}
+
+function deepSeekEvent(delta) {
+  return { choices: [{ index: 0, delta, finish_reason: null }] };
+}
+
+function deepSeekStream(ctrl) {
+  const encoder = new TextEncoder();
+  return new Response(new ReadableStream({ start(controller) {
+    const send = (data) => {
+      // One-byte pieces split CRLF, JSON and multibyte CJK text.
+      for (const byte of encoder.encode(`data: ${data === "[DONE]" ? data : JSON.stringify(data)}\r\n\r\n`)) controller.enqueue(Uint8Array.of(byte));
+    };
+    ctrl(send, () => {
+      send({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 } });
+      send("[DONE]");
+      controller.close();
+    }, () => controller.close(), (error) => controller.error(error));
+  } }), { headers: { "Content-Type": "text/event-stream" } });
+}
+
+test("the two important limits stream before completion and save readable formulas once", { timeout: 5000 }, async (t) => {
+  const { upstreamFetch } = await setup(t, "192.0.2.56", () => assert.fail("expected SSE"));
+  const remainder = Promise.withResolvers();
+  upstreamFetch.mock.mockImplementation(async (url, init) => {
+    assert.equal(url, "https://api.deepseek.com/chat/completions");
+    const sent = JSON.parse(init.body);
+    assert.equal(sent.stream, true);
+    assert.equal(sent.reasoning_effort, "high");
+    assert.equal(sent.response_format, undefined);
+    assert.deepEqual(sent.stream_options, { include_usage: true });
+    assert.equal(sent.messages.at(-1).content, limitQuestion);
+    const input = JSON.parse(sent.messages[1].content);
+    assert.ok(input.knowledge.some(({ id }) => id === "function-limit"));
+    assert.ok(input.available.length < registeredEngines.length);
+    return deepSeekStream((send, finish) => {
+      send(deepSeekEvent({ reasoning_content: "不得出现在对话中的内容" }));
+      send(deepSeekEvent({ content: '两条公式如下。' }));
+      void remainder.promise.then(() => {
+        send(deepSeekEvent({ content: String.raw` $\lim_{x\to0}\frac{\sin x}{x}=1$。 $\lim_{x\to\infty}(1+1/x)^x=e$。` }));
+        send(deepSeekEvent({ content: '\n[[ALGOVERSE_META]] {"citations":["function-limit"]}' }));
+        finish();
+      });
+    });
+  });
+  const operationId = randomUUID();
+  const { task: draft } = await (await askDeepSeek({ action: "start", operationId })).json();
+  const payload = { agentId: draft.id, revision: draft.revision, operationId };
+  const response = await askDeepSeek(payload);
+  const first = Promise.withResolvers();
+  let visible = "";
+  const reply = readTutorResponse(response, (delta) => { visible += delta; first.resolve(); });
+  try {
+    await Promise.race([first.promise, reply.then(() => assert.fail("expected an early delta"))]);
+    assert.equal(visible, "两条公式如下。");
+    const pending = await getAgentTask(draft.id);
+    assert.equal(pending.dialogue.turns.length, 0);
+    assert.equal(pending.dialogue.operationId, operationId);
+  } finally { remainder.resolve(); }
+  const { status, task } = await reply;
+  assert.equal(status, "shared");
+  const turn = task.dialogue.turns[0];
+  assert.equal(task.dialogue.turns.length, 1);
+  assert.equal(turn.reply, '两条公式如下。 `lim(x→0) (sin x)/(x)=1`。 `lim(x→∞) (1+1/x)^x=e`。');
+  assert.equal(turn.tutor.sources[0].title, "函数极限");
+  assert.ok(!visible.includes("不得出现在对话中的内容"));
+  assert.ok(!visible.includes("ALGOVERSE_META"));
+  const json = await askDeepSeek(payload, false);
+  assert.match(json.headers.get("Content-Type"), /application\/json/);
+  assert.deepEqual((await json.json()).task, task);
+  assert.equal(upstreamFetch.mock.callCount(), 1);
+});
+
+test("a disconnected tutor stream can recover its saved reply without calling DeepSeek again", { timeout: 5000 }, async (t) => {
+  const { upstreamFetch } = await setup(t, "192.0.2.57", () => assert.fail("expected SSE"));
+  const remainder = Promise.withResolvers();
+  upstreamFetch.mock.mockImplementation(async () => deepSeekStream((send, finish) => {
+    send(deepSeekEvent({ content: '先看第一条。' }));
+    void remainder.promise.then(() => {
+      send(deepSeekEvent({ content: '再看第二条。' }));
+      finish();
+    });
+  }));
+  const operationId = randomUUID();
+  const response = await askDeepSeek({ operationId });
+  const reader = response.body.getReader();
+  try {
+    assert.match(new TextDecoder().decode((await reader.read()).value), /ready/);
+    assert.match(new TextDecoder().decode((await reader.read()).value), /先看第一条/);
+    await reader.cancel();
+    const pending = await getAgentTask(operationId);
+    assert.ok(pending.dialogue.activeUntil);
+  } finally { remainder.resolve(); }
+  for (let i = 0; i < 40; i++) {
+    if ((await getAgentTask(operationId)).dialogue.turns.length) break;
+    await new Promise((resolve) => setTimeout(resolve, 15));
+  }
+  const { task } = await (await askDeepSeek({ agentId: operationId, operationId }, false)).json();
+  assert.equal(task.dialogue.turns[0].reply, "先看第一条。再看第二条。");
+  assert.equal(task.dialogue.turns.length, 1);
+  assert.equal(upstreamFetch.mock.callCount(), 1);
+});
+
+test("tutor streaming errors never resend or save partial content", async (t) => {
+  const { upstreamFetch } = await setup(t, "192.0.2.58", () => assert.fail("expected SSE"));
+  const log = t.mock.method(console, "info", () => {});
+  const timeout = AbortSignal.timeout.bind(AbortSignal);
+  let simulateTimeout = false;
+  t.mock.method(AbortSignal, "timeout", (ms) => timeout(simulateTimeout && ms === 55_000 ? 80 : ms));
+  const scenarios = [
+    { name: "empty", message: /未返回正文/, response: () => deepSeekStream((send, finish) => { send(deepSeekEvent({ content: " " })); finish(); }) },
+    { name: "429", code: "upstream_rate_limit", response: () => new Response(null, { status: 429, headers: { "Retry-After": "1" } }) },
+    { name: "invalid SSE JSON", message: /格式有误/, response: () => new Response('data: {"choices":\n\n', { headers: { "Content-Type": "text/event-stream" } }) },
+    { name: "unexpected EOF", code: "network", response: () => deepSeekStream((send, _, close) => { send(deepSeekEvent({ content: '部分正文' })); close(); }) },
+    { name: "timeout", code: "timeout", response: () => deepSeekStream((send) => { send(deepSeekEvent({ content: '部分正文' })); }) },
+    { name: "split credential", message: /校验失败/, response: () => deepSeekStream((send, finish) => {
+      send(deepSeekEvent({ content: '测试 ' + key.slice(0, 11) }));
+      send(deepSeekEvent({ content: key.slice(11) + '。' }));
+      finish();
+    }) },
+  ];
+  for (const item of scenarios) {
+    simulateTimeout = item.name === "timeout";
+    upstreamFetch.mock.mockImplementation(async () => item.response());
+    const calls = upstreamFetch.mock.callCount();
+    let visible = "";
+    const result = await readTutorResponse(await askDeepSeek({ operationId: randomUUID() }), (delta) => { visible += delta; });
+    assert.equal(result.status, "error", item.name);
+    if (item.code) assert.equal(result.code, item.code, item.name);
+    if (item.message) assert.match(result.message, item.message);
+    if (item.name === "429") assert.equal(result.task.dialogue.cooldown.status, 429);
+    if (item.name === "empty") {
+      const entry = log.mock.calls.map(({ arguments: [label, body] }) => label === "AlgoVerse AI" ? JSON.parse(body) : null)
+        .find((event) => event?.format === "empty");
+      assert.equal(entry.upstreamStatus, 200);
+      assert.equal(entry.finishReason, "stop");
+      assert.equal(entry.contentChars, 0);
+      assert.equal(entry.outputMode, "text");
+    }
+    if (item.name === "split credential") assert.equal(visible, "测试 ");
+    assert.deepEqual(result.task.dialogue.turns, []);
+    assert.equal(upstreamFetch.mock.callCount() - calls, 1);
+  }
+});
+
+test("Flash conversation accepts ordinary text over SSE and JSON, and leaves failed drafts out of assistant history", async (t) => {
+  const flash = "deepseek-flash";
+  const { upstreamFetch } = await setup(t, "192.0.2.64", () => assert.fail("expected Flash tutor fixture"));
+  const samples = [
+    { question: "今天心情一般，跟我聊两句。", answer: "愿意聊聊今天发生的事吗？", stream: true },
+    { question: "为什么雨后土壤会有一股特殊的气味？", answer: "雨滴落到土壤上，会把其中的气味分子带到空气里。", stream: false },
+    { question: "写一个两行的 Python 交换变量示例。", answer: "可以用元组解包。\n\n\x60\x60\x60python\na, b = 1, 2\na, b = b, a\n\x60\x60\x60", stream: true },
+    { question: "用通俗语言详细讲讲图书馆如何给新书分类，并比较两种不同的分类方法。", answer: "分类可以按照书的主题。".repeat(200), stream: false },
+    { question: "换一个话题，怎么让一封给老师的邮件更礼貌但不啰嗦？", answer: "先说明来意，再用一句话感谢。", stream: true },
+    { question: "你记得我刚才问的邮件怎么写吗？", answer: "记得。你想让给老师的邮件礼貌又简洁。", stream: false },
+    { question: "给我一个简单的 JSON 数据示例。", answer: '{"city":"南京","open":true}', stream: true },
+  ];
+  const prior = [];
+  let index = 0;
+  let task;
+  let sendInterrupted = false;
+  const failedQuestion = "海水为什么会涨潮？";
+  upstreamFetch.mock.mockImplementation(async (_url, init) => {
+    const sent = JSON.parse(init.body);
+    assert.equal(sent.model, flash);
+    assert.equal(sent.response_format, undefined);
+    assert.equal(sent.thinking.type, "disabled");
+    assert.equal(sent.max_tokens, 1100);
+    const history = sent.messages.slice(2, -1);
+    assert.ok(history.filter(({ role }) => role === "assistant").every(({ content }) => prior.includes(content)));
+    assert.ok(!history.some(({ role, content }) => role === "assistant" && content.includes("未完成的草稿")));
+    if (sendInterrupted) {
+      assert.equal(sent.messages.at(-1).content, failedQuestion);
+      return deepSeekStream((send, _, close) => { send(deepSeekEvent({ content: "未完成的草稿" })); close(); });
+    }
+    const sample = samples[index];
+    assert.equal(sent.messages.at(-1).content, sample.question);
+    if (index === 3) assert.ok(history.some(({ role, content }) => role === "user" && content === failedQuestion));
+    if (sample.stream) return deepSeekStream((send, finish) => {
+      const content = index === 4 ? sample.answer + "\n[[ALGOVERSE_META]] {invalid optional metadata}" : sample.answer;
+      send(deepSeekEvent({ content }));
+      finish();
+    });
+    // A valid answer can still be used if the upstream JSON has no usage metadata.
+    return Response.json({ choices: [{ finish_reason: "stop", message: { content: sample.answer } }] });
+  });
+  async function send(question, stream) {
+    return readTutorResponse(await askDeepSeek({ question, agentId: task?.id, revision: task?.revision,
+      operationId: randomUUID() }, stream, flash), () => {});
+  }
+  for (const sample of samples) {
+    if (index === 3) {
+      sendInterrupted = true;
+      const failed = await send(failedQuestion, true);
+      assert.equal(failed.status, "error");
+      assert.equal(failed.code, "network");
+      assert.equal(failed.task.dialogue.turns.length, prior.length);
+      task = failed.task;
+      sendInterrupted = false;
+    }
+    const result = await send(sample.question, sample.stream);
+    assert.equal(result.status, "shared");
+    task = result.task;
+    assert.equal(task.dialogue.turns.at(-1).reply, sample.answer);
+    prior.push(sample.answer);
+    index++;
+  }
+  assert.equal(upstreamFetch.mock.callCount(), samples.length + 1);
+  assert.equal(task.dialogue.turns.filter(({ reply }) => reply !== undefined).length, samples.length);
+});
+
+test("plain tutor keeps an explicit experiment handoff separate from ordinary streamed text", async (t) => {
+  const { upstreamFetch } = await setup(t, "192.0.2.66", () => assert.fail("expected tutor and plan fixtures"));
+  upstreamFetch.mock.mockImplementation(async (_url, init) => {
+    const sent = JSON.parse(init.body);
+    const input = JSON.parse(sent.messages[1].content);
+    if (input.stage === "plan") {
+      assert.deepEqual(sent.response_format, { type: "json_object" });
+      return modelReply(JSON.stringify(sortingPlan));
+    }
+    assert.equal(sent.response_format, undefined);
+    return deepSeekStream((send, finish) => {
+      send(deepSeekEvent({ content: "[[ALGOVERSE_" }));
+      send(deepSeekEvent({ content: 'PLAN]]\n{"action":"plan","focus":{"topic":"排序","goal":"比较排序的操作次数"}}' }));
+      finish();
+    });
+  });
+  const deltas = [];
+  const result = await readTutorResponse(await askDeepSeek({ question: "请设计和比较两种排序方法的实验。", operationId: randomUUID() }),
+    (delta) => deltas.push(delta));
+  assert.equal(result.status, "shared");
+  assert.equal(result.task.phase, "confirm");
+  assert.ok(result.workbench);
+  assert.deepEqual(deltas, []);
+  assert.deepEqual(result.task.runs, []);
+  assert.equal(upstreamFetch.mock.callCount(), 2);
+});
+
+test("an expired tutor operation can be recovered by ID without resending", async (t) => {
+  const { upstreamFetch } = await setup(t, "192.0.2.65", () => assert.fail("must not resend an expired operation"));
+  const operationId = randomUUID();
+  const question = "地铁里的扶梯为什么有的上得慢？";
+  const { task: draft } = await (await askDeepSeek({ action: "start", operationId, question }, false)).json();
+  const expired = await saveAgentTask(draft, { dialogue: {
+    turns: [], requests: 1, pending: question, operationId, activeUntil: Date.now() - 10,
+  } });
+  const response = await askDeepSeek({ question, agentId: expired.id, revision: expired.revision, operationId });
+  const result = await response.json();
+  assert.equal(result.status, "error");
+  assert.match(result.message, /中断/);
+  assert.equal(result.task.revision, expired.revision);
+  assert.equal(upstreamFetch.mock.callCount(), 0);
+});
 
 for (const surface of ["tutor", "workbench", "analysis"]) {
   test(`${surface} saves an in-flight result after disconnect and reuses it on reconnect`, async (t) => {
@@ -348,10 +615,13 @@ test("an expired approval can recover its saved Run at the step limit", async (t
 });
 
 test("BYOK settings drive Tutor and real workbench runs for current and legacy providers across retries", async (t) => {
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now);
   const limits = globalThis.algoVerseAILimits;
   delete globalThis.algoVerseAILimits;
   t.after(() => { globalThis.algoVerseAILimits = limits; });
   const { post, upstreamFetch, values } = await setup(t, "192.0.2.87", () => assert.fail("use personal fixtures"));
+  delete process.env.PLATFORM_AI_ENABLED;
   const profiles = [
     { provider: "deepseek", model: "deepseek-flash", endpoint: "api.deepseek.com", key: "sk-byok-integration-deepseek" },
     { provider: "qwen", model: "qwen3.8-flash", endpoint: "dashscope-intl.aliyuncs.com", key: "sk-byok-integration-qwen",
@@ -367,7 +637,7 @@ test("BYOK settings drive Tutor and real workbench runs for current and legacy p
     assert.equal(body.model, profile.model);
     assert.ok(!init.body.includes(profile.key));
     const input = JSON.parse(body.messages[1].content);
-    calls.push({ model: body.model, input, roles: body.messages.map(({ role }) => role) });
+    calls.push({ model: body.model, input, body });
     if (profile.provider === "qianwen" && input.message?.includes("解释实测") && !interrupted) {
       interrupted = true;
       throw new TypeError("socket closed");
@@ -392,6 +662,7 @@ test("BYOK settings drive Tutor and real workbench runs for current and legacy p
     assert.equal(saved.status, 200);
     cookie = saved.headers.get("Set-Cookie").split(";")[0];
     const publicConfig = await connectionAPI.GET(new Request("https://algoverse.test/api/ai/connection", { headers: { Cookie: cookie } })).json();
+    assert.equal(publicConfig.platformConfigured, false);
     const selected = { ...modelHeaders, Cookie: cookie, "X-AI-Credential-Version": publicConfig.providers[provider].credentialVersion };
     const question = "讲一下排序的操作次数。";
     const ask = async (payload) => (await tutorPOST(new Request("https://algoverse.test/api/ai/tutor", {
@@ -405,10 +676,26 @@ test("BYOK settings drive Tutor and real workbench runs for current and legacy p
       assert.equal(calls.length, before);
       assert.ok(values.get("algoverse_visitor"));
     }
-    for (const prompt of [question, "再举一个例子。"]) {
+    const prompts = provider === "deepseek"
+      ? [question, ...Array.from({ length: 19 }, (_, index) => `再举第 ${index + 1} 个例子。`)]
+      : [question, "再举一个例子。"];
+    for (const prompt of prompts) {
       const body = { question: prompt, agentId: tutorTask.id, revision: tutorTask.revision, operationId: randomUUID() };
       const result = await ask(body);
       assert.equal(result.status, "shared");
+      const sent = calls.at(-1);
+      if (provider === "deepseek") {
+        assert.equal(sent.input.question, undefined);
+        const prior = tutorTask.dialogue?.turns.slice(-maxCreatorHistory) ?? [];
+        assert.deepEqual(sent.body.messages.slice(2).map(({ role, content }) => [role, content]),
+          [...prior.flatMap(({ message, reply }) => [["user", message], ["assistant", reply]]), ["user", prompt]]);
+        if (prompt === prompts.at(-1)) {
+          const [system, inputMessage, ...dialogue] = sent.body.messages;
+          const before = { ...sent.body, messages: [system, { ...inputMessage, content: JSON.stringify({ question: prompt, ...sent.input }) }, ...dialogue] };
+          const bytes = (value) => Buffer.byteLength(JSON.stringify(value));
+          t.diagnostic(`Tutor round 20: ${bytes(before)} -> ${bytes(sent.body)} UTF-8 bytes`);
+        }
+      }
       const before = calls.length;
       assert.equal((await ask(body)).task.revision, result.task.revision);
       assert.equal(calls.length, before);
@@ -417,6 +704,11 @@ test("BYOK settings drive Tutor and real workbench runs for current and legacy p
     }
 
     const draft = (await post("start", null, { goal: "比较冒泡和快排", operationId: randomUUID() })).task;
+    const before = calls.length;
+    const oldRequest = await post("message", draft, { message: "比较冒泡和快排" });
+    assert.equal(oldRequest.http, 503);
+    assert.match(oldRequest.message, /平台服务暂不可用/);
+    assert.equal(calls.length, before);
     const planned = (await post("message", draft, { message: "比较冒泡和快排", operationId: randomUUID() }, selected)).task;
     assert.equal(planned.phase, "confirm");
     assert.equal(planned.dialogue.turns.at(-1).model, model);
@@ -431,13 +723,25 @@ test("BYOK settings drive Tutor and real workbench runs for current and legacy p
     assert.deepEqual(analyzed.runs.map(({ id }) => id), [run.id]);
     assert.equal(analyzed.dialogue.turns.at(-1).action, "explain");
     assert.equal(calls.at(-1).input.selectedRound, 1);
-    assert.ok(calls.at(-1).roles.includes("assistant"));
+    const sent = calls.at(-1);
+    if (provider === "deepseek") {
+      assert.equal(sent.body.messages.length, 2);
+      assert.equal(sent.input.conversation.at(-1).message, "比较冒泡和快排");
+      const [system, inputMessage] = sent.body.messages;
+      const { conversation, focus, message } = sent.input;
+      const lastExchange = conversation.at(-1);
+      const before = { ...sent.body, messages: [system, { ...inputMessage, content: JSON.stringify({ ...sent.input, lastExchange }) },
+        ...conversation.flatMap(({ message, reply }) => [{ role: "user", content: message }, ...(reply ? [{ role: "assistant", content: reply }] : [])]),
+        { role: "user", content: `Resolve the following request using the conversation. Inherit the exact subject and methods when omitted.\n${JSON.stringify({ context: { focus, lastExchange }, message })}` }] };
+      const bytes = (value) => Buffer.byteLength(JSON.stringify(value));
+      t.diagnostic(`Workbench intent with history: ${bytes(before)} -> ${bytes(sent.body)} UTF-8 bytes`);
+    } else assert.ok(sent.body.messages.some(({ role }) => role === "assistant"));
     assert.equal(analyzed.dialogue.turns.at(-1).model, model);
   }
   assert.equal(interrupted, true);
   assert.equal(calls.filter(({ model, input }) => model === "qwen3.7-plus" && input.message?.includes("解释实测")).length, 2);
   assert.deepEqual(tutorTask.dialogue.turns.map((turn) => turn.model),
-    ["deepseek-flash", "deepseek-flash", "qwen3.8-flash", "qwen3.8-flash", "qwen3.7-plus", "qwen3.7-plus"]);
+    [...Array(20).fill("deepseek-flash"), "qwen3.8-flash", "qwen3.8-flash", "qwen3.7-plus", "qwen3.7-plus"]);
 });
 
 test("a long conversation keeps recent full turns within the model context budget", () => {
@@ -1575,7 +1879,8 @@ test("a free quota pause preserves a pending plan and retries only the planning 
     return { action: "answer", observation: "你好。" };
   });
   let task = (await post("start", null, { goal: "你好" })).task;
-  for (let i = 0; i < 5; i++) task = (await post("message", task, { message: "你好" })).task;
+  const perMinute = Math.min(platformQuota.visitorPerMinute, platformQuota.totalPerMinute);
+  for (let i = 1; i < perMinute; i++) task = (await post("message", task, { message: "你好" })).task;
   task = (await post("message", task, { message: experiment })).task;
   assert.deepEqual([classified, planned], [1, 0]);
   assert.equal(task.dialogue.pending, experiment);
@@ -1597,37 +1902,125 @@ test("a free quota pause preserves a pending plan and retries only the planning 
   assert.equal(resumed.dialogue.cooldown, undefined);
   assert.equal(resumed.phase, "confirm");
   assert.equal(await getExperimentRun(resumed.pending[0].id), null);
+  const quota = structuredClone(globalThis.algoVersePlatformQuota);
+  const ran = (await post("approve", resumed)).task;
+  assert.equal(ran.runs.length, 1);
+  assert.equal((await post("status", ran)).http, 200);
+  assert.equal((await post("sorting-replay", ran, { runId: ran.runs[0].id })).http, 200);
+  assert.deepEqual(globalThis.algoVersePlatformQuota, quota);
 });
 
-test("the sixth personal-key instruction can both classify and plan", async (t) => {
+test("personal workbench plans and explains multiple real runs after the old minute limits", async (t) => {
+  const now = Date.now();
+  t.mock.method(Date, "now", () => now);
   const previous = globalThis.algoVerseAILimits;
   delete globalThis.algoVerseAILimits;
   t.after(() => { globalThis.algoVerseAILimits = previous; });
   const experiment = "比较冒泡排序和快速排序。";
+  const secondExperiment = "用另一组数据比较排序。";
   const headers = { "X-AI-Provider": "deepseek", "X-AI-Model": "deepseek-flash", Authorization: `Bearer ${key}` };
-  const { post, upstreamFetch } = await setup(t, "192.0.2.49", (input) => {
-    if (input.stage === "plan") return sortingPlan;
-    if (input.message === experiment) return { action: "plan", focus: { topic: "排序", goal: "比较操作次数" } };
+  const planning = Promise.withResolvers();
+  const finishPlan = Promise.withResolvers();
+  let blankPlanAttempts = 2;
+  const { post, upstreamFetch, values } = await setup(t, "192.0.2.49", async (input) => {
+    if (input.stage === "plan") {
+      if (input.request === secondExperiment) {
+        planning.resolve();
+        await finishPlan.promise;
+        return { ...sortingPlan, calls: [{ tool: "sorting", parameters: { goalLabel: "比较排序", values: [7, 3, 4, 2] } }] };
+      }
+      if (blankPlanAttempts > 0) {
+        blankPlanAttempts--;
+        return modelReply(" ");
+      }
+      return sortingPlan;
+    }
+    if (input.message === experiment || input.message === secondExperiment) return { action: "plan", focus: { topic: "排序", goal: "比较操作次数" } };
+    if (input.message === "解释实测") {
+      return { action: "explain", observation: "比较次数见实测。", evidence: [`r${input.selectedRound}-r${input.selectedRound}-comparisons`] };
+    }
+    if (input.observations) return { metric: input.observations[0].id, next: input.steps[0].id };
     return { action: "answer", observation: "你好。" };
   });
   let task = (await post("start", null, { goal: "你好" }, headers)).task;
-  for (let i = 0; i < 5; i++) task = (await post("message", task, { message: "你好" }, headers)).task;
+  assert.equal(upstreamFetch.mock.callCount(), 0);
+  for (let i = 0; i < 13; i++) {
+    task = (await post("message", task, { message: "你好" }, headers)).task;
+    assert.equal(task.dialogue.turns.length, i + 1);
+  }
   task = (await post("message", task, { message: experiment }, headers)).task;
+  const taskId = task.id;
+  assert.match(task.dialogue.error, /未返回正文/);
+  assert.equal(task.dialogue.pending, experiment);
+  assert.equal(task.dialogue.turns.length, 13);
+  assert.equal(task.runs.length, 0);
+  const beforeRecovery = upstreamFetch.mock.callCount();
+  task = (await post("retry-message", task, {}, headers)).task;
+  assert.equal(task.id, taskId);
+  assert.equal(upstreamFetch.mock.callCount(), beforeRecovery + 1);
+  assert.equal(task.dialogue.turns.filter(({ message }) => message === experiment).length, 1);
   assert.equal(task.phase, "confirm");
-  assert.equal(upstreamFetch.mock.callCount(), 7);
   assert.equal(task.dialogue.cooldown, undefined);
   assert.equal(await getExperimentRun(task.pending[0].id), null);
+  const planCalls = upstreamFetch.mock.callCount();
+  task = (await post("approve", task)).task;
+  assert.equal(task.runs.length, 1);
+  assert.equal((await post("sorting-replay", task, { runId: task.runs[0].id })).http, 200);
+  assert.equal(upstreamFetch.mock.callCount(), planCalls);
+  task = (await post("message", task, { message: "解释实测", selectedRunId: task.runs[0].id }, headers)).task;
+  assert.equal(task.dialogue.turns.at(-1).action, "explain");
 
-  task = (await post("message", task, { message: "修改方案" }, headers)).task;
-  assert.match(task.dialogue.error, /请求太频繁/);
-  assert.equal(task.dialogue.pending, "修改方案");
-  assert.equal(upstreamFetch.mock.callCount(), 7);
+  const operationId = randomUUID();
+  const owner = values.get("algoverse_visitor");
+  const nextPlan = post("message", task, { message: secondExperiment, operationId }, headers);
+  await Promise.race([planning.promise, nextPlan.then(() => assert.fail("The second plan did not reach the provider"))]);
+  try {
+    const duplicate = await post("message", task, { message: secondExperiment, operationId }, headers);
+    assert.equal(duplicate.task.id, task.id);
+    assert.equal(duplicate.task.dialogue.operationId, operationId);
+    const conflict = await post("message", duplicate.task, { message: "另一条指令", operationId: randomUUID() }, headers);
+    assert.equal(conflict.http, 409);
+    assert.equal(conflict.message, "当前请求还在处理。");
+    values.clear();
+    assert.equal((await post("status", task)).http, 404);
+    const other = (await post("start", null, { goal: "独立访客的问题" }, headers)).task;
+    assert.notEqual(other.id, task.id);
+    const reply = (await post("message", other, { message: "你好" }, headers)).task;
+    assert.equal(reply.dialogue.turns.length, 1);
+  } finally {
+    values.set("algoverse_visitor", owner);
+    finishPlan.resolve();
+  }
+  task = (await nextPlan).task;
+  assert.equal(task.phase, "confirm");
+  assert.equal(task.dialogue.turns.filter((turn) => turn.operationId === operationId).length, 1);
+  task = (await post("approve", task)).task;
+  assert.equal(task.runs.length, 2);
+  task = (await post("message", task, { message: "解释实测", selectedRunId: task.runs[1].id }, headers)).task;
+  assert.equal(task.dialogue.turns.at(-1).action, "explain");
+  assert.equal(new Set(task.runs.map(({ id }) => id)).size, 2);
+  assert.equal(upstreamFetch.mock.callCount(), 22);
+  for (const [index, { id: runId }] of task.runs.entries()) {
+    const diagnose = () => diagnosisPOST(new Request(`https://algoverse.test/api/experiments/runs/${runId}/diagnosis`, {
+      method: "POST", headers: { "Content-Type": "application/json", ...headers }, body: "{}",
+    }), { params: Promise.resolve({ runId }) });
+    const response = await diagnose();
+    assert.equal(response.status, 200);
+    const { diagnosis } = await response.json();
+    assert.equal(diagnosis.runId, runId);
+    assert.equal(diagnosis.model, "deepseek-flash");
+    assert.equal((await diagnose()).status, 200);
+    assert.equal(upstreamFetch.mock.callCount(), 23 + index);
+  }
+  assert.ok(upstreamFetch.mock.calls.every(({ arguments: [url] }) => url === "https://api.deepseek.com/chat/completions"));
+  assert.equal(globalThis.algoVersePlatformQuota, undefined);
 });
 
-test("an upstream cooldown on analysis leaves saved runs and the pending instruction intact", async (t) => {
+test("a personal provider 429 pauses analysis and preserves the saved run", async (t) => {
   let now = Date.now();
   t.mock.method(Date, "now", () => now);
   let attempt = 0;
+  const headers = { "X-AI-Provider": "deepseek", "X-AI-Model": "deepseek-flash", Authorization: `Bearer ${key}` };
   const { post } = await setup(t, "192.0.2.48", (input) => {
     if (!input.runs.length) return sortingPlan;
     if (++attempt === 1) return new Response(null, { status: 429, headers: { "Retry-After": "8" } });
@@ -1635,20 +2028,284 @@ test("an upstream cooldown on analysis leaves saved runs and the pending instruc
     return { action: "explain", observation: "比较次数见实测。", evidence: ["r1-r1-comparisons"] };
   });
   let task = (await post("start", null, { goal: "比较排序。" })).task;
-  task = (await post("message", task, { message: "比较排序。" })).task;
+  task = (await post("message", task, { message: "比较排序。" }, headers)).task;
   task = (await post("approve", task)).task;
   const runId = task.runs[0].id;
-  task = (await post("message", task, { message: "分析刚才结果", selectedRunId: runId })).task;
+  task = (await post("message", task, { message: "分析刚才结果", selectedRunId: runId }, headers)).task;
+  assert.equal(task.dialogue.errorCode, "upstream_rate_limit");
+  assert.equal(task.dialogue.error, "服务商限流。请稍后重试。");
   assert.equal(task.dialogue.cooldown.until, now + 8_000);
   assert.equal(task.dialogue.pending, "分析刚才结果");
   assert.equal(task.runs[0].id, runId);
+  const early = await post("retry-message", task, {}, headers);
+  assert.equal(early.http, 429);
+  assert.equal(early.retryAfter, 8);
+  assert.equal(attempt, 1);
   now += 8_001;
-  task = (await post("retry-message", task)).task;
+  task = (await post("retry-message", task, {}, headers)).task;
   assert.equal(task.dialogue.turns.at(-1).action, "explain");
   assert.equal(task.runs[0].id, runId);
 });
 
-test("an Agent deadline reports a timeout and retries planning without reclassifying", async (t) => {
+test("compact tool catalogs keep every planning and analysis tool, preset and schema constraint", (t) => {
+  const bytes = (value) => Buffer.byteLength(JSON.stringify(value));
+  for (const tools of [agentPlanningTools(42), agentTools]) {
+    const compact = compactAgentCatalog(tools);
+    assert.ok(compact.sharedInputSchema);
+    assert.deepEqual(compact.tools.map((entry) => ({ ...entry, inputSchema: { ...compact.sharedInputSchema, ...entry.inputSchema } })), tools);
+    assert.ok(bytes(compact) < bytes({ tools }));
+    t.diagnostic(`${tools.length} tools: ${bytes({ tools })} -> ${bytes(compact)} UTF-8 bytes`);
+  }
+});
+
+test("registered comparison names and exact examples identify a tool without treating questions as plans", () => {
+  assert.equal(recognizeAgentPlan("比较冒泡排序和快速排序。").tool, "sorting");
+  assert.equal(recognizeAgentPlan("对比 Dijkstra and A*。").tool, "pathfinding");
+  assert.equal(recognizeAgentPlan("用 page-replacement 做实验").tool, "page-replacement");
+  for (const { text, tool } of Object.values(experimentQuestions).flat()) {
+    assert.equal(recognizeAgentPlan(text).tool, tool);
+    assert.equal(recognizeAgentPlan(text).focus.defaults, "forbidden");
+  }
+  for (const text of ["什么是快速排序？", "比较冒泡排序和快速排序有什么区别？", "不要用页面置换做实验",
+    "沿用刚才的参数", "比较冒泡排序和快速排序，再比较内存占用", "帮我验证刚才的算法"])
+    assert.equal(recognizeAgentPlan(text), undefined, text);
+});
+
+test("a clear new DeepSeek experiment sends one real planning request with only the registered candidate", async (t) => {
+  const headers = { "X-AI-Provider": "deepseek", "X-AI-Model": "deepseek-flash", Authorization: `Bearer ${key}` };
+  const message = "比较冒泡排序和快速排序。";
+  const { post, upstreamFetch } = await setup(t, "192.0.2.51", (input) => {
+    assert.equal(input.stage, "plan");
+    assert.equal(input.request, message);
+    assert.deepEqual(input.tools.map(({ tool }) => tool), ["sorting"]);
+    assert.deepEqual({ ...input.sharedInputSchema, ...input.tools[0].inputSchema }, agentTools.find(({ tool }) => tool === "sorting").inputSchema);
+    return sortingPlan;
+  });
+  let task = (await post("start", null, { goal: message })).task;
+  const operationId = randomUUID();
+  const response = await post("message", task, { message, operationId }, headers);
+  assert.equal(response.task.phase, "confirm");
+  assert.equal(response.task.dialogue.requests, 1);
+  assert.equal(await getExperimentRun(response.task.pending[0].id), null);
+  assert.equal((await post("message", task, { message, operationId }, headers)).task.revision, response.task.revision);
+  assert.equal(upstreamFetch.mock.callCount(), 1);
+  task = (await post("approve", response.task)).task;
+  assert.equal(task.runs.length, 1);
+  assert.deepEqual((await getExperimentRun(task.runs[0].id)).results.bubble.sorted, [1, 2, 5, 9]);
+  assert.equal(upstreamFetch.mock.callCount(), 1);
+});
+
+test("an explicit example cannot substitute a different registered tool or a default preset", async (t) => {
+  const headers = { "X-AI-Provider": "deepseek", "X-AI-Model": "deepseek-flash", Authorization: `Bearer ${key}` };
+  const { text: message } = experimentQuestions.algorithms[0];
+  for (const [ip, calls] of [["192.0.2.52", [{ tool: "pathfinding", parameters: { goalLabel: "其他实验", map: { kind: "random", difficulty: "normal" } } }]],
+    ["192.0.2.53", [{ tool: "sorting", parameters: "preset" }]]]) {
+    await t.test(ip, async (sub) => {
+      const { post, upstreamFetch } = await setup(sub, ip, (input) => {
+        assert.equal(input.stage, "plan");
+        assert.equal(input.request, message);
+        assert.equal(input.focus.defaults, "forbidden");
+        return { ...sortingPlan, calls };
+      });
+      const task = (await post("start", null, { goal: message })).task;
+      const result = (await post("message", task, { message }, headers)).task;
+      assert.match(result.dialogue.error, /格式有误/);
+      assert.deepEqual(result.pending, []);
+      assert.deepEqual(result.runs, []);
+      assert.equal(upstreamFetch.mock.callCount(), 2);
+    });
+  }
+});
+
+test("a request with prior conversational context still uses the model to resolve intent", async (t) => {
+  const headers = { "X-AI-Provider": "deepseek", "X-AI-Model": "deepseek-flash", Authorization: `Bearer ${key}` };
+  const message = "比较冒泡排序和快速排序。";
+  const greeting = "请先记住我要限制输入数据。";
+  const { post, upstreamFetch } = await setup(t, "192.0.2.54", (input) => {
+    if (input.message === greeting) return { action: "answer", observation: "请给定输入数据。" };
+    if (input.stage === "plan") {
+      assert.deepEqual(input.tools.map(({ tool }) => tool), ["sorting"]);
+      return sortingPlan;
+    }
+    assert.equal(input.message, message);
+    assert.equal(input.conversation.at(-1).message, greeting);
+    return { action: "plan", focus: { topic: "排序", goal: "比较两种排序" } };
+  });
+  let task = (await post("start", null, { goal: message })).task;
+  task = (await post("message", task, { message: greeting }, headers)).task;
+  task = (await post("message", task, { message }, headers)).task;
+  assert.equal(task.phase, "confirm");
+  assert.equal(upstreamFetch.mock.callCount(), 3);
+});
+
+test("a complex request keeps all named tool candidates and waits for confirmation", async (t) => {
+  const headers = { "X-AI-Provider": "deepseek", "X-AI-Model": "deepseek-flash", Authorization: "Bearer " + key };
+  const message = "用 [7,2,9,1,5] 比较冒泡排序和快速排序，再用 Dijkstra 观察网格上的访问节点。";
+  const { post, upstreamFetch } = await setup(t, "192.0.2.59", (input) => {
+    if (input.stage !== "plan") return { action: "plan", focus: { topic: "排序与网格寻路", goal: "观察排序和路径访问节点" } };
+    assert.deepEqual(new Set(input.tools.map(({ tool }) => tool)), new Set(["sorting", "pathfinding"]));
+    return { ...sortingPlan, calls: [...sortingPlan.calls, { tool: "pathfinding", parameters: "preset" }] };
+  });
+  const draft = (await post("start", null, { goal: message })).task;
+  const result = (await post("message", draft, { message }, headers)).task;
+  assert.equal(result.phase, "confirm");
+  assert.deepEqual(result.pending.map(({ tool }) => tool), ["sorting", "pathfinding"]);
+  assert.deepEqual(result.runs, []);
+  for (const proposal of result.pending) assert.equal(await getExperimentRun(proposal.id), null);
+  assert.equal(upstreamFetch.mock.callCount(), 2);
+});
+
+test("weak tool matches use the full catalog on the first plan", async (t) => {
+  const headers = { "X-AI-Provider": "deepseek", "X-AI-Model": "deepseek-flash", Authorization: "Bearer " + key };
+  const message = "想设计一个可重复的实验，比较不同输入如何影响结果。";
+  const { post, upstreamFetch } = await setup(t, "192.0.2.60", (input) => {
+    if (input.stage !== "plan") return { action: "plan", focus: { topic: "输入", goal: "比较输入变化带来的差异" } };
+    assert.equal(input.tools.length, agentTools.length);
+    return { action: "clarify", observation: "要比较哪个算法？" };
+  });
+  const draft = (await post("start", null, { goal: message })).task;
+  const result = (await post("message", draft, { message }, headers)).task;
+  assert.equal(result.dialogue.turns[0].action, "clarify");
+  assert.equal(upstreamFetch.mock.callCount(), 2);
+});
+
+test("a missed candidate expands the tool list once using the same saved intent", async (t) => {
+  const headers = { "X-AI-Provider": "deepseek", "X-AI-Model": "deepseek-flash", Authorization: "Bearer " + key };
+  const message = "比较冒泡排序和快速排序，并增加一种可以说明堆结构的对照。";
+  const focus = { topic: "冒泡排序与快速排序", goal: "比较排序并对照堆结构" };
+  let plans = 0;
+  let draft;
+  const { post, upstreamFetch } = await setup(t, "192.0.2.61", async (input) => {
+    if (input.stage !== "plan") return { action: "plan", focus };
+    assert.deepEqual(input.focus, focus);
+    const saved = await getAgentTask(draft.id);
+    assert.deepEqual(saved.dialogue.pendingPlan, focus);
+    if (++plans === 1) {
+      assert.deepEqual(input.tools.map(({ tool }) => tool), ["sorting"]);
+      return { action: "expand_catalog" };
+    }
+    assert.equal(input.tools.length, agentTools.length);
+    return { action: "unsupported", observation: "现有工具不能完成所需的完整对照。" };
+  });
+  draft = (await post("start", null, { goal: message })).task;
+  const result = (await post("message", draft, { message }, headers)).task;
+  assert.equal(plans, 2);
+  assert.equal(upstreamFetch.mock.callCount(), 3);
+  assert.equal(result.dialogue.requests, 3);
+  assert.equal(result.dialogue.turns[0].action, "unsupported");
+  assert.deepEqual(result.pending, []);
+  assert.deepEqual(result.runs, []);
+});
+
+test("status reads expose saved intent before planning finishes and restore the same operation after disconnect", { timeout: 5000 }, async (t) => {
+  const headers = { "X-AI-Provider": "deepseek", "X-AI-Model": "deepseek-flash", Authorization: "Bearer " + key };
+  const message = "用 [7,2,9,1,5] 比较冒泡排序和快速排序的操作次数。";
+  const operationId = randomUUID();
+  const intentStarted = Promise.withResolvers();
+  const finishIntent = Promise.withResolvers();
+  const planStarted = Promise.withResolvers();
+  const finishPlan = Promise.withResolvers();
+  const { post, upstreamFetch } = await setup(t, "192.0.2.62", async (input) => {
+    if (input.stage === "plan") {
+      planStarted.resolve();
+      return finishPlan.promise;
+    }
+    intentStarted.resolve();
+    return finishIntent.promise;
+  });
+  const draft = (await post("start", null, { goal: message })).task;
+  const browser = new AbortController();
+  let submitted = false;
+  const begin = performance.now();
+  const original = post("message", draft, { message, operationId }, headers, browser.signal).finally(() => { submitted = true; });
+  let planSeen;
+  try {
+    await Promise.race([intentStarted.promise, original.then(() => assert.fail("expected intent to be in flight"))]);
+    const identifying = (await post("status", draft)).task;
+    assert.equal(agentOperationProgress(identifying, operationId).stage, "intent");
+    assert.equal(agentOperationProgress(identifying, randomUUID()), undefined);
+    finishIntent.resolve({ action: "plan", focus: { topic: "冒泡排序与快速排序", goal: "比较同一输入的操作次数" } });
+    await Promise.race([planStarted.promise, original.then(() => assert.fail("expected planning to be in flight"))]);
+    const planning = (await post("status", draft)).task;
+    planSeen = Math.round(performance.now() - begin);
+    assert.equal(submitted, false);
+    assert.equal(agentOperationProgress(planning, operationId).stage, "plan");
+    assert.equal(planning.pending.length, 0);
+
+    browser.abort();
+    const refreshed = (await post("status", draft)).task;
+    assert.equal(agentOperationProgress(refreshed, operationId).stage, "plan");
+    assert.equal((await post("message", draft, { message, operationId }, headers)).task.revision, refreshed.revision);
+    assert.equal(upstreamFetch.mock.callCount(), 2);
+  } finally {
+    finishIntent.resolve({ action: "plan", focus: { topic: "排序", goal: "比较排序" } });
+    finishPlan.resolve(sortingPlan);
+  }
+  const result = (await original).task;
+  const restored = (await post("status", draft)).task;
+  const readySeen = Math.round(performance.now() - begin);
+  assert.equal(restored.revision, result.revision);
+  assert.equal(agentOperationProgress(restored, operationId).stage, "ready");
+  assert.equal(restored.phase, "confirm");
+  assert.equal(await getExperimentRun(restored.pending[0].id), null);
+  assert.equal(upstreamFetch.mock.callCount(), 2);
+  t.diagnostic('saved intent visible in ' + planSeen + ' ms, validated proposal in ' + readySeen + ' ms (mock upstream)');
+});
+
+test("an expired operation only resumes with a new operation ID and reuses its saved intent", async (t) => {
+  const headers = { "X-AI-Provider": "deepseek", "X-AI-Model": "deepseek-flash", Authorization: "Bearer " + key };
+  const message = "对同一组数比较冒泡排序和快速排序。";
+  const operationId = randomUUID();
+  const { post, upstreamFetch } = await setup(t, "192.0.2.63", (input) => {
+    assert.equal(input.stage, "plan");
+    return sortingPlan;
+  });
+  const draft = (await post("start", null, { goal: message })).task;
+  const expired = await saveAgentTask(draft, {
+    dialogue: { turns: [], requests: 2, pending: message, pendingRound: null, operationId, activeUntil: Date.now() - 1000,
+      pendingPlan: { topic: "冒泡排序与快速排序", goal: "比较排序操作次数" } },
+  });
+  assert.equal(agentOperationProgress((await post("status", expired)).task, operationId).stage, "interrupted");
+  assert.equal((await post("retry-message", expired, { operationId }, headers)).task.revision, expired.revision);
+  assert.equal(upstreamFetch.mock.callCount(), 0);
+  const retryId = randomUUID();
+  const retried = (await post("retry-message", expired, { operationId: retryId }, headers)).task;
+  assert.equal(agentOperationProgress(retried, retryId).stage, "ready");
+  assert.equal(agentOperationProgress(retried, operationId), undefined);
+  assert.equal(upstreamFetch.mock.callCount(), 1);
+});
+
+test("the shortened planning path saves its intent before the model and retries only the same candidate", async (t) => {
+  const timeout = AbortSignal.timeout.bind(AbortSignal);
+  let agentDeadline;
+  t.mock.method(AbortSignal, "timeout", (ms) => {
+    if (ms !== 70_000) return timeout(ms);
+    agentDeadline = new AbortController();
+    return agentDeadline.signal;
+  });
+  const headers = { "X-AI-Provider": "deepseek", "X-AI-Model": "deepseek-flash", Authorization: `Bearer ${key}` };
+  const message = "用 sorting 做实验";
+  let calls = 0;
+  const { post } = await setup(t, "192.0.2.55", (input) => {
+    assert.equal(input.stage, "plan");
+    assert.deepEqual(input.tools.map(({ tool }) => tool), ["sorting"]);
+    if (++calls === 1) {
+      agentDeadline.abort(new DOMException("Deadline exceeded", "TimeoutError"));
+      throw agentDeadline.signal.reason;
+    }
+    return sortingPlan;
+  });
+  let task = (await post("start", null, { goal: message })).task;
+  await post("message", task, { message }, headers);
+  task = (await post("status", task)).task;
+  assert.equal(task.dialogue.pendingPlan.goal, message);
+  assert.equal(task.dialogue.error, "生成实验方案超时，已保留当前进度，可重试。");
+  task = (await post("retry-message", task, {}, headers)).task;
+  assert.equal(task.phase, "confirm");
+  assert.equal(calls, 2);
+});
+
+test("an Agent deadline reports a saved timeout and retries planning without reclassifying", async (t) => {
   const timeout = AbortSignal.timeout.bind(AbortSignal);
   let deadline;
   t.mock.method(AbortSignal, "timeout", (ms) => {
@@ -1658,8 +2315,10 @@ test("an Agent deadline reports a timeout and retries planning without reclassif
   });
   let classifications = 0;
   let proposals = 0;
-  const { post } = await setup(t, "192.0.2.50", ({ stage }) => {
+  const log = t.mock.method(console, "info", () => {});
+  const { post } = await setup(t, "192.0.2.50", ({ stage, tools }) => {
     if (stage === "plan") {
+      assert.deepEqual(tools.map(({ tool }) => tool), ["sorting"]);
       if (++proposals === 1) {
         deadline.abort(new DOMException("Deadline exceeded", "TimeoutError"));
         throw deadline.signal.reason;
@@ -1667,17 +2326,27 @@ test("an Agent deadline reports a timeout and retries planning without reclassif
       return sortingPlan;
     }
     classifications++;
-    return { action: "plan", focus: { topic: "排序", goal: "比较操作次数" } };
+    return { action: "plan", focus: { topic: "冒泡排序与快速排序", goal: "比较操作次数" } };
   });
-  const prompt = "比较冒泡和快排。";
+  const headers = { "X-AI-Provider": "deepseek", "X-AI-Model": "deepseek-flash", Authorization: `Bearer ${key}` };
+  const prompt = "对同一组数比较冒泡排序和快速排序。";
   let task = (await post("start", null, { goal: prompt })).task;
-  task = (await post("message", task, { message: prompt })).task;
-  assert.equal(task.dialogue.error, "本次回复超时。可重试。");
+  task = (await post("message", task, { message: prompt }, headers)).task;
+  task = (await post("status", task)).task;
+  assert.equal(task.dialogue.error, "生成实验方案超时，已保留当前进度，可重试。");
+  assert.equal(task.dialogue.errorCode, "timeout");
+  assert.equal(task.dialogue.pendingPlan.goal, "比较操作次数");
   assert.equal(task.dialogue.pending, prompt);
   assert.equal(task.runs.length, 0);
-  task = (await post("retry-message", task)).task;
+  task = (await post("retry-message", task, {}, headers)).task;
   assert.deepEqual([classifications, proposals], [1, 2]);
   assert.equal(task.phase, "confirm");
+  const logs = log.mock.calls.map(({ arguments: [, json] }) => JSON.parse(json));
+  assert.deepEqual(logs.map(({ stage }) => stage), ["intent", "plan", "plan", "plan"]);
+  assert.equal(logs[0].traceId, logs[1].traceId);
+  assert.equal(logs[2].code, "timeout");
+  assert.notEqual(logs[2].traceId, logs[3].traceId);
+  assert.ok(!JSON.stringify(logs).includes(prompt) && !JSON.stringify(logs).includes(key));
 });
 
 test("a busy free model keeps the provider's retry time on the pending instruction", async (t) => {

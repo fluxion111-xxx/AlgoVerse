@@ -9,6 +9,7 @@ import { ExperimentRunReports } from "@/components/experiments/ExperimentRunRepo
 import { ExperimentSteps } from "@/components/experiments/ExperimentSteps";
 import { creatorObservations } from "@/lib/creatorCapabilities";
 import { learningTopicRoute } from "@/lib/curriculum";
+import { isAgentOperationId } from "@/lib/experimentAgent";
 import { experimentReviewTopics, knowledgeTopicRoute } from "@/lib/knowledge";
 import { getExperimentEngine, registeredEngines } from "@/lib/experimentEngines";
 import { experimentDomains } from "@/lib/experiments/engine";
@@ -22,7 +23,7 @@ import { runCreatorExperiment } from "../actions";
 import "./creator-flow.css";
 import "./agent-workbench.css";
 
-type WorkflowSearch = ExperimentSearch & { step?: string; engine?: string; mode?: string; guide?: string; diagnose?: string; updated?: string; agentId?: string; focus?: string; intent?: string; new?: string; historyWarning?: string; evidence?: string };
+type WorkflowSearch = ExperimentSearch & { step?: string; engine?: string; mode?: string; guide?: string; diagnose?: string; updated?: string; agentId?: string; operationId?: string; focus?: string; intent?: string; new?: string; historyWarning?: string; evidence?: string };
 type Context = Awaited<ReturnType<typeof getExperimentContext>>;
 
 export const metadata: Metadata = { title: "AI 实验创造台｜AlgoVerse" };
@@ -159,7 +160,8 @@ export default async function CreatorPage({ searchParams }: { searchParams: Prom
     const evidence = (focus ?? view?.focus) === "run" && selected
       ? params.evidence ?? (selected === view?.runId ? view?.evidence : undefined) : undefined;
     return <AgentWorkbench key={`${task?.id ?? reference?.task?.sessionId ?? "new"}:${focus ?? "default"}:${context.run?.id ?? ""}:${params.new ?? ""}`}
-      initial={task} initialFocus={focus ?? view?.focus} diagnoses={diagnoses} restoreError={restoreError} initialGuess={view?.hypothesis}
+      initial={task} initialOperationId={params.agentId === task?.id && isAgentOperationId(params.operationId) ? params.operationId : undefined}
+      initialFocus={focus ?? view?.focus} diagnoses={diagnoses} restoreError={restoreError} initialGuess={view?.hypothesis}
       initialQuestion={!task ? view?.draftQuestion ?? legacyRun?.session.question ?? reference?.workflow?.question : undefined}
       fresh={params.new === "1"} reference={reference?.task ? { ...reference.task, runId: legacyRun?.id ?? reference.task.runId } : undefined}
       referenceRun={referenceRun ?? undefined}

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { canUseAITransport } from "@/lib/aiSettings";
-import { AIResponseError, readAIResponse } from "@/lib/aiHttp";
+import { AIResponseError, readAIResponse, readTutorResponse } from "@/lib/aiHttp";
 import { formatAIRetryTime } from "@/lib/aiRateLimit";
 import { agentDialogueActive, hasAgentOperation, type AgentTask, type TutorConversationSummary } from "@/lib/experimentAgent";
 import { maxQuestionLength } from "@/lib/experimentCreator";
@@ -60,7 +60,7 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
   const [confirmClear, setConfirmClear] = useState(false);
   const [ready, setReady] = useState(false);
   const [requestText, setRequestText] = useState("");
-  const [revealedRevision, setRevealedRevision] = useState<number>();
+  const [streamedReply, setStreamedReply] = useState("");
   const [stopping, setStopping] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(initialTask?.dialogue?.error ? { kind: "error", text: initialTask.dialogue.error } : null);
   const [clock, setClock] = useState(0);
@@ -77,8 +77,8 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
   const transcriptContent = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const restored = task && agentDialogueActive(task) ? task.dialogue : undefined;
-  const activeUntil = restored?.activeUntil;
-  const restoredOperationId = restored?.operationId;
+  const activeUntil = task?.dialogue?.activeUntil;
+  const restoredOperationId = task?.dialogue?.operationId;
   const activeText = requestText || restored?.pending;
   const busy = !!activeText || stopping;
   const provider = "selection" in models.current.choice ? models.current.choice.selection.provider : "siliconflow";
@@ -155,9 +155,10 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
     const { signal } = controller;
     const expire = window.setTimeout(() => setClock(Date.now()), Math.max(0, deadline - Date.now()) + 20);
     async function poll() {
+      const last = Date.now() >= deadline;
       let wait = 1500;
       try {
-        const next = await requestAgentTask({ action: "status", id }, undefined, signal);
+        const next = await requestAgentTask({ action: "status", id }, undefined, AbortSignal.any([signal, AbortSignal.timeout(3_000)]));
         if (signal.aborted) return;
         setTask((current) => current?.id === next.id && current.revision <= next.revision ? next : current);
         const uncertain = uncertainTurn.current;
@@ -175,9 +176,9 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
       } catch {
         wait = 3000;
       }
-      if (!signal.aborted && Date.now() < deadline) timer = window.setTimeout(() => void poll(), wait);
+      if (!signal.aborted && !last) timer = window.setTimeout(() => void poll(), Math.min(wait, Math.max(0, deadline - Date.now())));
     }
-    let timer = window.setTimeout(() => void poll(), 1500);
+    let timer = window.setTimeout(() => void poll(), Math.min(1500, Math.max(0, deadline - Date.now())));
     return () => {
       controller.abort();
       window.clearTimeout(timer);
@@ -244,6 +245,7 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
     uncertainTurn.current = null;
     request?.controller.abort();
     setRequestText("");
+    setStreamedReply("");
     setStopping(true);
     try {
       const id = request?.taskId ?? task?.id;
@@ -277,6 +279,7 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
     pending.current = request;
     follow.current = true;
     setRequestText(text);
+    setStreamedReply("");
     setFeedback(null);
     try {
       const body = {
@@ -295,8 +298,10 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
       }
       const response = await fetchWithTemporaryAI("/api/ai/tutor", connection, {
         ...body, agentId: current.id, revision: current.revision,
-      }, request.controller.signal);
-      const result = await readAIResponse<{ task?: Conversation; status?: string; message?: string; code?: string; workbench?: string }>(response);
+      }, request.controller.signal, "selection" in connection && connection.selection.provider === "deepseek" ? "text/event-stream" : undefined);
+      const result = await readTutorResponse<{ task?: Conversation; status?: string; message?: string; code?: string; workbench?: string }>(response, (delta) => {
+        if (pending.current === request) setStreamedReply((text) => text + delta);
+      });
       if (pending.current !== request) return;
       if (result?.task) rememberConversation(result.task);
       if (result?.status === "pending") return;
@@ -313,7 +318,6 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
       }
       uncertainTurn.current = null;
       setQuestion("");
-      setRevealedRevision(result.task?.revision);
       if (result.workbench && result.task) router.push(agentWorkbenchLink({ agentId: result.task.id }));
     } catch (error) {
       if (pending.current !== request) return;
@@ -335,12 +339,15 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
         } else if (snapshot.dialogue?.error && snapshot.dialogue.operationId === request.operationId) {
           uncertainTurn.current = null;
           setFeedback({ kind: "error", text: snapshot.dialogue.error });
+        } else if (snapshot.dialogue?.operationId === request.operationId && agentDialogueActive(snapshot)) {
+          setFeedback(null);
         }
       }
     } finally {
       if (pending.current === request) {
         pending.current = null;
         setRequestText("");
+        setStreamedReply("");
       }
     }
   }
@@ -420,8 +427,7 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
               <div className="tutor-user-message"><span className="sr-only">你说</span><p className="tutor-question">{turn.message}</p></div>
               {(turn.reply !== undefined || turn.stopped) && <div className="tutor-assistant-message">
                 <p className="tutor-turn-label">阿洛</p>
-                {turn.reply !== undefined && <LazyTutorReply answer={turn.reply} codeBlocks={turn.tutor?.codeBlocks}
-                  reveal={task?.revision === revealedRevision && index === history.length - 1} />}
+                {turn.reply !== undefined && <LazyTutorReply answer={turn.reply} codeBlocks={turn.tutor?.codeBlocks} reveal={false} />}
                 {!!(turn.tutor?.sources.length || turn.tutor?.recommendation || (turn.action === "run" && task)) &&
                   <div className="tutor-reply-actions">
                     {!!turn.tutor?.sources.length && <div className="tutor-sources">
@@ -439,7 +445,9 @@ export function TutorConversation({ initialTask, initialHistory, initial, choice
               <div className="tutor-user-message"><span className="sr-only">你说</span><p className="tutor-question">{activeText}</p></div>
               <div className="tutor-assistant-message">
                 <p className="tutor-turn-label">阿洛</p>
-                <p className="tutor-pending" role="status"><span aria-hidden="true" />正在回答…</p>
+                {streamedReply
+                  ? <div className="tutor-answer-text" style={{ whiteSpace: "pre-wrap" }}>{streamedReply}</div>
+                  : <p className="tutor-pending" role="status"><span aria-hidden="true" />正在回答…</p>}
               </div>
             </div>}
             <p className="sr-only" role="status">{!busy && history.length ? `阿洛已回复。共 ${history.length} 轮。` : ""}</p>

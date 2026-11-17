@@ -1,4 +1,5 @@
 import { retryAfterSeconds } from "./aiRateLimit";
+import { isAIEventStream, readAIEventStream } from "./aiEventStream";
 import type { AIErrorCode } from "./aiSettings";
 
 export class AIResponseError extends Error {
@@ -63,4 +64,28 @@ export async function readAIResponse<T>(response: Response): Promise<T> {
   const retryAfter = status === 429 || status === 503 ? retryAfterSeconds(response.headers.get("Retry-After")) : undefined;
   throw new AIResponseError(message ?? fallback, status, retryAfter ?? (status === 429 && !message ? 30 : undefined),
     body?.status === "unverified", typeof body?.code === "string" ? body.code as AIErrorCode : undefined);
+}
+
+export async function readTutorResponse<T>(response: Response, onDelta: (text: string) => void): Promise<T> {
+  if (!response.ok || !response.body || !isAIEventStream(response)) return readAIResponse<T>(response);
+  const signal = responseSignals.get(response);
+  try {
+    for await (const data of readAIEventStream(response.body, signal)) {
+      const event = JSON.parse(data);
+      if (event?.type === "ready") continue;
+      if (event?.type === "delta" && typeof event.text === "string") {
+        onDelta(event.text);
+        continue;
+      }
+      if (event?.type === "result" && Number.isInteger(event.status) && event.status >= 200 && event.status <= 599) {
+        const headers = typeof event.retryAfter === "string" ? { "Retry-After": event.retryAfter } : undefined;
+        return await readAIResponse<T>(Response.json(event.body ?? null, { status: event.status, headers }));
+      }
+      throw new SyntaxError("Invalid tutor event");
+    }
+  } catch (error) {
+    if (error instanceof AIResponseError) throw error;
+    if (signal?.aborted) throw transportError(error, signal);
+  }
+  throw new AIResponseError("接收回复时断开。", 0, undefined, false, "network");
 }

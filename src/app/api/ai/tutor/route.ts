@@ -6,12 +6,12 @@ import { experimentEvidence } from "@/lib/experiments/evidence";
 import { experimentReviewTopics, getExperimentTopic, getKnowledgeTopic, knowledgeTopicRoute } from "@/lib/knowledge";
 import { searchKnowledge } from "@/lib/knowledgeSearch";
 import { agentWorkbenchLink } from "@/lib/navigation";
-import { AIRequestError, aiErrorResponse, aiJson, asObject, readAICredentials, requestAIJson, type AICredentials } from "@/lib/server/aiProvider";
-import { containsSavedAIKey } from "@/lib/server/aiCredentialSession";
+import { AIRequestError, aiErrorResponse, aiJson, asObject, readAICredentials, requestAIJson, type AICredentials, type AIStageTrace } from "@/lib/server/aiProvider";
+import { containsSavedAIKey, readCredentialSession } from "@/lib/server/aiCredentialSession";
 import { readAgentFocus, readPlanFocus, recentAgentTurns, replyToAgentMessage, type TutorResolution } from "@/lib/server/experimentAgent";
 import { createAgentTask, getAgentTask, getExperimentRun, getTopicPractice, saveAgentTask } from "@/lib/server/experimentRecords";
 import { getDeepLesson } from "@/content/lessons/index";
-import { normalizeTutorFencedReply, normalizeTutorReplyJson, readTutorCodeBlocks, requestedPythonVerbatimLine, type TutorCodeBlock } from "@/lib/tutorReply";
+import { formatTutorFormulas, maxTutorTextLength, normalizeTutorFencedReply, normalizeTutorFormulaJSON, normalizeTutorReplyJson, readPlainTutorPreview, readTutorAnswerPreview, readTutorCodeBlocks, requestedPythonVerbatimLine, splitTutorText, tutorMetaMarker, tutorPlanMarker, type TutorCodeBlock } from "@/lib/tutorReply";
 
 const tutorInstructions = [
   "你是计算机助教。解答问题、解释现象或按要求生成例题。分析代码的逻辑、边界和复杂度。不能声称已运行代码。",
@@ -43,11 +43,18 @@ function citationId(citation: unknown) {
   return typeof id === "string" ? id : null;
 }
 
+function tutorJson(text: string) {
+  try { return asObject(JSON.parse(text)); } catch { return null; }
+}
+
 function sharedReply(task: AgentTask, operationId?: string) {
   const turn = operationId ? task.dialogue?.turns.find((entry) => entry.operationId === operationId) : task.dialogue?.turns.at(-1);
   if (!turn && agentDialogueActive(task)) return aiJson({ status: "pending", task });
   if (task.dialogue?.error && (!operationId || !turn)) {
     return aiJson({ status: "error", message: task.dialogue.error, code: task.dialogue.errorCode, task });
+  }
+  if (!turn && operationId && task.dialogue?.operationId === operationId && task.dialogue.pending) {
+    return aiJson({ status: "error", message: "回复中断。可重试。", task });
   }
   if (turn?.stopped) return aiJson({ status: "stopped", task });
   const workbench = turn === task.dialogue?.turns.at(-1) && turn?.action === "run" && task.phase === "confirm"
@@ -55,7 +62,37 @@ function sharedReply(task: AgentTask, operationId?: string) {
   return aiJson({ status: "shared", task, workbench });
 }
 
+function streamTutorReply(run: (delta: (text: string) => void) => Promise<Response>) {
+  const encoder = new TextEncoder();
+  let disconnected = false;
+  return new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      const send = (event: object) => {
+        if (!disconnected) controller.enqueue(encoder.encode("data: " + JSON.stringify(event) + "\n\n"));
+      };
+      send({ type: "ready" });
+      void (async () => {
+        try {
+          const response = await run((text) => send({ type: "delta", text }));
+          send({ type: "result", status: response.status, body: await response.json() });
+        } catch (error) {
+          const response = aiErrorResponse(error);
+          send({ type: "result", status: response.status, retryAfter: response.headers.get("Retry-After"), body: await response.json() });
+        } finally {
+          if (!disconnected) controller.close();
+        }
+      })();
+    },
+    cancel() { disconnected = true; },
+  }), { headers: {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "private, no-store, no-transform",
+    "X-Accel-Buffering": "no",
+  } });
+}
+
 export async function POST(request: Request) {
+  const started = Date.now();
   try {
     const payload = asObject(await request.json().catch(() => null));
     const shared = payload?.conversation === true;
@@ -72,7 +109,8 @@ export async function POST(request: Request) {
     if (starting && (!operationId || payload.agentId !== undefined)) return aiJson({ status: "error", message: "会话请求格式有误。" }, 400);
     let task = shared ? await getAgentTask(payload.agentId ?? operationId) : null;
     if (shared && payload.agentId !== undefined && !task) return aiJson({ status: "error", message: "找不到这段对话。" }, 404);
-    if (task && !starting && !changingContext && hasAgentOperation(task, operationId)) return sharedReply(task, operationId);
+    if (task && !starting && !changingContext && operationId
+      && (task.dialogue?.operationId === operationId || hasAgentOperation(task, operationId))) return sharedReply(task, operationId);
     if (task && payload?.agentId !== undefined && task.revision !== payload.revision) {
       return aiJson({ status: "error", message: "对话已更新。请重试。", task }, 409);
     }
@@ -129,17 +167,27 @@ export async function POST(request: Request) {
       task ??= await createAgentTask(question, run?.session, run ?? undefined, { tutorContext: access, researchId: operationId });
       return aiJson({ status: "started", task });
     }
+    const streaming = shared && !!operationId && credentials.selection.provider === "deepseek"
+      && request.headers.get("accept")?.split(",").some((type) => type.trim() === "text/event-stream");
+    const plainTutor = shared && credentials.visitor === undefined;
+    const forbiddenOutput = plainTutor ? [credentials.apiKey, ...Object.values(readCredentialSession(request)?.providers ?? {}).map(({ apiKey }) => apiKey)] : [];
     const lesson = topic && getDeepLesson(topic.topic.id);
     const exercises = topic ? [...(topic.topic.teaching?.exercises ?? []), ...(lesson?.exercises ?? [])] : [];
     const practice = topic && payload?.includePractice === true
       ? await getTopicPractice(topic.topic.id, exercises.map(({ id }) => id)) : undefined;
-    async function resolve(turns: (CreatorTurn & { codeBlocks?: TutorCodeBlock[] })[], context: { focus?: AgentFocus; pendingTool?: string }, credentials: AICredentials) {
+    async function resolve(turns: (CreatorTurn & { codeBlocks?: TutorCodeBlock[] })[], context: { focus?: AgentFocus; pendingTool?: string }, credentials: AICredentials,
+      trace?: AIStageTrace, publish?: (text: string) => void) {
     const runTopic = run && getExperimentTopic(run.topicId, run.session.engineId);
     const matched = searchKnowledge(question);
     const fallback = !matched.length && turns.length ? searchKnowledge(turns.at(-1)!.question) : [];
     const review = run ? experimentReviewTopics(run.session.engineId, run.topicId) : [];
     const sources = [...new Set([...(topic ? [topic] : []), ...review, ...matched, ...fallback])].slice(0, 4);
-    const input = { question, ...(shared ? { conversation: context } : { history: turns }),
+    const relatedTools = new Set(sources.flatMap(({ topic }) => topic.experiments.map(({ engineId }) => engineId)));
+    const available = registeredEngines.filter(({ id }) => !plainTutor || relatedTools.has(id) || run?.session.engineId === id || context.pendingTool === id)
+      .map(({ id, creator }) => ({ id, title: creator.title }));
+    // The shared DeepSeek conversation already ends with this question as a user message.
+    const input = { ...(!(shared && credentials.selection.provider === "deepseek") && { question }),
+      ...(shared ? { conversation: context } : { history: turns }),
       ...(lesson && { lesson: { title: lesson.title, goals: lesson.goals, material: lesson.blocks.map((block) =>
         block.kind === "code" ? block.source : block.kind === "steps" ? block.steps.map(({ text }) => text).join("\n")
           : [block.formula, ...block.paragraphs].filter(Boolean).join("\n")).join("\n").slice(0, 2400) } }),
@@ -156,15 +204,27 @@ export async function POST(request: Request) {
         kind: topic.teaching.reference.kind, text: topic.teaching.reference.text.slice(0, 1200),
       } }),
       excerpt: topic.sections.flatMap(({ paragraphs }) => paragraphs).join("\n").slice(0, 800),
-    })), available: registeredEngines.map(({ id, creator }) => ({ id, title: creator.title })) };
+    })), available };
     const serialized = JSON.stringify(input);
     if (serialized.includes(credentials.apiKey) || containsSavedAIKey(request, serialized)) throw new AIRequestError("请先移除问题里的 Key。", 400);
 
     const requestedLine = credentials.selection.provider === "siliconflow" && credentials.selection.model === "backup"
       ? requestedPythonVerbatimLine(rawQuestion) : null;
     const explainOriginal = "平台会显示用户给出的代码。answer 只写原理和解释，不要复述任何代码。";
-    return requestAIJson<TutorResolution>(credentials, {
-      operation: "tutor",
+    const hasSecret = (text: string) => forbiddenOutput.some((key) => text.includes(key)) || containsPossibleAIKey(text);
+    let published = "";
+    const options = {
+      operation: "tutor" as const, trace,
+      ...(publish && { tutorStream: { onContent(content: string) {
+        const preview = readPlainTutorPreview(content) || readTutorAnswerPreview(content);
+        if (hasSecret(preview)) throw new AIRequestError("AI 回复校验失败。请重试。", 502);
+        // Keep an unfinished key-like suffix on the server until it can be checked.
+        const safe = preview.replace(/s(?:k(?:-[a-z0-9_.-]*)?)?$/i, "");
+        if (!safe.startsWith(published) || safe.length === published.length || !safe.trim()) return;
+        if (!published) console.info("AlgoVerse tutor stream", JSON.stringify({ traceId: trace?.id, firstAnswerMs: Date.now() - started }));
+        publish(safe.slice(published.length));
+        published = safe;
+      } } }),
       instructions: [
         ...tutorInstructions,
         ...(shared ? experimentIntent : []),
@@ -182,6 +242,7 @@ export async function POST(request: Request) {
       maxTokens: 1100,
       retryFormat: shared,
       normalizeContent: normalizeTutorReplyJson,
+      ...(shared && credentials.selection.provider === "deepseek" && { normalizeBeforeParse: normalizeTutorFormulaJSON }),
       backupTutorFormat: {
         instructions: (requestedLine !== null ? [
           "你是计算机助教。直接解释当前 question 中代码的含义，平台会原样显示代码。",
@@ -194,18 +255,19 @@ export async function POST(request: Request) {
           "有代码时，紧接着用 Markdown 三反引号代码块，打开时紧跟语言名。把代码原样写在围栏内，保留引号、反斜杠、换行及缩进。",
           "代码只写在围栏内。无代码时只输出第一行。不要追加说明。",
         ]).join("\n"),
-        normalizeContent: (content) => normalizeTutorFencedReply(content, requestedLine),
+        normalizeContent: (content: string) => normalizeTutorFencedReply(content, requestedLine),
       },
-      validate(value) {
+      validate(value: unknown, answerLimit = maxCreatorReplyLength): TutorResolution | null {
         const output = asObject(value);
+        if (plainTutor && hasSecret(JSON.stringify(value) ?? "")) return null;
         if (shared && output?.action === "plan") {
           const focus = readPlanFocus(output);
           return focus ? { action: "plan", focus } : null;
         }
         if (!output) return null;
         const rawAnswer = shared ? output.answer ?? output.observation : output.answer;
-        if (typeof rawAnswer !== "string" || rawAnswer.length > maxCreatorReplyLength) return null;
-        const answer = rawAnswer.trim();
+        if (typeof rawAnswer !== "string" || rawAnswer.length > answerLimit) return null;
+        const answer = (shared && credentials.selection.provider === "deepseek" ? formatTutorFormulas(rawAnswer) : rawAnswer).trim();
         const modelBlocks = readTutorCodeBlocks(output.codeBlocks, rawAnswer.length);
         if (!modelBlocks || (requestedLine !== null && (!answer || answer.includes("```")))) return null;
         const codeBlocks = requestedLine !== null
@@ -216,7 +278,8 @@ export async function POST(request: Request) {
             || (key === "action" && (output.action === "answer" || output.action === "clarify")))))) return null;
         if (shared && output.answer !== undefined && output.observation !== undefined && output.answer !== output.observation) return null;
         // An optional recommendation never supplies its own destination or invalidates the answer.
-        const recommendation = registeredEngines.find((engine) => engine.id === output.recommend);
+        const recommendation = available.some(({ id }) => id === output.recommend)
+          ? registeredEngines.find((engine) => engine.id === output.recommend) : undefined;
         const citations = output.citations ?? [];
         if (!shared && (!Array.isArray(citations) || citations.length > sources.length)) return null;
         const ids = Array.isArray(citations) ? citations.map(citationId) : [];
@@ -236,6 +299,38 @@ export async function POST(request: Request) {
           },
         };
       },
+    };
+    if (!plainTutor) return requestAIJson<TutorResolution>(credentials, options);
+    return requestAIJson<TutorResolution>(credentials, {
+      ...options,
+      retryFormat: false,
+      instructions: [
+        "你是计算机助教。普通问答直接用自然语言或 Markdown 回答。用代码围栏展示完整代码。公式用易读的数学符号或 LaTeX。",
+        "结合会话与 knowledge 回答。可用一般知识补充。只使用已授权的 experiment 和 practice；不要声称运行了代码或读取了未提供的实测、练习。",
+        "保留用户明确给出的参数、方法和限制。如果用户明确要求设计、创建或继续实验，才使用下面的交接格式。仅问概念、原理、结果或代码时直接回答。",
+        tutorPlanMarker + '\n{"action":"plan","focus":{"topic":"实验主题","goal":"实验目标","constraints":"用户给出的必要约束"}}',
+        '普通回复不需要元数据。如需附上知识引用、实验推荐或更新会话主题，可在正文后加一个独立的末行，使用给定的 knowledge.id 和 available.id：',
+        tutorMetaMarker + ' {"citations":["knowledge.id"],"recommend":"available.id","focus":{"topic":"主题"}}',
+      ].join("\n"),
+      parseText(content) {
+        if (hasSecret(content)) throw new AIRequestError("AI 回复校验失败。请重试。", 502);
+        if (content.startsWith(tutorPlanMarker + "\n") || content.startsWith(tutorPlanMarker + "\r\n")) {
+          const intent = tutorJson(content.slice(tutorPlanMarker.length).trim());
+          return intent?.action === "plan" ? options.validate(intent) : null;
+        }
+        // Accept a valid older answer envelope without requiring one from the model.
+        const legacy = /^[{\x60]/.test(content) ? tutorJson(normalizeTutorReplyJson(normalizeTutorFormulaJSON(content))) : null;
+        if (legacy && typeof legacy.answer === "string" && (Array.isArray(legacy.citations) || Array.isArray(legacy.codeBlocks))) {
+          const decoded = options.validate(legacy, maxTutorTextLength);
+          if (decoded?.action === "answer") return decoded;
+          if (!legacy.answer.trim()) throw new AIRequestError("AI 未返回正文，请重试。", 502);
+          return options.validate({ answer: legacy.answer }, maxTutorTextLength);
+        }
+        const { answer, metadata } = splitTutorText(content);
+        const details = metadata ? tutorJson(metadata) : null;
+        if (!answer.trim()) throw new AIRequestError("AI 未返回正文，请重试。", 502);
+        return options.validate({ answer, citations: details?.citations, recommend: details?.recommend, focus: details?.focus }, maxTutorTextLength);
+      },
     });
     }
     if (!shared) {
@@ -244,20 +339,24 @@ export async function POST(request: Request) {
       return aiJson({ status: "answer", answer: result.observation, ...result.tutor });
     }
     task ??= await createAgentTask(question, run?.session, run ?? undefined, { tutorContext: access, researchId: operationId });
-    const next = await replyToAgentMessage(task, question, credentials, operationId, undefined, {
+    const currentTask = task;
+    const reply = async (publish?: (text: string) => void) => {
+    const next = await replyToAgentMessage(currentTask, question, credentials, operationId, undefined, {
       access, run,
-      async resolve(history, context, credentials) {
+      async resolve(history, context, credentials, trace) {
         const focus = context.focus;
-        if (focus && experimentFollowUp.test(question.normalize("NFKC"))) {
+        if (!plainTutor && focus && experimentFollowUp.test(question.normalize("NFKC"))) {
           return { action: "plan", focus: { ...focus, goal: focus.goal ?? focus.topic } };
         }
         const { result, model } = await resolve(recentAgentTurns(history, maxCreatorHistory).map((turn) => ({
           question: turn.message, answer: turn.reply ?? "", codeBlocks: turn.tutor?.codeBlocks,
-        })), context, credentials);
+        })), context, credentials, trace, publish);
         return { ...result, model };
       },
     });
     return sharedReply(next, operationId);
+    };
+    return streaming ? streamTutorReply(reply) : await reply();
   } catch (error) {
     return aiErrorResponse(error);
   }
