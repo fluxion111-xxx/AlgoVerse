@@ -6,7 +6,7 @@ import { getExperimentEngine } from "@/lib/experimentEngines";
 import { aiErrorResponse, aiJson, asObject, readAICredentials, reusePendingAI, type PendingAIRequest } from "@/lib/server/aiProvider";
 import { containsSavedAIKey } from "@/lib/server/aiCredentialSession";
 import { approveAgentTools, cancelAgentTask, clarifyAgentTask, decideAgentTask, replyToAgentMessage, stopAgentAnalysis } from "@/lib/server/experimentAgent";
-import { createAgentTask, getAgentTask, getExperimentRun, getExperimentWorkflow } from "@/lib/server/experimentRecords";
+import { createAgentTask, getAgentTask, getExperimentRun, getExperimentWorkflow, recordOperationKey } from "@/lib/server/experimentRecords";
 import { adoptExploration, explorationBaseline, explorationInput, suggestExploration } from "@/lib/server/experimentExploration";
 import type { ExplorationSuggestion } from "@/lib/experiments/exploration";
 
@@ -68,7 +68,8 @@ export async function POST(request: Request) {
       const input = explorationInput(context, run, task, body.hypothesis.trim());
       if (containsKey(request, JSON.stringify(input))) return aiJson({ message: "请移除实验内容里的 Key。" }, 400);
       const credentials = readAICredentials(request, true);
-      const suggestions = await reusePendingAI(explorationRequests, JSON.stringify([task?.id, task?.revision, run.id, input.hypothesis]), credentials,
+      const key = await recordOperationKey(JSON.stringify([task?.id, task?.revision, run.session.id, run.id, input.hypothesis]));
+      const suggestions = await reusePendingAI(explorationRequests, key, credentials,
         () => suggestExploration(context, input, credentials));
       const output = JSON.stringify(suggestions);
       if (output.includes(credentials.apiKey) || containsKey(request, output)) return aiJson({ message: "建议含有敏感内容。" }, 422);

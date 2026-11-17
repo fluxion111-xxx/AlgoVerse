@@ -10,6 +10,8 @@ const maxSessions = 512;
 const lockLifetimeMs = 30_000;
 type SavedCredential = Omit<SavedAIProvider, "expiresInMs"> & { apiKey: string; expiresAt: number; revision: string };
 type CredentialSession = { id: string; providers: Partial<Record<AIProvider, SavedCredential>> };
+const legacyCookie = "algoverse_ai_session";
+const secureCookie = "__Host-algoverse_ai_session";
 
 function credentialDirectory() {
   return resolve(process.env.ALGOVERSE_DATA_DIR ?? resolve(process.cwd(), ".algoverse-data"), "ai-credentials");
@@ -52,7 +54,7 @@ function readCredential(id: string, provider: AIProvider): SavedCredential | und
     throw error;
   }
   try {
-    const decipher = createDecipheriv("aes-256-gcm", Buffer.from(id, "hex"), record.subarray(0, 12));
+    const decipher = createDecipheriv("aes-256-gcm", Buffer.from(id.slice(-64), "hex"), record.subarray(0, 12));
     decipher.setAAD(Buffer.from(provider));
     decipher.setAuthTag(record.subarray(12, 28));
     const decoded = Buffer.concat([decipher.update(record.subarray(28)), decipher.final()]);
@@ -65,7 +67,7 @@ function readCredential(id: string, provider: AIProvider): SavedCredential | und
 
 function writeCredential(path: string, id: string, provider: AIProvider, saved: SavedCredential) {
   const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", Buffer.from(id, "hex"), iv);
+  const cipher = createCipheriv("aes-256-gcm", Buffer.from(id.slice(-64), "hex"), iv);
   cipher.setAAD(Buffer.from(provider));
   const ciphertext = Buffer.concat([cipher.update(JSON.stringify(saved), "utf8"), cipher.final()]);
   const temporary = path + ".tmp";
@@ -109,11 +111,16 @@ cleanupState.algoVerseCredentialCleanup ??= setInterval(() => {
   catch { console.warn("AlgoVerse AI credential cleanup unavailable."); }
 }, 60_000).unref();
 
-function credentialSessionId(request: Request) {
-  return request.headers.get("cookie")?.match(/(?:^|;\s*)algoverse_ai_session=([a-f0-9]{64})(?:;|$)/)?.[1];
+function credentialSessionId(request: Pick<Request, "headers">) {
+  const cookie = request.headers.get("cookie");
+  if (process.env.NODE_ENV === "production") {
+    const current = cookie?.match(/(?:^|;\s*)__Host-algoverse_ai_session=(v1\.[a-f0-9]{64})(?:;|$)/)?.[1];
+    if (current) return current;
+  }
+  return cookie?.match(/(?:^|;\s*)algoverse_ai_session=([a-f0-9]{64})(?:;|$)/)?.[1];
 }
 
-export function readCredentialSession(request: Request): CredentialSession | undefined {
+export function readCredentialSession(request: Pick<Request, "headers">): CredentialSession | undefined {
   const id = credentialSessionId(request);
   if (!id) return undefined;
   const providers: CredentialSession["providers"] = {};
@@ -133,7 +140,7 @@ export function savedAICredential(request: Request, selection: AISelection) {
   return saved;
 }
 
-export function containsSavedAIKey(request: Request, value: string) {
+export function containsSavedAIKey(request: Pick<Request, "headers">, value: string) {
   const session = readCredentialSession(request);
   return !!session && Object.values(session.providers).some(({ apiKey }) => value.includes(apiKey));
 }
@@ -158,16 +165,20 @@ export function credentialMetadata(session: CredentialSession | undefined) {
 export function saveVerifiedCredential(request: Request, selection: AISelection, apiKey: string, verification: ConnectionVerification,
   original: CredentialSession | undefined, previous: SavedCredential | undefined, workspaceId?: string) {
   const provider = selection.provider;
-  const id = original?.id ?? randomBytes(32).toString("hex");
+  const production = process.env.NODE_ENV === "production";
+  const existingId = original?.id;
+  // A legacy cookie can resume existing credentials. A newly entered key needs a host-bound session.
+  const reuseSession = existingId && (!production || existingId.startsWith("v1."));
+  const id = reuseSession ? existingId : (production ? "v1." : "") + randomBytes(32).toString("hex");
   const directory = credentialDirectory();
   const path = credentialPath(id, provider);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   // A new session needs a slot. Existing sessions serialize updates independently per provider.
-  return withLock(original ? path : resolve(directory, "new-session"), () => {
+  return withLock(reuseSession ? path : resolve(directory, "new-session"), () => {
     const session = readCredentialSession(request);
     const current = session?.providers[provider];
     if (request.signal.aborted || session?.id !== original?.id || current?.revision !== previous?.revision
-      || (!session && activeSessions(directory) >= maxSessions)) return undefined;
+      || (!reuseSession && activeSessions(directory) >= maxSessions)) return undefined;
     const now = Date.now();
     const sameRegion = selection.provider !== "qwen" || (current?.selection.provider === "qwen" && current.selection.region === selection.region);
     const sameCredential = current?.apiKey === apiKey && sameRegion && current.workspaceId === workspaceId;
@@ -177,9 +188,16 @@ export function saveVerifiedCredential(request: Request, selection: AISelection,
       credentialVersion: sameCredential ? current.credentialVersion : randomUUID(),
       verifications: [...verifications, verification],
     };
+    if (session && !reuseSession) {
+      for (const other of aiProviderIds) {
+        const credential = session.providers[other];
+        if (other !== provider && credential) writeCredential(credentialPath(id, other), id, other, credential);
+      }
+    }
     writeCredential(path, id, provider, saved);
     const secure = new URL(request.url).protocol === "https:" ? "; Secure" : "";
-    const cookie = `algoverse_ai_session=${id}; Path=/api; Max-Age=${lifetimeSeconds}; HttpOnly; SameSite=Strict${secure}`;
+    const name = production ? secureCookie : legacyCookie;
+    const cookie = `${name}=${id}; Path=${production ? "/" : "/api"}; Max-Age=${lifetimeSeconds}; HttpOnly; SameSite=Strict${secure}`;
     return { session: { id, providers: { ...session?.providers, [provider]: saved } }, cookie };
   });
 }

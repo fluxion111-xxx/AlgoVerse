@@ -5,7 +5,8 @@ import { experimentEvidence } from "@/lib/experiments/evidence";
 import { aiErrorResponse, aiJson, asObject, readAICredentials, reusePendingAI, type PendingAIRequest } from "@/lib/server/aiProvider";
 import { interpretCreatorRequest } from "@/lib/server/creatorAI";
 import { generateQuickStartPlan } from "@/lib/server/experimentAI";
-import { createAIExperimentSession, getExperimentRun, getExperimentWorkflow, getQuickStart, rememberExperimentTask, saveQuickStartPlan, saveWorkflowRevision, startQuickStart } from "@/lib/server/experimentRecords";
+import { containsSavedAIKey } from "@/lib/server/aiCredentialSession";
+import { createAIExperimentSession, getExperimentRun, getExperimentWorkflow, getQuickStart, recordOperationKey, rememberExperimentTask, saveQuickStartPlan, saveWorkflowRevision, startQuickStart } from "@/lib/server/experimentRecords";
 
 const pending = new Map<string, PendingAIRequest<void>>();
 
@@ -13,19 +14,20 @@ export async function POST(request: Request) {
   const payload = asObject(await request.json().catch(() => null));
   if (payload?.mode === "quick-start") {
     if (!request.headers.get("content-type")?.startsWith("application/json")) {
-      return Response.json({ status: "error", message: "请求格式有误。" }, { status: 415 });
+      return aiJson({ status: "error", message: "请求格式有误。" }, 415);
     }
     try {
       if (payload.operation === "start") {
         const draft = await startQuickStart();
-        return Response.json({ status: "started", sessionId: draft.id }, { status: 201 });
+        return aiJson({ status: "started", sessionId: draft.id }, 201);
       }
-      if (payload.operation !== "generate") return Response.json({ status: "error", message: "步骤无效。" }, { status: 400 });
+      if (payload.operation !== "generate") return aiJson({ status: "error", message: "步骤无效。" }, 400);
       const record = await getQuickStart(payload.sessionId);
-      if (!record) return Response.json({ status: "error", message: "找不到这次体验。" }, { status: 404 });
+      if (!record) return aiJson({ status: "error", message: "找不到这次体验。" }, 404);
       if (!record.session) {
         const credentials = readAICredentials(request);
-        await reusePendingAI(pending, record.draft.id, credentials, async () => {
+        const key = await recordOperationKey(record.draft.id);
+        await reusePendingAI(pending, key, credentials, async () => {
           const { plan, model } = await generateQuickStartPlan(record.draft.question, credentials);
           if (!await saveQuickStartPlan(record.draft.id, plan, model)) throw new Error("Could not save plan");
         });
@@ -71,7 +73,7 @@ export async function POST(request: Request) {
       ...(run && { metrics: experimentEvidence(run.results) }) } : null;
     // Keep accidentally pasted credentials out of model inputs and experiment files.
     const input = JSON.stringify({ question, turns, current });
-    if (input.includes(credentials.apiKey) || containsPossibleAIKey(input)) {
+    if (input.includes(credentials.apiKey) || containsSavedAIKey(request, input) || containsPossibleAIKey(input)) {
       return aiJson({ status: "error", message: "请先移除问题里的 Key。" }, 400);
     }
 

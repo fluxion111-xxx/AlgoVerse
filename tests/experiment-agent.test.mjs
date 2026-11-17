@@ -536,6 +536,40 @@ test("workbench history reports unreadable storage and rejects writes without th
   assert.equal((await historyRequest("PUT", { id, focus: "plan" })).status, 503);
 });
 
+test("a caller-chosen visitor cookie cannot establish a new record owner", async (t) => {
+  const { values } = await setup(t, "192.0.2.93", () => assert.fail("Unexpected model request"));
+  const supplied = { value: "a".repeat(64) };
+  values.set("algoverse_visitor", supplied);
+  const created = await historyRequest("POST", { question: "独立访客的新记录" });
+  assert.equal(created.status, 201);
+  const issued = values.get("algoverse_visitor");
+  assert.notEqual(issued?.value, supplied.value);
+  assert.equal((await (await historyAPI.GET()).json()).items.length, 1);
+  values.set("algoverse_visitor", supplied);
+  assert.deepEqual((await (await historyAPI.GET()).json()).items, []);
+});
+
+test("production preserves legacy records and issues a host-bound cookie for new owners", async (t) => {
+  const { values } = await setup(t, "192.0.2.93", () => assert.fail("Unexpected model request"));
+  const created = await historyRequest("POST", { question: "已有浏览器的研究" });
+  const { id } = await created.json();
+  process.env.NODE_ENV = "production";
+  assert.equal((await (await historyAPI.GET()).json()).items[0].id, id);
+  assert.equal((await historyRequest("POST", { question: "继续写入旧记录目录" })).status, 201);
+  assert.ok(values.get("__Host-algoverse_visitor"));
+  values.delete("algoverse_visitor");
+  assert.equal((await (await historyAPI.GET()).json()).items.length, 2);
+
+  values.clear();
+  assert.equal((await historyRequest("POST", { question: "全新浏览器的研究" })).status, 201);
+  const issued = values.get("__Host-algoverse_visitor");
+  assert.ok(issued);
+  assert.equal((await (await historyAPI.GET()).json()).items.length, 1);
+  values.clear();
+  values.set("algoverse_visitor", issued);
+  assert.deepEqual((await (await historyAPI.GET()).json()).items, []);
+});
+
 test("learning advice uses the saved wrong choice and varies even when the model repeats", async (t) => {
   const ip = "192.0.2.43";
   const angles = [];
@@ -917,6 +951,64 @@ test("Agent explains an exact sorting frame without modifying the task or invoki
   assert.deepEqual(await getExperimentRun(round.id), saved);
   values.clear();
   assert.equal((await explain(body)).status, 404);
+});
+
+test("concurrent evidence explanations are isolated even when two browsers choose the same IDs", async (t) => {
+  const { post, values, upstreamFetch } = await setup(t, "192.0.2.96", () => assert.fail("Unexpected model request"));
+  const engine = getExperimentEngine("sorting");
+  const researchId = randomUUID();
+  const runId = randomUUID();
+  async function createTrial(label, input) {
+    values.clear();
+    const config = { goalLabel: label, values: input };
+    const session = await createWorkbenchSession(label, engine.id, engine.version, config);
+    assert.ok(await confirmExperimentSession(session.id));
+    assert.ok(await runExperimentSession(session.id, runId));
+    const trial = await post("start", null, { goal: label, sessionId: session.id, runId, operationId: researchId });
+    assert.equal(trial.http, 201);
+    assert.equal(trial.task.id, researchId);
+    return { sessionId: session.id, cookie: values.get("algoverse_visitor") };
+  }
+  const alice = await createTrial("甲的排序样本", [4, 3, 2, 1]);
+  const bob = await createTrial("乙的排序样本", [8, 1, 2, 3]);
+  const arrived = Promise.withResolvers();
+  const otherArrived = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  let calls = 0;
+  upstreamFetch.mock.mockImplementation(async (_url, init) => {
+    const context = JSON.parse(JSON.parse(init.body).messages[1].content);
+    const isFirst = ++calls === 1;
+    if (isFirst) {
+      arrived.resolve();
+      await release.promise;
+    } else otherArrived.resolve();
+    return modelReply(JSON.stringify({
+      token: context.evidence.token, explanation: isFirst ? "甲的实测解释。" : "乙的实测解释。",
+    }));
+  });
+  function explain({ sessionId, cookie }) {
+    values.set("algoverse_visitor", cookie);
+    return explanationPOST(new Request(`https://algoverse.test/api/experiments/runs/${runId}/explanation`, {
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer sk-fixture-shared-example",
+        "X-AI-Provider": "deepseek", "X-AI-Model": "deepseek-flash" },
+      body: JSON.stringify({ researchId, sessionId, position: "metric:comparisons" }),
+    }), { params: Promise.resolve({ runId }) });
+  }
+  const first = explain(alice);
+  await Promise.race([arrived.promise, first.then(async (response) => assert.fail(`First request returned ${response.status}`))]);
+  const second = explain(bob);
+  const deadline = AbortSignal.timeout(500);
+  await Promise.race([otherArrived.promise, new Promise((resolve) => deadline.addEventListener("abort", resolve, { once: true }))]);
+  release.resolve();
+  const [resultA, resultB] = await Promise.all([first, second].map(async (result) => {
+    const response = await result;
+    assert.equal(response.status, 200);
+    return response.json();
+  }));
+  assert.equal(calls, 2);
+  assert.equal(resultA.reference.sessionId, alice.sessionId);
+  assert.equal(resultB.reference.sessionId, bob.sessionId);
+  assert.equal(resultB.explanation, "乙的实测解释。");
 });
 
 test("result-only explanations use saved values and no frame positions", async (t) => {

@@ -5,7 +5,7 @@ import { adaptEvidenceRun } from "@/lib/experiments/runEvidence";
 import { containsSavedAIKey } from "@/lib/server/aiCredentialSession";
 import { aiErrorResponse, aiJson, asObject, assertAIRequestOrigin, readAICredentials, reusePendingAI, type PendingAIRequest } from "@/lib/server/aiProvider";
 import { explainAgentEvidence } from "@/lib/server/experimentAgent";
-import { getAgentTask, getExperimentRun } from "@/lib/server/experimentRecords";
+import { getAgentTask, getExperimentRun, recordOperationKey } from "@/lib/server/experimentRecords";
 
 const pending = new Map<string, PendingAIRequest<EvidenceExplanation>>();
 
@@ -39,7 +39,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ run
       return aiJson({ message: "证据包含敏感内容。" }, 400);
     }
     const credentials = readAICredentials(request, true);
-    const result = await reusePendingAI(pending, `${researchId}:${runId}:${evidencePositionToken(position)}`, credentials,
+    const key = await recordOperationKey(`${researchId}:${run.session.id}:${runId}:${evidencePositionToken(position)}`);
+    const result = await reusePendingAI(pending, key, credentials,
       async () => ({ reference, explanation: await explainAgentEvidence(context, credentials) }));
     return aiJson(result);
   } catch (error) {

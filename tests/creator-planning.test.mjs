@@ -11,7 +11,7 @@ const hooks = registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier === "server-only") return { shortCircuit: true, url: "data:text/javascript,export {}" };
     if (specifier === "next/headers") return { shortCircuit: true,
-      url: "data:text/javascript,export const cookies = () => globalThis[Symbol.for('algoverse.test.creatorCookies')]" };
+      url: "data:text/javascript,export const cookies = () => globalThis[Symbol.for('algoverse.test.creatorCookies')]; export const headers = () => new Headers()" };
     if (specifier === "next/navigation") return nextResolve("next/navigation.js", context);
     if (specifier.startsWith("@/")) return nextResolve(new URL(`../src/${specifier.slice(2)}.ts`, import.meta.url).href, context);
     if (specifier.startsWith("./") && !/\.[cm]?[jt]s$/.test(specifier) && context.parentURL?.includes("/src/")) {
@@ -30,6 +30,20 @@ const { experimentRunComparison } = await import("../src/lib/experiments/runComp
 const { getCourse } = await import("../src/lib/courses.ts");
 const { getExperimentTopic } = await import("../src/lib/knowledge.ts");
 hooks.deregister();
+
+test("manual experiment parameters cannot persist a pasted API key in a Run", async (t) => {
+  await setup(t, () => assert.fail("Unexpected model request"));
+  for (const label of ["sk-fixture-pasted-credential", "sk-abc.def_ghi.jkl_mno"]) {
+    const runId = randomUUID();
+    const form = new FormData();
+    form.set("engineId", "sorting");
+    form.set("runId", runId);
+    form.set("parameters", JSON.stringify({ goalLabel: label, values: [3, 1, 2] }));
+    await assert.rejects(runCreatorExperiment(form), (error) => error.digest === "NEXT_HTTP_ERROR_FALLBACK;404");
+    assert.equal(await getExperimentRun(runId), null);
+  }
+  assert.equal(globalThis[cookieScope].size, 0);
+});
 
 async function setup(t, complete) {
   const dir = await mkdtemp(join(tmpdir(), "algoverse-planning-test-"));

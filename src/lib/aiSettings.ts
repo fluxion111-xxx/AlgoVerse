@@ -106,7 +106,7 @@ export function isApiKey(value: string, provider: AIProvider = value.startsWith(
 }
 
 export function containsPossibleAIKey(value: string): boolean {
-  return /\b(?:sk-ws-[A-Za-z0-9_.-]{13,}|sk-[A-Za-z0-9_-]{16,}\b)/i.test(value);
+  return /\b(?:sk-ws-[A-Za-z0-9_.-]{13,}|sk-[A-Za-z0-9_.-]{16,}\b)/i.test(value);
 }
 
 export function isMaskedApiKey(value: string): boolean {

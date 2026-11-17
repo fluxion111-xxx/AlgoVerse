@@ -1,19 +1,27 @@
 "use server";
 
 import { notFound, redirect } from "next/navigation";
+import { headers } from "next/headers";
 import { randomBytes, randomUUID } from "node:crypto";
 import { containsPossibleAIKey } from "@/lib/aiSettings";
 import { getExperimentEngine, pathfindingEngine, type ExperimentConfig } from "@/lib/experimentEngines";
 import { agentWorkbenchLink, workflowRoute, withExperimentTask } from "@/lib/navigation";
 import { maxQuestionLength } from "@/lib/experimentCreator";
 import { getExperimentTopic } from "@/lib/knowledge";
+import { containsSavedAIKey } from "@/lib/server/aiCredentialSession";
 import { confirmExperimentSession, createWorkbenchSession, createWorkflowDraft, getExperimentRun, getExperimentWorkflow, getQuickStart, rememberExperimentTask, runExperimentSession, saveWorkbenchView, saveWorkflowRevision } from "@/lib/server/experimentRecords";
+
+async function containsExperimentKey(value: string) {
+  const platformKey = process.env.SILICONFLOW_API_KEY?.trim();
+  return containsPossibleAIKey(value) || (!!platformKey && value.includes(platformKey))
+    || containsSavedAIKey({ headers: await headers() }, value);
+}
 
 export async function saveExperimentQuestion(form: FormData): Promise<{ sessionId: string; revision: number } | { error: string }> {
   const input = form.get("question");
   const question = typeof input === "string" ? input.trim() : "";
   if (!question || question.length > maxQuestionLength) return { error: "请输入 1–300 字。" };
-  if (containsPossibleAIKey(question)) return { error: "请先移除问题里的 Key。" };
+  if (await containsExperimentKey(question)) return { error: "请先移除问题里的 Key。" };
   const id = form.get("sessionId");
   if (id !== null) {
     const current = await getExperimentWorkflow(id);
@@ -119,6 +127,7 @@ async function runConfiguredExperiment(form: FormData, lab = false, topicId?: st
     if (typeof parameters !== "string" || parameters.length > 4096 || (engine.id === pathfindingEngine.id && !validMapSeed)) notFound();
     let input: unknown;
     try { input = JSON.parse(parameters); } catch { notFound(); }
+    if (await containsExperimentKey(JSON.stringify(input))) notFound();
     const original = session?.config;
     const seed = engine.id === pathfindingEngine.id ? mapSeed
       : original && "seed" in original ? original.seed : randomBytes(4).readUInt32BE(0);

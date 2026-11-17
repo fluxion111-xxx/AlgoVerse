@@ -16,6 +16,7 @@ import { parseEvidencePosition } from "@/lib/experiments/evidencePosition";
 import { adaptEvidenceRun, referenceFor, resolveEvidence } from "@/lib/experiments/runEvidence";
 
 const visitorCookie = "algoverse_visitor";
+const secureVisitorCookie = "__Host-algoverse_visitor";
 const taskCookie = "algoverse_task";
 const workflowCookie = "algoverse_workflow";
 const agentCookie = "algoverse_agent";
@@ -57,10 +58,14 @@ function isRecordId(id: unknown): id is string {
   return typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id);
 }
 
-function recordPath(owner: string, collection: string, id: string) {
+function ownerDirectory(owner: string) {
   const root = process.env.ALGOVERSE_DATA_DIR ?? resolve(process.cwd(), ".algoverse-data");
   const ownerFolder = createHash("sha256").update(owner).digest("hex");
-  return resolve(root, ownerFolder, collection, id + ".json");
+  return resolve(root, ownerFolder);
+}
+
+function recordPath(owner: string, collection: string, id: string) {
+  return resolve(ownerDirectory(owner), collection, id + ".json");
 }
 
 async function readRecord<T>(path: string): Promise<T | null> {
@@ -94,23 +99,43 @@ async function writeOnce<T>(path: string, record: T): Promise<T> {
 
 async function visitor() {
   const jar = await cookies();
-  const value = jar.get(visitorCookie)?.value;
-  return value && /^[0-9a-f]{64}$/.test(value) ? value : null;
+  const secure = process.env.NODE_ENV === "production" ? jar.get(secureVisitorCookie)?.value : undefined;
+  // Keep existing browser histories accessible under their original directory hashes.
+  const legacy = jar.get(visitorCookie)?.value;
+  const owner = secure ?? legacy;
+  const pattern = secure === undefined ? /^[0-9a-f]{64}$/ : /^(?:v1\.)?[0-9a-f]{64}$/;
+  if (!owner || !pattern.test(owner)) return null;
+  try {
+    return (await stat(/* turbopackIgnore: true */ ownerDirectory(owner))).isDirectory() ? owner : null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
 }
 
 async function ensureVisitor() {
+  const jar = await cookies();
+  const secure = process.env.NODE_ENV === "production";
+  const name = secure ? secureVisitorCookie : visitorCookie;
   const currentOwner = await visitor();
-  const owner = currentOwner ?? randomBytes(32).toString("hex");
-  if (!currentOwner) {
-    (await cookies()).set(visitorCookie, owner, {
+  const owner = currentOwner ?? (secure ? "v1." : "") + randomBytes(32).toString("hex");
+  if (!currentOwner) await mkdir(ownerDirectory(owner), { recursive: true, mode: 0o700 });
+  if (jar.get(name)?.value !== owner) {
+    jar.set(name, owner, {
       httpOnly: true,
       sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
+      secure,
       path: "/",
       maxAge: 60 * 60 * 24 * 30,
     });
   }
   return owner;
+}
+
+export async function recordOperationKey(operation: string) {
+  const owner = await visitor();
+  if (!owner) throw new Error("Missing experiment record owner");
+  return `${owner}:${operation}`;
 }
 
 export async function rememberExperimentTask(sessionId: string, runId?: string) {

@@ -960,6 +960,39 @@ test("a request from a stale tab cannot silently use a replaced credential", asy
   }, "")), { status: 409 });
 });
 
+test("production saves a replacement credential only under a new host-bound session", async (t) => {
+  isolatePersonalLimits(t);
+  const originalEnvironment = process.env.NODE_ENV;
+  t.after(() => {
+    if (originalEnvironment === undefined) delete process.env.NODE_ENV;
+    else process.env.NODE_ENV = originalEnvironment;
+  });
+  t.mock.method(globalThis, "fetch", async (_url, init) => completion(undefined, JSON.parse(init.body).model));
+  const save = { ...deepseek(), "X-AI-Save-Credential": "1" };
+  const previous = "sk-fixture-legacy-deepseek";
+  const replacement = "sk-fixture-new-deepseek";
+  const qianwen = { "X-AI-Provider": "qianwen", "X-AI-Model": "qwen3.8-flash" };
+  process.env.NODE_ENV = "test";
+  const first = await POST(request(save, previous));
+  const legacy = first.headers.get("Set-Cookie").split(";")[0];
+  assert.equal((await POST(request({ ...qianwen, Cookie: legacy, "X-AI-Save-Credential": "1" }, "sk-ws-fixture-legacy-qianwen"))).status, 200);
+  process.env.NODE_ENV = "production";
+  assert.equal((await configurationGET(request({ Cookie: legacy }, "")).json()).providers.deepseek.selection.model, "deepseek-flash");
+  const response = await POST(request({ ...save, Cookie: legacy }, replacement));
+  assert.equal(response.status, 200);
+  const header = response.headers.get("Set-Cookie");
+  assert.match(header, /^__Host-algoverse_ai_session=v1\.[a-f0-9]{64}; Path=\/;/);
+  assert.match(header, /; HttpOnly; SameSite=Strict; Secure$/);
+  const secure = header.split(";")[0];
+  assert.ok(readAICredentials(request({ ...deepseek(), Cookie: legacy }, "")).apiKey === previous);
+  assert.ok(readAICredentials(request({ ...deepseek(), Cookie: secure }, "")).apiKey === replacement);
+  const metadata = await configurationGET(request({ Cookie: secure }, "")).json();
+  assert.ok(metadata.providers.qianwen);
+  assert.ok(!JSON.stringify(metadata).includes(replacement));
+  const copiedToLegacy = secure.replace("__Host-algoverse_ai_session=v1.", "algoverse_ai_session=");
+  assert.deepEqual((await configurationGET(request({ Cookie: copiedToLegacy }, "")).json()).providers, {});
+});
+
 test("a temporary upstream failure retries the same personal chat model", async (t) => {
   isolatePersonalLimits(t);
   let attempts = 0;
